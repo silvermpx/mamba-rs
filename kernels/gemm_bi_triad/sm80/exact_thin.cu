@@ -730,6 +730,338 @@ void nt_exact_chunk_partial_m16n16_bk16_s4(
     exact_m16n16_tile<true>(partial, A, B, bias, params);
 }
 
+// The 16 x 16 chunk partials with the planes folded by the CTA that finishes
+// a tile last: every chunk stores its plane and counts in, and the last one
+// to arrive reloads the tile's planes and adds them in ascending chunk order,
+// then scales by alpha and adds the bias, the order `splitk_reduce` adds
+// them in, so which CTA arrives last never moves a bit. The tile's counter
+// wraps back to zero on the last arrival, so the next launch finds it clear,
+// and no second launch is needed.
+template <bool B_T>
+__device__ __forceinline__ void exact_chunk_fused_m16n16(
+    float* __restrict__ out,
+    float* __restrict__ partial,
+    unsigned* __restrict__ counters,
+    const float* __restrict__ A,
+    const float* __restrict__ B,
+    const float* __restrict__ bias,
+    const ExactThinParams& params,
+    float alpha
+) {
+    exact_m16n16_tile<B_T>(partial, A, B, nullptr, params);
+    __syncthreads();
+    __shared__ bool last;
+    if (threadIdx.x == 0) {
+        const unsigned slot = blockIdx.y * gridDim.x + blockIdx.x;
+        __threadfence();
+        last = atomicInc(counters + slot, gridDim.z - 1U) == gridDim.z - 1U;
+        if (last) {
+            __threadfence();
+        }
+    }
+    __syncthreads();
+    if (!last) {
+        return;
+    }
+    // A thread folds four outputs of the tile, a quarter warp's run of 16
+    // columns at a time. All four planes' loads of a chunk issue before its
+    // additions, and the chunks unroll so the next loads overlap the adds:
+    // a serial load-then-add per plane would wait one L2 round trip per
+    // chunk in the tail of the launch. Each output still adds its planes in
+    // ascending chunk order.
+    constexpr int PerThread = EXACT_C16_BM * EXACT_C16_BN / 64;
+    const long long plane = (long long)params.m * params.ldc;
+    const int row_tile = blockIdx.y * EXACT_C16_BM;
+    const int column_tile = blockIdx.x * EXACT_C16_BN;
+    long long index[PerThread];
+    bool valid[PerThread];
+    float sum[PerThread];
+    #pragma unroll
+    for (int i = 0; i < PerThread; ++i) {
+        const int e = threadIdx.x + i * 64;
+        const int g_row = row_tile + e / EXACT_C16_BN;
+        const int g_column = column_tile + e % EXACT_C16_BN;
+        valid[i] = g_row < params.m && g_column < params.n;
+        index[i] = (long long)g_row * params.ldc + g_column;
+        sum[i] = valid[i] ? __ldcg(partial + index[i]) : 0.0f;
+    }
+    #pragma unroll 4
+    for (unsigned z = 1; z < gridDim.z; ++z) {
+        const float* source = partial + (long long)z * plane;
+        float value[PerThread];
+        #pragma unroll
+        for (int i = 0; i < PerThread; ++i) {
+            value[i] = valid[i] ? __ldcg(source + index[i]) : 0.0f;
+        }
+        #pragma unroll
+        for (int i = 0; i < PerThread; ++i) {
+            sum[i] += value[i];
+        }
+    }
+    #pragma unroll
+    for (int i = 0; i < PerThread; ++i) {
+        if (!valid[i]) {
+            continue;
+        }
+        float result = sum[i] * alpha;
+        if (bias != nullptr) {
+            result += bias[column_tile + (threadIdx.x + i * 64) % EXACT_C16_BN];
+        }
+        out[index[i]] = result;
+    }
+}
+
+extern "C" __global__ __launch_bounds__(64)
+void exact_chunk_fused_m16n16_bk16_s4(
+    float* __restrict__ out,
+    float* __restrict__ partial,
+    unsigned* __restrict__ counters,
+    const float* __restrict__ A,
+    const float* __restrict__ B,
+    const float* __restrict__ bias,
+    ExactThinParams params,
+    float alpha
+) {
+    exact_chunk_fused_m16n16<false>(out, partial, counters, A, B, bias, params, alpha);
+}
+
+extern "C" __global__ __launch_bounds__(64)
+void nt_exact_chunk_fused_m16n16_bk16_s4(
+    float* __restrict__ out,
+    float* __restrict__ partial,
+    unsigned* __restrict__ counters,
+    const float* __restrict__ A,
+    const float* __restrict__ B,
+    const float* __restrict__ bias,
+    ExactThinParams params,
+    float alpha
+) {
+    exact_chunk_fused_m16n16<true>(out, partial, counters, A, B, bias, params, alpha);
+}
+
+// The 32 x 64 tile of a whole exact chain over operands read along the
+// reduction: 128 threads, four rows by four columns per thread, 16-deep
+// slabs zero-filled past the reduction (the 16 x 16 tile's slabs, so the
+// same chain and the same padding, bit for bit), a four-stage cp.async ring
+// of 16-byte words. A is staged [row][k], as it lies in memory; B is staged
+// [column][k] for an input gradient (the weight [n][k]) and [k][column] for
+// a forward. A thread reads a row's or a column's four consecutive k as one
+// 16-byte word and folds them in ascending k, so a slab costs eight 16-byte
+// reads per 64 products and no copy is split into 4-byte pieces.
+#define EXACT_KM_BM 32
+#define EXACT_KM_BN 64
+#define EXACT_KM_BK 16
+#define EXACT_KM_STAGES 4
+#define EXACT_KM_ROW (EXACT_KM_BK + 4)
+#define EXACT_KM_B_NN_ROW (EXACT_KM_BN + 4)
+
+template <bool B_T>
+struct ExactKmStage {
+    float a[EXACT_KM_BM * EXACT_KM_ROW];
+    float b[B_T ? EXACT_KM_BN * EXACT_KM_ROW : EXACT_KM_BK * EXACT_KM_B_NN_ROW];
+};
+
+// One 16-byte word, or four 4-byte copies where the stride or the base
+// forbids the word; elements past `limit` (or a row past the edge) are
+// zero-filled.
+__device__ __forceinline__ void exact_km_copy(
+    unsigned dst, const float* src_row, int first, int limit, bool row_valid, bool vector
+) {
+    if (vector) {
+        int bytes = row_valid ? max(0, min(4, limit - first)) * 4 : 0;
+        const float* src = bytes > 0 ? src_row + first : src_row;
+        asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n"
+                     :: "r"(dst), "l"(src), "r"(bytes));
+    } else {
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            bool valid = row_valid && first + j < limit;
+            const float* src = valid ? src_row + first + j : src_row;
+            asm volatile("cp.async.ca.shared.global [%0], [%1], 4, %2;\n"
+                         :: "r"(dst + (unsigned)(j * 4)), "l"(src), "r"(valid ? 4 : 0));
+        }
+    }
+}
+
+template <bool B_T>
+__device__ __forceinline__ void exact_km_m32n64_tile(
+    float* __restrict__ C,
+    const float* __restrict__ A,
+    const float* __restrict__ B,
+    const float* __restrict__ bias,
+    const ExactThinParams& params
+) {
+    __shared__ __align__(16) ExactKmStage<B_T> stages[EXACT_KM_STAGES];
+
+    const int k_begin = blockIdx.z * params.slab;
+    const int k_len = min(params.slab, params.k - k_begin);
+    A += k_begin;
+    B += B_T ? (long long)k_begin : (long long)k_begin * params.ldb;
+    C += (long long)blockIdx.z * params.m * params.ldc;
+
+    const int row_tile = blockIdx.y * EXACT_KM_BM;
+    const int column_tile = blockIdx.x * EXACT_KM_BN;
+    const int t = threadIdx.x;
+    // Rows rg + 8i; columns cg + 16j over a transposed B, so a quarter warp
+    // reads eight consecutive staged columns, and cg * 4 + j over a forward's
+    // B, so a thread reads four consecutive columns of a staged k row.
+    const int rg = t >> 4;
+    const int cg = t & 15;
+
+    float acc[4][4];
+    #pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        const int g_column = column_tile + (B_T ? cg + 16 * j : cg * 4 + j);
+        const float seed = (bias != nullptr && g_column < params.n) ? bias[g_column] : 0.0f;
+        #pragma unroll
+        for (int i = 0; i < 4; ++i) acc[i][j] = seed;
+    }
+
+    const bool a_vector = ((params.lda & 3) == 0) && is_aligned_16(A);
+    const bool b_vector = ((params.ldb & 3) == 0) && is_aligned_16(B);
+    const int tiles = (k_len + EXACT_KM_BK - 1) / EXACT_KM_BK;
+
+    auto issue = [&](int stage, int k0) {
+        ExactKmStage<B_T>& s = stages[stage];
+        // A [32 rows x 16 k]: 128 words, one per thread.
+        {
+            const int r = t >> 2;
+            const int w = (t & 3) * 4;
+            const int g_row = row_tile + r;
+            const unsigned dst = (unsigned)__cvta_generic_to_shared(&s.a[r * EXACT_KM_ROW + w]);
+            exact_km_copy(dst, A + (long long)min(g_row, params.m - 1) * params.lda, k0 + w, k_len,
+                          g_row < params.m, a_vector);
+        }
+        if (B_T) {
+            // B [64 columns x 16 k]: 256 words, two per thread.
+            #pragma unroll
+            for (int q = 0; q < 2; ++q) {
+                const int e = t + q * 128;
+                const int c = e >> 2;
+                const int w = (e & 3) * 4;
+                const int g_column = column_tile + c;
+                const unsigned dst = (unsigned)__cvta_generic_to_shared(&s.b[c * EXACT_KM_ROW + w]);
+                exact_km_copy(dst, B + (long long)min(g_column, params.n - 1) * params.ldb, k0 + w,
+                              k_len, g_column < params.n, b_vector);
+            }
+        } else {
+            // B [16 k x 64 columns]: 256 words, two per thread.
+            #pragma unroll
+            for (int q = 0; q < 2; ++q) {
+                const int e = t + q * 128;
+                const int kk = e >> 4;
+                const int w = (e & 15) * 4;
+                const int g_k = k0 + kk;
+                const unsigned dst =
+                    (unsigned)__cvta_generic_to_shared(&s.b[kk * EXACT_KM_B_NN_ROW + w]);
+                exact_km_copy(dst, B + (long long)min(g_k, k_len - 1) * params.ldb, column_tile + w,
+                              params.n, g_k < k_len, b_vector);
+            }
+        }
+    };
+
+    #pragma unroll
+    for (int s = 0; s < EXACT_KM_STAGES - 1; ++s) {
+        if (s < tiles) issue(s, s * EXACT_KM_BK);
+        asm volatile("cp.async.commit_group;\n");
+    }
+    for (int tile = 0; tile < tiles; ++tile) {
+        asm volatile("cp.async.wait_group %0;\n" :: "n"(EXACT_KM_STAGES - 2));
+        __syncthreads();
+        const int next = tile + EXACT_KM_STAGES - 1;
+        if (next < tiles) issue(next % EXACT_KM_STAGES, next * EXACT_KM_BK);
+        asm volatile("cp.async.commit_group;\n");
+        const ExactKmStage<B_T>& s = stages[tile % EXACT_KM_STAGES];
+        #pragma unroll
+        for (int g = 0; g < EXACT_KM_BK / 4; ++g) {
+            float4 a[4];
+            #pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                a[i] = *reinterpret_cast<const float4*>(&s.a[(rg + 8 * i) * EXACT_KM_ROW + 4 * g]);
+            }
+            if (B_T) {
+                float4 b[4];
+                #pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    b[j] = *reinterpret_cast<const float4*>(&s.b[(cg + 16 * j) * EXACT_KM_ROW + 4 * g]);
+                }
+                #pragma unroll
+                for (int kk = 0; kk < 4; ++kk) {
+                    #pragma unroll
+                    for (int i = 0; i < 4; ++i) {
+                        const float av = kk == 0 ? a[i].x : kk == 1 ? a[i].y : kk == 2 ? a[i].z : a[i].w;
+                        #pragma unroll
+                        for (int j = 0; j < 4; ++j) {
+                            const float bv = kk == 0 ? b[j].x : kk == 1 ? b[j].y : kk == 2 ? b[j].z : b[j].w;
+                            acc[i][j] = __fmaf_rn(av, bv, acc[i][j]);
+                        }
+                    }
+                }
+            } else {
+                #pragma unroll
+                for (int kk = 0; kk < 4; ++kk) {
+                    const float4 b = *reinterpret_cast<const float4*>(
+                        &s.b[(4 * g + kk) * EXACT_KM_B_NN_ROW + cg * 4]);
+                    const float bv[4] = {b.x, b.y, b.z, b.w};
+                    #pragma unroll
+                    for (int i = 0; i < 4; ++i) {
+                        const float av = kk == 0 ? a[i].x : kk == 1 ? a[i].y : kk == 2 ? a[i].z : a[i].w;
+                        #pragma unroll
+                        for (int j = 0; j < 4; ++j) acc[i][j] = __fmaf_rn(av, bv[j], acc[i][j]);
+                    }
+                }
+            }
+        }
+    }
+    asm volatile("cp.async.wait_group 0;\n");
+
+    const bool close = params.close > 0 && (k_len % params.close) != 0;
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        const int g_row = row_tile + rg + 8 * i;
+        if (g_row >= params.m) continue;
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            const int g_column = column_tile + (B_T ? cg + 16 * j : cg * 4 + j);
+            if (g_column < params.n) {
+                const float value = close ? __fadd_rn(acc[i][j], 0.0f) : acc[i][j];
+                C[(long long)g_row * params.ldc + g_column] = value;
+            }
+        }
+    }
+}
+
+// The 32 x 64 reduction-major chain tile of a forward.
+extern "C" __global__ __launch_bounds__(128)
+void nn_exact_km_m32n64_bk16_s4(
+    float* __restrict__ C,
+    const float* __restrict__ A,
+    const float* __restrict__ B,
+    const float* __restrict__ bias,
+    ExactThinParams params
+) {
+    exact_km_m32n64_tile<false>(C, A, B, bias, params);
+}
+
+// The same tile of an input gradient, B the weight [n][k].
+extern "C" __global__ __launch_bounds__(128)
+void nt_exact_km_m32n64_bk16_s4(
+    float* __restrict__ C,
+    const float* __restrict__ A,
+    const float* __restrict__ B,
+    const float* __restrict__ bias,
+    ExactThinParams params
+) {
+    exact_km_m32n64_tile<true>(C, A, B, bias, params);
+}
+
+#undef EXACT_KM_B_NN_ROW
+#undef EXACT_KM_ROW
+#undef EXACT_KM_STAGES
+#undef EXACT_KM_BK
+#undef EXACT_KM_BN
+#undef EXACT_KM_BM
+
 #undef EXACT_C16_B_ROW
 #undef EXACT_C16_A_ROW
 #undef EXACT_C16_STAGES

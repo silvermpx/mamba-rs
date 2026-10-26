@@ -1961,10 +1961,22 @@ pub enum Tf32RnaWideTile {
     /// The input gradient's multistage 128 x 128 tile over 16-deep slabs,
     /// five stages.
     NtMsM128N128Bk16S5,
+    /// The input gradient's multistage 64 x 64 tile over 32-deep slabs,
+    /// three stages.
+    NtMsM64N64S3,
+    /// The multistage 16 x 32 tile of a small batch over 32-deep slabs,
+    /// four stages, on two warps.
+    MsM16N32S4,
+    /// The input gradient's multistage 16 x 32 tile over 32-deep slabs,
+    /// four stages, on two warps.
+    NtMsM16N32S4,
+    /// The multistage 64 x 64 tile over 32-deep slabs, four stages, staging
+    /// operands off 16-byte boundaries four bytes at a time.
+    MsM64N64S4AnyAlignment,
 }
 
 impl Tf32RnaWideTile {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 14] = [
         Self::M128N96S3,
         Self::M96N96S3,
         Self::M128N128S3,
@@ -1975,6 +1987,10 @@ impl Tf32RnaWideTile {
         Self::NtMsM64N128Bk16S6,
         Self::NtMsM128N64S3,
         Self::NtMsM128N128Bk16S5,
+        Self::NtMsM64N64S3,
+        Self::MsM16N32S4,
+        Self::NtMsM16N32S4,
+        Self::MsM64N64S4AnyAlignment,
     ];
 
     pub const fn digest_code(self) -> u8 {
@@ -1989,15 +2005,27 @@ impl Tf32RnaWideTile {
             Self::NtMsM128N64S3 => 8,
             Self::NtMsM128N128Bk16S5 => 9,
             Self::MsPersistM128N64Bk16S3 => 10,
+            Self::NtMsM64N64S3 => 11,
+            Self::MsM16N32S4 => 12,
+            Self::NtMsM16N32S4 => 13,
+            Self::MsM64N64S4AnyAlignment => 14,
         }
+    }
+
+    /// Whether the tile stages whole 16-byte chunks, which needs aligned
+    /// bases and rows of whole chunks.
+    pub const fn stages_whole_chunks(self) -> bool {
+        !matches!(self, Self::MsM64N64S4AnyAlignment)
     }
 
     /// The product the tile computes: the forward's or the input gradient's.
     pub const fn op(self) -> ResolvedGemmOp {
         match self {
-            Self::NtMsM64N128Bk16S6 | Self::NtMsM128N64S3 | Self::NtMsM128N128Bk16S5 => {
-                ResolvedGemmOp::Nt
-            }
+            Self::NtMsM64N128Bk16S6
+            | Self::NtMsM128N64S3
+            | Self::NtMsM128N128Bk16S5
+            | Self::NtMsM64N64S3
+            | Self::NtMsM16N32S4 => ResolvedGemmOp::Nt,
             _ => ResolvedGemmOp::Nn,
         }
     }
@@ -3085,7 +3113,7 @@ const fn tf32_rna_spec(
 /// The batch-invariant TF32 policy's own tiles walking one chain per
 /// output; the threads and shared memory are the source owner's launch
 /// table.
-const TF32_RNA_CHAIN_SPECS: [Tf32KernelSpec; 10] = [
+const TF32_RNA_CHAIN_SPECS: [Tf32KernelSpec; 14] = [
     tf32_rna_spec(
         Tf32RnaWideTile::M128N96S3,
         super::tf32_rna_source::NN_M128N96_S3_SYMBOL,
@@ -3156,6 +3184,34 @@ const TF32_RNA_CHAIN_SPECS: [Tf32KernelSpec; 10] = [
         (16, 5, 128),
         81_920,
     ),
+    tf32_rna_spec(
+        Tf32RnaWideTile::NtMsM64N64S3,
+        super::tf32_rna_source::NT_MS_M64N64_S3_SYMBOL,
+        (64, 64),
+        (32, 3, 128),
+        49_152,
+    ),
+    tf32_rna_spec(
+        Tf32RnaWideTile::MsM16N32S4,
+        super::tf32_rna_source::NN_MS_M16N32_S4_SYMBOL,
+        (16, 32),
+        (32, 4, 64),
+        28_672,
+    ),
+    tf32_rna_spec(
+        Tf32RnaWideTile::NtMsM16N32S4,
+        super::tf32_rna_source::NT_MS_M16N32_S4_SYMBOL,
+        (16, 32),
+        (32, 4, 64),
+        24_576,
+    ),
+    tf32_rna_spec(
+        Tf32RnaWideTile::MsM64N64S4AnyAlignment,
+        super::tf32_rna_source::NN_MS_M64N64_S4_ANY_SYMBOL,
+        (64, 64),
+        (32, 4, 128),
+        69_632,
+    ),
 ];
 
 /// The four-piece twin of a one-chain tile of the batch-invariant module:
@@ -3174,7 +3230,7 @@ const fn tf32_rna_pieces_spec(chain: Tf32KernelSpec, symbol: &'static str) -> Tf
 
 /// The batch-invariant TF32 policy's own tiles: the one-chain tiles, then
 /// their four-piece twins. The input gradient's 128 x 128 tile has none.
-pub const TF32_RNA_ROUTE_SPECS: [Tf32KernelSpec; 19] = [
+pub const TF32_RNA_ROUTE_SPECS: [Tf32KernelSpec; 25] = [
     TF32_RNA_CHAIN_SPECS[0],
     TF32_RNA_CHAIN_SPECS[1],
     TF32_RNA_CHAIN_SPECS[2],
@@ -3185,6 +3241,10 @@ pub const TF32_RNA_ROUTE_SPECS: [Tf32KernelSpec; 19] = [
     TF32_RNA_CHAIN_SPECS[7],
     TF32_RNA_CHAIN_SPECS[8],
     TF32_RNA_CHAIN_SPECS[9],
+    TF32_RNA_CHAIN_SPECS[10],
+    TF32_RNA_CHAIN_SPECS[11],
+    TF32_RNA_CHAIN_SPECS[12],
+    TF32_RNA_CHAIN_SPECS[13],
     tf32_rna_pieces_spec(
         TF32_RNA_CHAIN_SPECS[0],
         super::tf32_rna_source::NN_PIECES4_M128N96_S3_SYMBOL,
@@ -3201,15 +3261,10 @@ pub const TF32_RNA_ROUTE_SPECS: [Tf32KernelSpec; 19] = [
         TF32_RNA_CHAIN_SPECS[3],
         super::tf32_rna_source::NN_PIECES4_MS_M64N128_BK16_S6_SYMBOL,
     ),
-    // The 128 x 64 pieces tiles run on eight warps, so the finished pieces'
-    // sum fits in registers (see tf32_rna.cu).
-    Tf32KernelSpec {
-        threads: 256,
-        ..tf32_rna_pieces_spec(
-            TF32_RNA_CHAIN_SPECS[4],
-            super::tf32_rna_source::NN_PIECES4_MS_M128N64_S3_SYMBOL,
-        )
-    },
+    tf32_rna_pieces_spec(
+        TF32_RNA_CHAIN_SPECS[4],
+        super::tf32_rna_source::NN_PIECES4_MS_M128N64_S3_SYMBOL,
+    ),
     tf32_rna_pieces_spec(
         TF32_RNA_CHAIN_SPECS[5],
         super::tf32_rna_source::NN_PIECES4_MS_M64N64_S3_SYMBOL,
@@ -3222,13 +3277,18 @@ pub const TF32_RNA_ROUTE_SPECS: [Tf32KernelSpec; 19] = [
         TF32_RNA_CHAIN_SPECS[7],
         super::tf32_rna_source::NT_PIECES4_MS_M64N128_BK16_S6_SYMBOL,
     ),
-    Tf32KernelSpec {
-        threads: 256,
-        ..tf32_rna_pieces_spec(
-            TF32_RNA_CHAIN_SPECS[8],
-            super::tf32_rna_source::NT_PIECES4_MS_M128N64_S3_SYMBOL,
-        )
-    },
+    tf32_rna_pieces_spec(
+        TF32_RNA_CHAIN_SPECS[8],
+        super::tf32_rna_source::NT_PIECES4_MS_M128N64_S3_SYMBOL,
+    ),
+    tf32_rna_pieces_spec(
+        TF32_RNA_CHAIN_SPECS[10],
+        super::tf32_rna_source::NT_PIECES4_MS_M64N64_S3_SYMBOL,
+    ),
+    tf32_rna_pieces_spec(
+        TF32_RNA_CHAIN_SPECS[13],
+        super::tf32_rna_source::NN_PIECES4_MS_M64N64_S4_ANY_SYMBOL,
+    ),
 ];
 
 pub const SM89_TF32_JOINT_ROUTE_SPECS: [Tf32KernelSpec; 11] = [
@@ -8069,7 +8129,7 @@ mod tests {
             (ModuleKind::TriadSm90a, 6, [2, 2, 2]),
             (ModuleKind::TriadSm100, 36, [12, 12, 12]),
             (ModuleKind::TriadSm120, 30, [9, 10, 11]),
-            (ModuleKind::TriadTf32Rna, 19, [14, 0, 5]),
+            (ModuleKind::TriadTf32Rna, 25, [17, 0, 8]),
         ];
         let expected_total = expected.iter().map(|(_, count, _)| count).sum::<usize>();
         let mut all_symbols = std::collections::BTreeSet::new();

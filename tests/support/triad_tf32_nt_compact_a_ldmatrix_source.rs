@@ -1,6 +1,6 @@
 pub const SYMBOL: &str = "nt_test_compact_a_ldmatrix_sm80_mma_tf32_m128n64_bk32_s2";
 const PARENT_SYMBOL: &str = "nt_test_compact_eight_warp_sm80_mma_tf32_m128n64_bk32_s2";
-const EXPECTED_PARENT_FNV64: u64 = 0x3883_54ba_7d69_3347;
+const EXPECTED_PARENT_FNV64: u64 = 0x8375_0606_6f13_b435;
 
 const A_LOAD: &str = r#"#pragma unroll
         for (int m_atom = 0; m_atom < MAtoms; ++m_atom) {

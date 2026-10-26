@@ -2971,8 +2971,27 @@ fn rna_layer_pieces_selection(
         });
     }
     // The multistage tiles copy whole 16-byte chunks and are qualified on
-    // the Ada and CC 12.x boards.
+    // the Ada and CC 12.x boards. On SM89 a forward off those boundaries
+    // folds its pieces in the 64 x 64 tile that stages four bytes at a time
+    // once its grid covers a quarter of the card: on an RTX 6000 Ada it ran
+    // two such forwards, a thousand and four thousand rows over a few
+    // hundred unaligned inputs, in 0.58 of the portable tiles' time; a
+    // smaller grid splits.
     if !rna_tiles_stage(request, operands, availability) {
+        let ada_rna = availability
+            .rna
+            .is_some_and(|rna| rna.device.compute_capability == (8, 9));
+        let small_tiles = rows.div_ceil(64).saturating_mul(columns.div_ceil(64));
+        if forward
+            && ada_rna
+            && operands.is_some_and(|operands| operands.a != 0 && operands.b != 0)
+            && small_tiles.saturating_mul(4) >= sms
+            && let Some(route) = binds(Tf32PhysicalRoute::MmaTf32RnaWidePieces4(
+                Tf32RnaWideTile::MsM64N64S4AnyAlignment,
+            ))
+        {
+            return Ok(F32TriadSelection::Tf32(route));
+        }
         return rna_layer_pieces_table_selection(request, operands, availability, split);
     }
     let work = rows.saturating_mul(columns.div_ceil(64));
@@ -2984,28 +3003,26 @@ fn rna_layer_pieces_selection(
     // The tiles the work fills, best first. The rules are measured per
     // architecture over the census's cut cells, each as the time of the
     // chosen tile against the fastest same-bit route of the cell. On an RTX
-    // 6000 Ada the 128 x 64 multistage tiles win from a fraction of a wave,
-    // and the persistent one, which serves whole 128-row tiles only, from a
-    // full wave: the rule below came within 1.0% of the best per cell in
-    // geometric mean over 365 forwards (worst 1.25) and within 0.3% over 414
-    // input gradients (worst 1.27), where the RTX 5090 rule took 2.4% and
-    // 1.4% (worst 1.47 and 1.51).
+    // 6000 Ada a forward takes the 128 x 64 multistage tile from half a wave
+    // of its grid, the 64 x 64 tile from eight waves of work or half a wave
+    // of its own grid, and the split members below; the persistent tile,
+    // whose pieces still fold through its output tile, lost to the 128 x 64
+    // tile by up to 1.32x once the multistage tiles walked their pieces in
+    // an outer loop. That came within 0.23% of the best per cell in
+    // geometric mean over 674 forwards (worst 1.19), where the persistent
+    // rule took 1.4% (worst 1.32); the input gradients' rule came within
+    // 0.3% over 828 (worst 1.33).
     let filled = if forward && rows <= 16 && columns.div_ceil(32) >= sms.saturating_mul(4) {
         [Some(tile_16), None, None]
     } else if ada && forward {
-        if wide_tiles >= sms && rows.is_multiple_of(128) {
-            [
-                Some(multistage(Tf32RnaWideTile::MsPersistM128N64Bk16S3)),
-                Some(multistage(Tf32RnaWideTile::MsM128N64S3)),
-                Some(multistage(Tf32RnaWideTile::MsM64N64S3)),
-            ]
-        } else if rows >= 128 && wide_tiles.saturating_mul(2) >= sms {
+        let small_tiles = rows.div_ceil(64).saturating_mul(columns.div_ceil(64));
+        if rows >= 128 && wide_tiles.saturating_mul(2) >= sms {
             [
                 Some(multistage(Tf32RnaWideTile::MsM128N64S3)),
                 Some(multistage(Tf32RnaWideTile::MsM64N64S3)),
                 None,
             ]
-        } else if work >= sms.saturating_mul(12) {
+        } else if work >= sms.saturating_mul(8) || small_tiles.saturating_mul(2) >= sms {
             [
                 Some(multistage(Tf32RnaWideTile::MsM64N64S3)),
                 Some(tile_64),
@@ -3015,7 +3032,20 @@ fn rna_layer_pieces_selection(
             [None, None, None]
         }
     } else if ada {
-        if rows >= 128 && wide_tiles.saturating_mul(5) >= sms {
+        // The 64 x 64 tile below half a wave of 128 x 64 tiles, from a quarter
+        // of a wave of its own: on an RTX 6000 Ada it ran input gradients of
+        // 1024 rows over 256 and 384 inputs (64 and 96 of its tiles) in 0.62
+        // and 0.69 of the 128 x 64 tile's time, with the same bits, while at
+        // nine tenths of a wave the 128 x 64 tile ran in 0.80 of its.
+        let small_tiles = rows.div_ceil(64).saturating_mul(columns.div_ceil(64));
+        if rows >= 128 && wide_tiles.saturating_mul(2) < sms && small_tiles.saturating_mul(4) >= sms
+        {
+            [
+                Some(multistage(Tf32RnaWideTile::NtMsM64N64S3)),
+                Some(multistage(Tf32RnaWideTile::NtMsM128N64S3)),
+                Some(tile_64),
+            ]
+        } else if rows >= 128 && wide_tiles.saturating_mul(5) >= sms {
             [
                 Some(multistage(Tf32RnaWideTile::NtMsM128N64S3)),
                 Some(tile_64),
@@ -3208,7 +3238,9 @@ const fn rna_wide_tile_outputs(tile: super::contract::Tf32RnaWideTile) -> (usize
         Wide::M128N128S3 | Wide::NtMsM128N128Bk16S5 => (128, 128),
         Wide::MsM64N128Bk16S6 | Wide::NtMsM64N128Bk16S6 => (64, 128),
         Wide::MsM128N64S3 | Wide::NtMsM128N64S3 | Wide::MsPersistM128N64Bk16S3 => (128, 64),
-        Wide::MsM64N64S3 => (64, 64),
+        Wide::MsM64N64S3 | Wide::NtMsM64N64S3 => (64, 64),
+        Wide::MsM16N32S4 | Wide::NtMsM16N32S4 => (16, 32),
+        Wide::MsM64N64S4AnyAlignment => (64, 64),
     }
 }
 
@@ -3313,6 +3345,20 @@ fn rna_backward_rule_route(
                 Tf32PhysicalRoute::Sm89TnPreRnaM64N64
             },
         ),
+        // The multistage 16 x 32 tile for batches of up to 64 rows where it
+        // stages: on an RTX 6000 Ada it ran 64-row input gradients in 0.55 to
+        // 0.66 of the portable 16 x 32 tile's time, with the same chain.
+        ResolvedGemmOp::Nt
+            if rows <= 64
+                && availability
+                    .rna
+                    .is_some_and(|rna| rna.device.compute_capability == (8, 9))
+                && rna_tiles_stage(request, operands, availability) =>
+        {
+            Some(Tf32PhysicalRoute::MmaTf32RnaWide(
+                super::contract::Tf32RnaWideTile::NtMsM16N32S4,
+            ))
+        }
         ResolvedGemmOp::Nt if rows < RNA_NT_NARROW_ROWS => Some(Tf32PhysicalRoute::MmaTf32Rna(
             portable(Tf32PortableTile::M16N32, Tf32PortableStages::S4),
         )),
@@ -3459,7 +3505,16 @@ fn rna_blackwell_backward_table(
         };
     }
     if rows < RNA_NT_NARROW_ROWS {
-        return portable(Tf32PortableTile::M16N32, Tf32PortableStages::S4);
+        // The multistage 16 x 32 tile where it stages, measured on SM89 for
+        // batches of up to 64 rows.
+        let ada = availability
+            .rna
+            .is_some_and(|rna| rna.device.compute_capability == (8, 9));
+        return if staged && ada && rows <= 64 {
+            Tf32PhysicalRoute::MmaTf32RnaWide(Tf32RnaWideTile::NtMsM16N32S4)
+        } else {
+            portable(Tf32PortableTile::M16N32, Tf32PortableStages::S4)
+        };
     }
     let outputs = rows * columns;
     if staged && reduction >= 256 && columns <= 1_024 && outputs >= MS_NT_MIN_OUTPUTS {
@@ -3599,12 +3654,27 @@ fn rna_forward_table_route(
         ));
     }
     Some(if m < NARROW_ROWS {
-        portable(Tf32PortableTile::M16N32, Tf32PortableStages::S4)
-    } else if staged && (512..TALL_ROWS).contains(&m) && (128..=512).contains(&n) {
-        if n > 128 && n <= 384 {
-            wide(Tf32RnaWideTile::MsM128N64S3)
+        // The multistage 16 x 32 tile serves batches of up to 64 rows, the
+        // ones it was measured on.
+        if staged && m <= 64 {
+            wide(Tf32RnaWideTile::MsM16N32S4)
         } else {
-            wide(Tf32RnaWideTile::MsM64N128Bk16S6)
+            portable(Tf32PortableTile::M16N32, Tf32PortableStages::S4)
+        }
+    } else if staged && (512..TALL_ROWS).contains(&m) && (128..=512).contains(&n) {
+        // The 64 x 64 tile or the 128 x 64 one by the rounds of the card
+        // each grid takes, a 128 x 64 tile costing 1.6 of a 64 x 64 one: on
+        // an RTX 6000 Ada that picked the faster of the two on all twelve
+        // forwards of 1024 to 6144 rows and 128 to 512 outputs measured, the
+        // 64 x 64 tile in 0.66 to 0.92 of the 64 x 128 tile's time where it
+        // won.
+        let sms = availability.multiprocessors.max(1) as usize;
+        let small = m.div_ceil(64).saturating_mul(n.div_ceil(64)).div_ceil(sms);
+        let large = m.div_ceil(128).saturating_mul(n.div_ceil(64)).div_ceil(sms);
+        if small.saturating_mul(5) <= large.saturating_mul(8) {
+            wide(Tf32RnaWideTile::MsM64N64S3)
+        } else {
+            wide(Tf32RnaWideTile::MsM128N64S3)
         }
     } else if n < 128 {
         if staged && m >= NARROW_WIDE_ROWS {
@@ -8413,6 +8483,18 @@ pub(super) const SPLITK_SCRATCH_CAP: usize = 1 << 25;
 /// One device-scope completion counter per fused TF32 split-K output tile.
 pub(super) const TF32_SPLITK_COUNTER_CAP: usize = 1 << 16;
 
+/// The 16 x 16 partial of a piece of `piece_rows` rows over `columns`
+/// outputs: folded by its last arriving CTAs in the same launch where the
+/// piece's tiles fit the arrival counters, through `splitk_reduce`
+/// otherwise. Both add the planes in the same order.
+fn exact_narrow16_partial(piece_rows: usize, columns: usize) -> ExactChunkPartial {
+    if piece_rows.div_ceil(16).saturating_mul(columns.div_ceil(16)) <= TF32_SPLITK_COUNTER_CAP {
+        ExactChunkPartial::Narrow16Fused
+    } else {
+        ExactChunkPartial::Narrow16
+    }
+}
+
 /// The tile that writes the batch-invariant chunk fold's partial planes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ExactChunkPartial {
@@ -8422,6 +8504,10 @@ pub(super) enum ExactChunkPartial {
     Small,
     /// The pipelined 16 x 16 tile, for a single row.
     Narrow16,
+    /// The pipelined 16 x 16 tile whose last arriving CTA of an output tile
+    /// folds the tile's planes, in one launch, where the tiles fit the
+    /// arrival counters.
+    Narrow16Fused,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -8448,6 +8534,9 @@ pub(super) enum ScalarDispatchPlan {
     NnExactThin,
     /// The batch-invariant exact forward's pipelined 16 x 16 tile.
     NnExactNarrow16,
+    /// The batch-invariant exact forward's 32 x 64 tile over operands staged
+    /// along the reduction in 16-byte words.
+    NnExactKm,
     /// The batch-invariant exact policy's chunk fold: the partial writes one
     /// piece of the layer's fold per plane and `splitk_reduce` sums the
     /// planes in order and adds the bias, `piece_rows` rows at a time so the
@@ -8473,6 +8562,9 @@ pub(super) enum ScalarDispatchPlan {
     NtExactThin,
     /// The input gradient's pipelined 16 x 16 tile under its layer's fold.
     NtExactNarrow16,
+    /// The input gradient's 32 x 64 tile under its layer's fold, the weight
+    /// staged along the reduction in 16-byte words.
+    NtExactKm,
     /// The input gradient's chunk fold: the forward's partials over the
     /// weight read transposed, one piece of the layer's fold per plane,
     /// `piece_rows` rows at a time.
@@ -8563,6 +8655,20 @@ impl ScalarDispatchPlan {
                 | Self::NtSplitKTail { .. }
                 | Self::NtSplitKMain { .. }
                 | Self::NtSplitKSlim { .. }
+        )
+    }
+
+    /// Whether a CTA of the plan counts arrivals in the counter workspace.
+    pub(super) const fn needs_counters(self) -> bool {
+        matches!(
+            self,
+            Self::NnExactChunk {
+                partial: ExactChunkPartial::Narrow16Fused,
+                ..
+            } | Self::NtExactChunk {
+                partial: ExactChunkPartial::Narrow16Fused,
+                ..
+            }
         )
     }
 
@@ -8896,7 +9002,7 @@ pub(super) fn exact_batch_invariant_nn_plan(
         let partial = if m > 64 && slim_grid.saturating_mul(4) >= waves.saturating_mul(3) {
             ExactChunkPartial::Slim
         } else if m == 1 || exact_small_partial_underfills(m, n, chunks, waves) {
-            ExactChunkPartial::Narrow16
+            exact_narrow16_partial(piece_rows, n)
         } else {
             ExactChunkPartial::Small
         };
@@ -8909,6 +9015,21 @@ pub(super) fn exact_batch_invariant_nn_plan(
             pieces: u32::try_from(m.div_ceil(piece_rows))
                 .map_err(|_| format!("{m} rows in pieces of {piece_rows} pass u32"))?,
         });
+    }
+    // The 32 x 64 tile over operands staged along the reduction while its
+    // grid covers half a wave to three waves of the card, at 32 outputs or
+    // more: over the census's uncut forwards and input gradients on an RTX
+    // 6000 Ada the window came within 0.45% of the faster of it and the
+    // older tiles per cell in geometric mean, where the older tiles alone
+    // took 6.5%. Below the window its grid leaves the card idle, above it
+    // the larger tiles' fewer loads per product win.
+    let km_grid = m.div_ceil(32).saturating_mul(n.div_ceil(64));
+    if compute_capability.0 != 12
+        && n >= 32
+        && km_grid.saturating_mul(2) >= waves
+        && km_grid < waves.saturating_mul(3)
+    {
+        return Ok(ScalarDispatchPlan::NnExactKm);
     }
     if big_fills {
         return Ok(ScalarDispatchPlan::NnFinal { slim: false });
@@ -9052,7 +9173,7 @@ pub(super) fn exact_batch_invariant_nt_plan(
         } else if m == 1
             || exact_small_partial_underfills(m, n_in, chunks, multiprocessors as usize)
         {
-            ExactChunkPartial::Narrow16
+            exact_narrow16_partial(piece_rows, n_in)
         } else {
             ExactChunkPartial::Small
         };
@@ -9083,6 +9204,17 @@ pub(super) fn exact_batch_invariant_nt_plan(
     // RTX 6000 Ada that came within 1.7% of the fastest same-bit tile per
     // cell in geometric mean (worst 1.28), where the chain tiles alone took
     // 5.7% (worst 1.50).
+    // The 32 x 64 tile that stages the weight along the reduction while its
+    // grid covers a third of a wave to three waves, at 32 inputs or more
+    // (the forward's window, measured with it).
+    let km_grid = m.div_ceil(32).saturating_mul(n_in.div_ceil(64));
+    if !blackwell
+        && n_in >= 32
+        && km_grid.saturating_mul(3) >= waves
+        && km_grid < waves.saturating_mul(3)
+    {
+        return Ok(ScalarDispatchPlan::NtExactKm);
+    }
     if !blackwell
         && (2..=127).contains(&n_out)
         && transposed_tiles.saturating_mul(4) >= waves
@@ -18181,20 +18313,22 @@ mod tf32_tests {
                 tile: Tf32PortableTile::M16N32,
                 stages: Tf32PortableStages::S4,
             }));
-        // On the 142 multiprocessors of this Ada board: a forward whose
-        // whole 128-row tiles cover a wave folds in the persistent 128 x 64
-        // tile, one with half a wave of 128 x 64 tiles in the multistage
-        // 128 x 64 tile, a 64-row batch over a vocabulary-wide layer in the
-        // multistage 64 x 64 tile, a thin batch in the 16 x 32 tile, and a
+        // On the 142 multiprocessors of this Ada board: a forward with half
+        // a wave of 128 x 64 tiles folds in the multistage 128 x 64 tile
+        // (whole tiles or not), a 64-row batch over a vocabulary-wide layer in
+        // the multistage 64 x 64 tile, a thin batch in the 16 x 32 tile, and a
         // small output splits; an input gradient of 128 rows or more folds in
-        // the 128 x 64 tile from a fifth of a wave of those tiles.
+        // the 64 x 64 tile below half a wave of 128 x 64 tiles and in the
+        // 128 x 64 tile from there, or from a fifth of a wave of them where
+        // the 64 x 64 grid stays under half a wave.
         for (op, rows, columns, reduction, expected) in [
+            (ResolvedGemmOp::Nn, 8192, 256, 512, wide(Wide::MsM128N64S3)),
             (
                 ResolvedGemmOp::Nn,
-                8192,
-                256,
-                512,
-                wide(Wide::MsPersistM128N64Bk16S3),
+                16_384,
+                96,
+                2048,
+                wide(Wide::MsM128N64S3),
             ),
             (ResolvedGemmOp::Nn, 1000, 768, 1536, wide(Wide::MsM128N64S3)),
             (ResolvedGemmOp::Nn, 64, 32_000, 768, wide(Wide::MsM64N64S3)),
@@ -18220,13 +18354,7 @@ mod tf32_tests {
                 768,
                 wide(Wide::NtMsM128N64S3),
             ),
-            (
-                ResolvedGemmOp::Nt,
-                255,
-                1536,
-                768,
-                wide(Wide::NtMsM128N64S3),
-            ),
+            (ResolvedGemmOp::Nt, 255, 1536, 768, wide(Wide::NtMsM64N64S3)),
             (
                 ResolvedGemmOp::Nt,
                 64,
@@ -18251,23 +18379,30 @@ mod tf32_tests {
                 "{request:?}"
             );
         }
-        // Without the module or with a misaligned operand no multistage tile
-        // stages, and the portable tile of the same shape folds the pieces.
+        // Without the module no multistage tile stages, and the portable tile
+        // of the same shape folds the pieces; with a misaligned operand the
+        // 64 x 64 tile that stages four bytes at a time folds them.
         let request = normalized_request(ResolvedGemmOp::Nn, 8192, 256, 512);
         let misaligned = F32TriadOperands {
             a: sm89_joint_operands(ResolvedGemmOp::Nn).a + 4,
             ..sm89_joint_operands(ResolvedGemmOp::Nn)
         };
-        for (availability, operands) in [
-            (sm89_availability(), sm89_joint_operands(ResolvedGemmOp::Nn)),
-            (staged, misaligned),
-        ] {
-            assert!(matches!(
-                resolve_f32_triad_auto_with_operands(STRICT, request, operands, availability)
-                    .unwrap(),
-                F32TriadSelection::Tf32(Tf32PhysicalRoute::MmaTf32RnaPieces4(_))
-            ));
-        }
+        assert_eq!(
+            resolve_f32_triad_auto_with_operands(STRICT, request, misaligned, staged).unwrap(),
+            F32TriadSelection::Tf32(Tf32PhysicalRoute::MmaTf32RnaWidePieces4(
+                Wide::MsM64N64S4AnyAlignment
+            ))
+        );
+        assert!(matches!(
+            resolve_f32_triad_auto_with_operands(
+                STRICT,
+                request,
+                sm89_joint_operands(ResolvedGemmOp::Nn),
+                sm89_availability()
+            )
+            .unwrap(),
+            F32TriadSelection::Tf32(Tf32PhysicalRoute::MmaTf32RnaPieces4(_))
+        ));
     }
 
     #[test]
@@ -18286,8 +18421,9 @@ mod tf32_tests {
         ));
         for rows in [1, 64, 300, 8192] {
             let request = normalized_request(ResolvedGemmOp::Nn, rows, 256, 512);
-            // Without a blend the large grid folds inside its tile.
-            for (beta, split) in [(1.0_f32, true), (0.5, true), (0.0, rows != 8192)] {
+            // Without a blend the grids from eight waves of work fold inside
+            // their tile.
+            for (beta, split) in [(1.0_f32, true), (0.5, true), (0.0, rows < 300)] {
                 let operands = F32TriadOperands {
                     beta,
                     ..sm89_joint_operands(ResolvedGemmOp::Nn)
@@ -18331,6 +18467,7 @@ mod tf32_tests {
                     spec.tile,
                     spec.bk,
                     spec.stages,
+                    spec.threads,
                     spec.dynamic_shared_bytes
                 ),
                 (
@@ -18338,20 +18475,12 @@ mod tf32_tests {
                     chain.tile,
                     chain.bk,
                     chain.stages,
+                    chain.threads,
                     chain.dynamic_shared_bytes
                 ),
                 "{}",
                 spec.symbol
             );
-            // A twin keeps its tile's warps, except the multistage 128 x 64
-            // tiles, which spread over twice the warps to hold the pieces'
-            // sum in registers.
-            let warps = if matches!(tile, Wide::MsM128N64S3 | Wide::NtMsM128N64S3) {
-                2
-            } else {
-                1
-            };
-            assert_eq!(spec.threads, warps * chain.threads, "{}", spec.symbol);
             assert!(
                 rna_batch_invariant_route(spec.op, spec.route),
                 "{}",
@@ -18359,7 +18488,7 @@ mod tf32_tests {
             );
             twins += 1;
         }
-        assert_eq!(twins, 9);
+        assert_eq!(twins, 11);
     }
 
     #[test]
@@ -18506,8 +18635,9 @@ mod tf32_tests {
             ),
             ((4096, 256, 2112), wide(Wide::M128N128S3)),
             ((1024, 384, 1536), wide(Wide::M128N96S3)),
-            ((1024, 256, 256), wide(Wide::MsM128N64S3)),
-            ((1024, 256, 128), wide(Wide::MsM64N128Bk16S6)),
+            ((1024, 256, 256), wide(Wide::MsM64N64S3)),
+            ((1024, 256, 128), wide(Wide::MsM64N64S3)),
+            ((6144, 256, 128), wide(Wide::MsM128N64S3)),
             ((1024, 256, 1024), wide(Wide::M96N96S3)),
             ((4096, 128, 64), wide(Wide::M96N96S3)),
             (
@@ -19286,7 +19416,11 @@ mod exact_batch_invariant_tests {
                                         < 3 * multiprocessors as usize;
                                     assert_eq!(partial == ExactChunkPartial::Slim, slim, "{what}");
                                     assert_eq!(
-                                        partial == ExactChunkPartial::Narrow16,
+                                        matches!(
+                                            partial,
+                                            ExactChunkPartial::Narrow16
+                                                | ExactChunkPartial::Narrow16Fused
+                                        ),
                                         !slim && (m == 1 || underfill),
                                         "{what}"
                                     );
@@ -19338,6 +19472,17 @@ mod exact_batch_invariant_tests {
                                 }
                                 ScalarDispatchPlan::NnExactNarrow16 => {
                                     assert!(!exact_chunks(k, n) && m > 1, "{what}");
+                                }
+                                ScalarDispatchPlan::NnExactKm => {
+                                    let grid = m.div_ceil(32) * n.div_ceil(64);
+                                    assert!(
+                                        !exact_chunks(k, n)
+                                            && compute_capability.0 != 12
+                                            && n >= 32
+                                            && grid * 2 >= multiprocessors as usize
+                                            && grid < 3 * multiprocessors as usize,
+                                        "{what}"
+                                    );
                                 }
                                 ScalarDispatchPlan::NnM64N64Qualified => {
                                     assert!(!exact_chunks(k, n), "{what}");
@@ -19433,7 +19578,7 @@ mod exact_batch_invariant_tests {
                                 let expected = if slim {
                                     ExactChunkPartial::Slim
                                 } else if m == 1 || underfill {
-                                    ExactChunkPartial::Narrow16
+                                    ExactChunkPartial::Narrow16Fused
                                 } else {
                                     ExactChunkPartial::Small
                                 };
@@ -19493,6 +19638,16 @@ mod exact_batch_invariant_tests {
                             ScalarDispatchPlan::NtExactNarrow16 => {
                                 assert!(!cut && m > 1, "{what}");
                             }
+                            ScalarDispatchPlan::NtExactKm => {
+                                let grid = m.div_ceil(32) * n_in.div_ceil(64);
+                                assert!(
+                                    !cut && compute_capability.0 != 12
+                                        && n_in >= 32
+                                        && grid * 3 >= multiprocessors as usize
+                                        && grid < 3 * multiprocessors as usize,
+                                    "{what}"
+                                );
+                            }
                             other => panic!("{what}: {other:?} is not a layer-fold tile"),
                         }
                     }
@@ -19529,7 +19684,9 @@ mod exact_batch_invariant_tests {
         assert!(matches!(
             exact_batch_invariant_nt_plan(nt(64, 384, 1536), 170, (12, 0), false).unwrap(),
             ScalarDispatchPlan::NtExactChunk {
-                partial: ExactChunkPartial::Small | ExactChunkPartial::Narrow16,
+                partial: ExactChunkPartial::Small
+                    | ExactChunkPartial::Narrow16
+                    | ExactChunkPartial::Narrow16Fused,
                 ..
             }
         ));

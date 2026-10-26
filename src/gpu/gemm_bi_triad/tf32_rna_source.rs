@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 
 pub const SOURCE: &str = include_str!("../../../kernels/gemm_bi_triad/sm80/tf32_rna.cu");
 
-pub const SOURCE_SHA256: &str = "ddfaaeebebd6f99f8ffb71f18ddd9da43cb54ecb44943d7feff53f339b12b604";
+pub const SOURCE_SHA256: &str = "f87fd05e93f41fc86d9b301dddf615a4f624f49a5fbcba84f1a98c1fa821ea55";
 
 pub const NN_M128N96_S3_SYMBOL: &str = "nn_sm80_tf32_rna_m128n96_w2x4_bk32_s3";
 pub const NN_M96N96_S3_SYMBOL: &str = "nn_sm80_tf32_rna_m96n96_w2x4_bk32_s3";
@@ -25,6 +25,12 @@ pub const NN_MS_PERSIST_M128N64_BK16_S3_SYMBOL: &str =
 pub const NT_MS_M64N128_BK16_S6_SYMBOL: &str = "nt_sm80_tf32_rna_ms_m64n128_bk16_s6";
 pub const NT_MS_M128N64_S3_SYMBOL: &str = "nt_sm80_tf32_rna_ms_m128n64_bk32_s3";
 pub const NT_MS_M128N128_BK16_S5_SYMBOL: &str = "nt_sm80_tf32_rna_ms_m128n128_bk16_s5";
+pub const NT_MS_M64N64_S3_SYMBOL: &str = "nt_sm80_tf32_rna_ms_m64n64_bk32_s3";
+pub const NN_MS_M16N32_S4_SYMBOL: &str = "nn_sm80_tf32_rna_ms_m16n32_bk32_s4";
+pub const NT_MS_M16N32_S4_SYMBOL: &str = "nt_sm80_tf32_rna_ms_m16n32_bk32_s4";
+pub const NN_MS_M64N64_S4_ANY_SYMBOL: &str = "nn_sm80_tf32_rna_ms_m64n64_bk32_s4_any";
+pub const NN_PIECES4_MS_M64N64_S4_ANY_SYMBOL: &str =
+    "nn_sm80_tf32_rna_pieces4_ms_m64n64_bk32_s4_any";
 pub const TN_MS_SPLITK8_M128N64_S3_SYMBOL: &str = "tn_sm80_tf32_rna_ms_splitk8_m128n64_bk32_s3";
 pub const TN_MS_SPLITK8_M64N64_S4_SYMBOL: &str = "tn_sm80_tf32_rna_ms_splitk8_m64n64_bk32_s4";
 pub const TN_MS_SPLITK8_M64N64_S4_ANY_SYMBOL: &str =
@@ -42,15 +48,18 @@ pub const NN_PIECES4_MS_PERSIST_M128N64_BK16_S3_SYMBOL: &str =
 pub const NT_PIECES4_MS_M64N128_BK16_S6_SYMBOL: &str =
     "nt_sm80_tf32_rna_pieces4_ms_m64n128_bk16_s6";
 pub const NT_PIECES4_MS_M128N64_S3_SYMBOL: &str = "nt_sm80_tf32_rna_pieces4_ms_m128n64_bk32_s3";
+pub const NT_PIECES4_MS_M64N64_S3_SYMBOL: &str = "nt_sm80_tf32_rna_pieces4_ms_m64n64_bk32_s3";
 
 /// Every export of the module, in lexicographic order.
-pub const TF32_RNA_SYMBOLS: [&str; 22] = [
+pub const TF32_RNA_SYMBOLS: [&str; 28] = [
     NN_M128N128_S3_SYMBOL,
     NN_M128N96_S3_SYMBOL,
     NN_M96N96_S3_SYMBOL,
     NN_MS_M128N64_S3_SYMBOL,
+    NN_MS_M16N32_S4_SYMBOL,
     NN_MS_M64N128_BK16_S6_SYMBOL,
     NN_MS_M64N64_S3_SYMBOL,
+    NN_MS_M64N64_S4_ANY_SYMBOL,
     NN_MS_PERSIST_M128N64_BK16_S3_SYMBOL,
     NN_PIECES4_M128N128_S3_SYMBOL,
     NN_PIECES4_M128N96_S3_SYMBOL,
@@ -58,12 +67,16 @@ pub const TF32_RNA_SYMBOLS: [&str; 22] = [
     NN_PIECES4_MS_M128N64_S3_SYMBOL,
     NN_PIECES4_MS_M64N128_BK16_S6_SYMBOL,
     NN_PIECES4_MS_M64N64_S3_SYMBOL,
+    NN_PIECES4_MS_M64N64_S4_ANY_SYMBOL,
     NN_PIECES4_MS_PERSIST_M128N64_BK16_S3_SYMBOL,
     NT_MS_M128N128_BK16_S5_SYMBOL,
     NT_MS_M128N64_S3_SYMBOL,
+    NT_MS_M16N32_S4_SYMBOL,
     NT_MS_M64N128_BK16_S6_SYMBOL,
+    NT_MS_M64N64_S3_SYMBOL,
     NT_PIECES4_MS_M128N64_S3_SYMBOL,
     NT_PIECES4_MS_M64N128_BK16_S6_SYMBOL,
+    NT_PIECES4_MS_M64N64_S3_SYMBOL,
     TN_MS_SPLITK8_M128N64_S3_SYMBOL,
     TN_MS_SPLITK8_M64N64_S4_SYMBOL,
     TN_MS_SPLITK8_M64N64_S4_ANY_SYMBOL,
@@ -179,7 +192,7 @@ const fn spec(
 
 /// The launch geometry of every tile: threads, the dynamic shared memory of
 /// its stages, and the CTAs a multiprocessor must hold at once.
-pub const TF32_RNA_KERNEL_SPECS: [Tf32RnaKernelSpec; 22] = [
+pub const TF32_RNA_KERNEL_SPECS: [Tf32RnaKernelSpec; 28] = [
     spec(
         NN_M128N96_S3_SYMBOL,
         Tf32RnaKernelKind::Wide,
@@ -302,7 +315,7 @@ pub const TF32_RNA_KERNEL_SPECS: [Tf32RnaKernelSpec; 22] = [
     spec(
         NN_PIECES4_MS_M128N64_S3_SYMBOL,
         Tf32RnaKernelKind::Multistage,
-        256,
+        128,
         76_800,
         1,
     ),
@@ -330,8 +343,50 @@ pub const TF32_RNA_KERNEL_SPECS: [Tf32RnaKernelSpec; 22] = [
     spec(
         NT_PIECES4_MS_M128N64_S3_SYMBOL,
         Tf32RnaKernelKind::Multistage,
-        256,
+        128,
         73_728,
+        1,
+    ),
+    spec(
+        NT_MS_M64N64_S3_SYMBOL,
+        Tf32RnaKernelKind::Multistage,
+        128,
+        49_152,
+        2,
+    ),
+    spec(
+        NT_PIECES4_MS_M64N64_S3_SYMBOL,
+        Tf32RnaKernelKind::Multistage,
+        128,
+        49_152,
+        2,
+    ),
+    spec(
+        NN_MS_M16N32_S4_SYMBOL,
+        Tf32RnaKernelKind::Multistage,
+        64,
+        28_672,
+        2,
+    ),
+    spec(
+        NT_MS_M16N32_S4_SYMBOL,
+        Tf32RnaKernelKind::Multistage,
+        64,
+        24_576,
+        2,
+    ),
+    spec(
+        NN_MS_M64N64_S4_ANY_SYMBOL,
+        Tf32RnaKernelKind::Multistage,
+        128,
+        69_632,
+        1,
+    ),
+    spec(
+        NN_PIECES4_MS_M64N64_S4_ANY_SYMBOL,
+        Tf32RnaKernelKind::Multistage,
+        128,
+        69_632,
         1,
     ),
 ];

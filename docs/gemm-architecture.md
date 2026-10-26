@@ -476,22 +476,23 @@ after the batch-invariance test and the every-route test (5.3) pass on a
 card.
 
 **Status.**
-- TF32: the tiles of at most eight atoms keep the sum in registers; every
-  other tile folds through its output tile with batched loads. The change
-  passed the TF32 contract test (87 of 87) and the strict TF32
-  batch-invariance test (6 of 6) on an RTX 5090, but it landed as its own
-  kernel change, with the source
-  freeze table and the TF32 RNA owner digest updated and no identity mint
-  or repin. The class-2 requalification it owes (6.2), the SM89 finalist
-  identity composed from `sm80/mma.cu` included, is a blocking ledger
-  entry. The multistage 128 x 64 pieces tiles then held 64 accumulators a
-  thread and spilled with a second set; they now spread the tile over
-  eight warps of 32 x 32, so each thread keeps 32 accumulators and the
-  pieces' sum in registers. Run on their own on an RTX 5090, they took the
-  input gradient NT 4096 x 256 x 2112 from 60.7 to 54.5 us, with outputs
-  equal bit for bit to the four-warp tiles; the dispatcher's tests and the census of the
-  cut-layer rule with them have not run on a card yet, a blocking ledger
-  entry. Host overhead on small cells was the other gap (4.6).
+- TF32: the multistage tiles keep the finished pieces' sum in registers on
+  the warps of their one-chain tiles, from -0.0 as the exact tiles do, and
+  walk a cut layer's pieces in an outer loop with a piece's slabs inside.
+  With the piece end tested on every slab, the compiler had folded the
+  piece close into every slab under a predicate, a third more
+  instructions, and the pieces tiles ran 8 to 25 percent behind their
+  one-chain tiles on an RTX 6000 Ada; they now run within 6 percent, with
+  the same bits. The 128 x 64 tile holds both sets in 255 registers without
+  local memory under CUDA 12.8 to 13.4. The portable tiles walk the same
+  way and keep the sum in registers where it fits (at most eight atoms a
+  warp); the 128-row portable tile and the wide 128 x 96, 96 x 96, 128 x 128
+  and persistent tiles still fold through the output tile. The TF32
+  contract test (87 of 87), the strict TF32 batch-invariance test (6 of 6)
+  and the TF32 gradient and training tests passed on an RTX 6000 Ada. The
+  class-2 requalification (6.2), the SM89 finalist identity composed from
+  `sm80/mma.cu` included, stays a blocking ledger entry until the mint.
+  Host overhead on small cells was the other gap (4.6).
 - Exact: the 64 x 64 and 128 x 128 pieces tiles keep the sum in registers.
   The sum starts at -0.0, the additive identity of IEEE addition, so every
   piece end is `kept = __fadd_rn(kept, acc)` with no first-piece select, and
@@ -1330,9 +1331,8 @@ scarce, so V0 and V1 carry as much of the proof as they can on the CPU.
      a count of four.
    - Running sums on chip in those kernels: in registers where a second set
      fits, in shared memory where residency allows, batched output-tile
-     loads only where neither does. For TF32 the 128 x 64 multistage tiles
-     already keep it in registers on eight warps, and the 64 x 128 tile is
-     measured with the same options; the wide 128 x 96,
+     loads only where neither does. For TF32 the multistage tiles keep it
+     in registers on their one-chain warps; the wide 128 x 96,
      96 x 96 and 128 x 128 tiles stay on batched loads until their
      register-fold difference is explained. For exact f32 the 64 x 64 and
      128 x 128 tiles keep it in registers (3.1), and the SM120 TMA in-CTA fold keeps

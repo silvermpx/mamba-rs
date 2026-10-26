@@ -83,12 +83,16 @@ const SCALAR_ENTRIES: &[&str] = &[
     "nt_big_f16",
     "nn_exact_thin_r1_m16n32_bk64_s6",
     "nn_exact_m16n16_bk16_s4",
+    "nn_exact_km_m32n64_bk16_s4",
     "exact_chunk_partial_m32n64",
     "exact_chunk_partial_m16n16_bk16_s4",
+    "exact_chunk_fused_m16n16_bk16_s4",
     "nt_exact_thin_r1_m16n32_bk64_s6",
     "nt_exact_m16n16_bk16_s4",
+    "nt_exact_km_m32n64_bk16_s4",
     "nt_exact_chunk_partial_m32n64",
     "nt_exact_chunk_partial_m16n16_bk16_s4",
+    "nt_exact_chunk_fused_m16n16_bk16_s4",
 ];
 
 #[cfg(target_os = "linux")]
@@ -645,16 +649,16 @@ fn half_physical_trace_records_complete_upcast_routes() {
         // pieces come from a chunk partial and fold in the reducer. The 32 x
         // 64 partial's grid over these 64 rows and 384 inputs is 48 CTAs; a
         // card with more multiprocessors runs the 16 x 16 partial, which
-        // writes the same planes.
-        let nt_partial = if ctx.gemm_route().device.multiprocessor_count > 48 {
-            "nt_exact_chunk_partial_m16n16_bk16_s4"
+        // writes the same planes and folds them in its last arriving CTAs.
+        let nt_gemms: &[&str] = if ctx.gemm_route().device.multiprocessor_count > 48 {
+            &["nt_exact_chunk_fused_m16n16_bk16_s4"]
         } else {
-            "nt_exact_chunk_partial_m32n64"
+            &["nt_exact_chunk_partial_m32n64", "splitk_reduce"]
         };
         for (op, expected_gemms, has_downcast) in [
             (ResolvedGemmOp::Nn, &["nn_exact_m16n16_bk16_s4"][..], true),
             (ResolvedGemmOp::Tn, &["tn_slim"][..], false),
-            (ResolvedGemmOp::Nt, &[nt_partial, "splitk_reduce"][..], true),
+            (ResolvedGemmOp::Nt, nt_gemms, true),
         ] {
             let expected_count = 2 + expected_gemms.len() + usize::from(has_downcast);
             let fallback = record_half_fixture(

@@ -204,25 +204,24 @@ __device__ __forceinline__ void tf32_rna_fold_piece(
 }
 
 // Closes a piece of a cut reduction in registers, every piece but the last:
-// the first piece's chain is kept, every later one is added to the kept sum
-// in order, and the accumulators restart from +0.0; the last piece meets the
-// sum in the epilogue, before the bias. These are the additions the output
-// tile fold makes, in the same order, without a round trip to memory at each
-// piece boundary, which serialized a load, an add and a store per element
-// there. It costs a second set of accumulators, which the tiles that take it
-// have room for under their register bounds.
+// the piece's chain is added to the kept sum, which starts at -0.0, the
+// additive identity, so the first addition returns the first chain itself
+// and every close is the same instruction; the accumulators restart from
+// +0.0, and the last piece meets the sum in the epilogue, before the bias.
+// These are the additions the output tile fold makes, in the same order,
+// without a round trip to memory at each piece boundary, which serialized a
+// load, an add and a store per element there.
 template <int MAtoms, int NAtoms>
 __device__ __forceinline__ void tf32_rna_keep_piece(
-    float (&acc)[MAtoms][NAtoms][4], float (&kept)[MAtoms][NAtoms][4], bool first) {
+    float (&acc)[MAtoms][NAtoms][4], float (&kept)[MAtoms][NAtoms][4]) {
 #pragma unroll
     for (int m_atom = 0; m_atom < MAtoms; ++m_atom) {
 #pragma unroll
         for (int n_atom = 0; n_atom < NAtoms; ++n_atom) {
 #pragma unroll
             for (int element = 0; element < 4; ++element) {
-                kept[m_atom][n_atom][element] = first
-                    ? acc[m_atom][n_atom][element]
-                    : __fadd_rn(kept[m_atom][n_atom][element], acc[m_atom][n_atom][element]);
+                kept[m_atom][n_atom][element] =
+                    __fadd_rn(kept[m_atom][n_atom][element], acc[m_atom][n_atom][element]);
                 acc[m_atom][n_atom][element] = 0.0f;
             }
         }
@@ -1415,16 +1414,21 @@ __device__ __forceinline__ void tf32_ms_round_fragments(Tf32MsFragments<MAtoms, 
 // fragments, loaded a step earlier, just before its products, so the
 // rounding overlaps the previous step's products still in the tensor pipe
 // instead of waiting on loads just issued.
-// The slab walk: `after_slab(t)` runs once slab t's products are all in
-// the accumulators, before the next slab's first product.
+// A cut reduction walks as two loops, its pieces outside and a piece's slabs
+// inside, so the inner loop is the one-chain walk's: with the piece end
+// tested on every slab, the compiler folded the piece close into every slab
+// under a predicate, about a third more instructions for the same products.
+// `close_piece(first)` runs between pieces only, once a piece's products
+// are all in the accumulators and before the next piece's first; the copies
+// run on across the boundary. A one-chain walk is one piece.
 template <bool Full, SgbTf32Op Op, int BM, int BN, int BK, int WarpsM, int WarpsN, int Stages,
-          bool Aligned, typename AfterSlab>
+          bool Aligned, typename ClosePiece>
 __device__ __forceinline__ void tf32_ms_walk(
-    Tf32MsTile<Op, BM, BN, BK, WarpsM, WarpsN, Stages, Aligned>& tile, int tiles,
+    Tf32MsTile<Op, BM, BN, BK, WarpsM, WarpsN, Stages, Aligned>& tile, int tiles, int piece_tiles,
     int warp_m, int warp_n, int lane,
     float (&acc)[Tf32MsConfig<Op, BM, BN, BK, WarpsM, WarpsN, Stages>::MAtoms]
                 [Tf32MsConfig<Op, BM, BN, BK, WarpsM, WarpsN, Stages>::NAtoms][4],
-    AfterSlab after_slab) {
+    ClosePiece close_piece) {
     using Cfg = Tf32MsConfig<Op, BM, BN, BK, WarpsM, WarpsN, Stages>;
     static_assert(Cfg::KSteps >= 2, "the slab barrier sits on the second-to-last step");
     constexpr unsigned SlotBytes = (unsigned)Cfg::StageFloats * 4U;
@@ -1444,35 +1448,41 @@ __device__ __forceinline__ void tf32_ms_walk(
     Tf32MsFragments<Cfg::MAtoms, Cfg::NAtoms> f[2];
     tf32_ms_fragments<Op, BM, BN, BK, WarpsM, WarpsN, Stages>(
         f[0], tile.shared, read_slot, 0, warp_m, warp_n, lane);
-    for (int t = 0; t < tiles; ++t) {
+    int t = 0;
+    int piece_end = min(piece_tiles, tiles);
+    while (true) {
+        for (; t < piece_end; ++t) {
 #pragma unroll
-        for (int step = 0; step < Cfg::KSteps; ++step) {
-            // After the barrier of the second-to-last step, read_slot is
-            // already the next slab's; past the walk the load is unused.
-            tf32_ms_fragments<Op, BM, BN, BK, WarpsM, WarpsN, Stages>(
-                f[(step + 1) & 1], tile.shared, read_slot,
-                step + 1 < Cfg::KSteps ? step + 1 : 0, warp_m, warp_n, lane);
-            tf32_ms_round_fragments(f[step & 1]);
-            if (step == 0) {
-                tile.template stage_next<Full>(write_slot, fill < tiles);
-                ++fill;
-            }
+            for (int step = 0; step < Cfg::KSteps; ++step) {
+                // After the barrier of the second-to-last step, read_slot is
+                // already the next slab's; past the walk the load is unused.
+                tf32_ms_fragments<Op, BM, BN, BK, WarpsM, WarpsN, Stages>(
+                    f[(step + 1) & 1], tile.shared, read_slot,
+                    step + 1 < Cfg::KSteps ? step + 1 : 0, warp_m, warp_n, lane);
+                tf32_ms_round_fragments(f[step & 1]);
+                if (step == 0) {
+                    tile.template stage_next<Full>(write_slot, fill < tiles);
+                    ++fill;
+                }
 #pragma unroll
-            for (int m_atom = 0; m_atom < Cfg::MAtoms; ++m_atom) {
+                for (int m_atom = 0; m_atom < Cfg::MAtoms; ++m_atom) {
 #pragma unroll
-                for (int n_atom = 0; n_atom < Cfg::NAtoms; ++n_atom) {
-                    tf32_mma_m16n8k8(acc[m_atom][n_atom], f[step & 1].a[m_atom], f[step & 1].b[n_atom]);
+                    for (int n_atom = 0; n_atom < Cfg::NAtoms; ++n_atom) {
+                        tf32_mma_m16n8k8(acc[m_atom][n_atom], f[step & 1].a[m_atom], f[step & 1].b[n_atom]);
+                    }
+                }
+                if (step == Cfg::KSteps - 2) {
+                    tf32_ms_commit();
+                    tf32_ms_wait<Stages - 2>();
+                    __syncthreads();
+                    read_slot = read_slot + SlotBytes == RingBytes ? 0U : read_slot + SlotBytes;
+                    write_slot = write_slot + SlotBytes == RingBytes ? 0U : write_slot + SlotBytes;
                 }
             }
-            if (step == Cfg::KSteps - 2) {
-                tf32_ms_commit();
-                tf32_ms_wait<Stages - 2>();
-                __syncthreads();
-                read_slot = read_slot + SlotBytes == RingBytes ? 0U : read_slot + SlotBytes;
-                write_slot = write_slot + SlotBytes == RingBytes ? 0U : write_slot + SlotBytes;
-            }
         }
-        after_slab(t);
+        if (t >= tiles) break;
+        close_piece(t == piece_tiles);
+        piece_end = min(piece_end + piece_tiles, tiles);
     }
     tf32_ms_wait<0>();
 }
@@ -1485,7 +1495,7 @@ __device__ __forceinline__ void tf32_ms_mainloop(
     int warp_m, int warp_n, int lane,
     float (&acc)[Tf32MsConfig<Op, BM, BN, BK, WarpsM, WarpsN, Stages>::MAtoms]
                 [Tf32MsConfig<Op, BM, BN, BK, WarpsM, WarpsN, Stages>::NAtoms][4]) {
-    tf32_ms_walk<Full>(tile, tiles, warp_m, warp_n, lane, acc, [](int) {});
+    tf32_ms_walk<Full>(tile, tiles, tiles, warp_m, warp_n, lane, acc, [](bool) {});
 }
 
 template <SgbTf32Op Op>
@@ -1554,7 +1564,7 @@ __device__ __forceinline__ void tf32_ms_store_vec_cg(float* destination, const f
 // with Pieces above one, in that many pieces of whole 32-deep groups folded
 // in order with the bias after them.
 template <SgbTf32Op Op, int BM, int BN, int BK, int WarpsM, int WarpsN, int Stages,
-          int Pieces = 1>
+          int Pieces = 1, bool Aligned = true>
 __device__ __forceinline__ void tf32_ms_tile_kernel(
     float* output, const float* a, const float* b, const float* bias,
     Sm80Tf32KernelParams params) {
@@ -1566,7 +1576,7 @@ __device__ __forceinline__ void tf32_ms_tile_kernel(
     int columns = tf32_ms_columns<Op>(params);
     int reduction = tf32_ms_reduction<Op>(params);
     int row_tiles = (rows + BM - 1) / BM;
-    Tf32MsTile<Op, BM, BN, BK, WarpsM, WarpsN, Stages> tile(
+    Tf32MsTile<Op, BM, BN, BK, WarpsM, WarpsN, Stages, Aligned> tile(
         a, b, rows, columns, reduction, params.lda, params.ldb,
         (int)blockIdx.x % row_tiles * BM, (int)blockIdx.x / row_tiles * BN, 0);
     int warp = (int)threadIdx.x >> 5;
@@ -1581,9 +1591,8 @@ __device__ __forceinline__ void tf32_ms_tile_kernel(
     // A cut reduction starts every piece from +0.0 and adds the bias after
     // the pieces instead of seeding the chain with it.
     float acc[Cfg::MAtoms][Cfg::NAtoms][4];
-    // The finished pieces' sum of a cut reduction, for the tiles of up to 32
-    // accumulators per thread; a larger tile would spill with a second set,
-    // so it folds through its output tile.
+    // The finished pieces' sum of a cut reduction, held in registers beside
+    // the accumulators.
     float kept[Cfg::MAtoms][Cfg::NAtoms][4];
 #pragma unroll
     for (int column_group = 0; column_group < Out::Groups; ++column_group) {
@@ -1602,31 +1611,32 @@ __device__ __forceinline__ void tf32_ms_tile_kernel(
         }
     }
 
+    if constexpr (Pieces > 1) {
+#pragma unroll
+        for (int m_atom = 0; m_atom < Cfg::MAtoms; ++m_atom) {
+#pragma unroll
+            for (int n_atom = 0; n_atom < Cfg::NAtoms; ++n_atom) {
+#pragma unroll
+                for (int element = 0; element < 4; ++element) kept[m_atom][n_atom][element] = -0.0f;
+            }
+        }
+    }
+
     // Whole 32-deep groups, so the k8 steps match the 32-deep tiles'.
     int tiles = (reduction + 31) / 32 * (32 / BK);
     int piece_tiles = tf32_rna_piece_tiles<Pieces, BK>(reduction);
-    auto after_slab = [&](int t) {
-        if constexpr (Pieces > 1) {
-            if (tf32_rna_piece_ends(t + 1, tiles, piece_tiles)) {
-                if constexpr (Cfg::MAtoms * Cfg::NAtoms <= 8) {
-                    tf32_rna_keep_piece<Cfg::MAtoms, Cfg::NAtoms>(acc, kept, t < piece_tiles);
-                } else {
-                    tf32_rna_fold_piece<Cfg::APerm, Cfg::MAtoms, Cfg::NAtoms>(
-                        acc, output, params.ldc, rows, columns, row_base, column_base, group,
-                        thread, t < piece_tiles);
-                }
-            }
-        }
+    auto close_piece = [&](bool) {
+        if constexpr (Pieces > 1) tf32_rna_keep_piece<Cfg::MAtoms, Cfg::NAtoms>(acc, kept);
     };
     if (tile.tile_row + BM <= rows && tile.tile_column + BN <= columns && reduction % 32 == 0) {
-        tf32_ms_walk<true>(tile, tiles, warp_m, warp_n, lane, acc, after_slab);
+        tf32_ms_walk<true>(tile, tiles, piece_tiles, warp_m, warp_n, lane, acc, close_piece);
     } else {
-        tf32_ms_walk<false>(tile, tiles, warp_m, warp_n, lane, acc, after_slab);
+        tf32_ms_walk<false>(tile, tiles, piece_tiles, warp_m, warp_n, lane, acc, close_piece);
     }
     if constexpr (Pieces > 1) {
         // The last piece meets the earlier pieces' sum, then the bias: what
-        // the stores below write.
-        bool staged = tiles > piece_tiles;
+        // the stores below write. With no earlier piece the sum is still
+        // -0.0, which returns the last chain unchanged.
 #pragma unroll
         for (int column_group = 0; column_group < Out::Groups; ++column_group) {
 #pragma unroll
@@ -1642,17 +1652,8 @@ __device__ __forceinline__ void tf32_ms_tile_kernel(
                 for (int m_atom = 0; m_atom < Cfg::MAtoms; ++m_atom) {
 #pragma unroll
                     for (int half = 0; half < 2; ++half) {
-                        int row = row_base + Out::row(m_atom, half, group);
-                        float value = Out::value(acc, m_atom, half, column_group, v);
-                        if (staged && row < rows && column < columns) {
-                            float earlier;
-                            if constexpr (Cfg::MAtoms * Cfg::NAtoms <= 8) {
-                                earlier = Out::value(kept, m_atom, half, column_group, v);
-                            } else {
-                                earlier = output[(long long)row * params.ldc + column];
-                            }
-                            value = __fadd_rn(earlier, value);
-                        }
+                        float value = __fadd_rn(Out::value(kept, m_atom, half, column_group, v),
+                                                Out::value(acc, m_atom, half, column_group, v));
                         Out::value(acc, m_atom, half, column_group, v) =
                             biased ? __fadd_rn(value, add) : value;
                     }
@@ -2158,6 +2159,14 @@ TF32_RNA_MS_TILE(nn_sm80_tf32_rna_ms_m64n64_bk32_s3, SgbTf32Nn, 64, 64, 32, 2, 2
 TF32_RNA_MS_TILE(nt_sm80_tf32_rna_ms_m64n128_bk16_s6, SgbTf32Nt, 64, 128, 16, 2, 2, 6, 1)
 TF32_RNA_MS_TILE(nt_sm80_tf32_rna_ms_m128n64_bk32_s3, SgbTf32Nt, 128, 64, 32, 2, 2, 3, 1)
 TF32_RNA_MS_TILE(nt_sm80_tf32_rna_ms_m128n128_bk16_s5, SgbTf32Nt, 128, 128, 16, 2, 2, 5, 1)
+// The input gradient's 64 x 64 tile, for an output too small to fill the
+// card with 128-row tiles.
+TF32_RNA_MS_TILE(nt_sm80_tf32_rna_ms_m64n64_bk32_s3, SgbTf32Nt, 64, 64, 32, 2, 2, 3, 2)
+// The 16 x 32 tiles of a batch under 256 rows, two warps of 16 x 16: on an
+// RTX 6000 Ada they ran 64-row forwards and input gradients in 0.62 to 0.75
+// of the portable 16 x 32 tile's time.
+TF32_RNA_MS_TILE(nn_sm80_tf32_rna_ms_m16n32_bk32_s4, SgbTf32Nn, 16, 32, 32, 1, 2, 4, 2)
+TF32_RNA_MS_TILE(nt_sm80_tf32_rna_ms_m16n32_bk32_s4, SgbTf32Nt, 16, 32, 32, 1, 2, 4, 2)
 
 #undef TF32_RNA_MS_TILE
 
@@ -2165,11 +2174,12 @@ TF32_RNA_MS_TILE(nt_sm80_tf32_rna_ms_m128n128_bk16_s5, SgbTf32Nt, 128, 128, 16, 
 // pieces: each piece a chain from +0.0 over its whole 32-deep groups, added
 // in order to the finished pieces' sum, the bias after the pieces. The input
 // gradient's 128 x 128 tile folds a cut layer on its 64 x 128 sibling of the
-// same ring and staging. The 128 x 64 tiles spread the tile over eight warps
-// of 32 x 32, so each thread holds 32 accumulators and keeps the finished
-// pieces' sum in a second set of registers instead of folding it through
-// the output: on an RTX 5090 the input gradient 4096x256x2112 ran in 54.5 us
-// against 60.7 on four warps, with the same bits.
+// same ring and staging. Every tile keeps the one-chain tile's warps and the
+// finished pieces' sum in a second set of registers: on the nested walk the
+// 128 x 64 tile on four warps holds both sets in 255 registers without local
+// memory under CUDA 12.8 to 13.4, and on an RTX 6000 Ada the cut layers ran
+// in the time of their one-chain tiles, where the eight-warp tile of the
+// one-loop walk took 12 to 25 percent longer, with the same bits.
 #define TF32_RNA_MS_TILE_PIECES(NAME, OP, BM, BN, BK, WARPS_M, WARPS_N, STAGES, MIN_BLOCKS) \
     extern "C" __global__ __launch_bounds__(32 * WARPS_M * WARPS_N, MIN_BLOCKS)           \
     void NAME(float* output, const float* a, const float* b, const float* bias,           \
@@ -2179,12 +2189,31 @@ TF32_RNA_MS_TILE(nt_sm80_tf32_rna_ms_m128n128_bk16_s5, SgbTf32Nt, 128, 128, 16, 
     }
 
 TF32_RNA_MS_TILE_PIECES(nn_sm80_tf32_rna_pieces4_ms_m64n128_bk16_s6, SgbTf32Nn, 64, 128, 16, 2, 2, 6, 1)
-TF32_RNA_MS_TILE_PIECES(nn_sm80_tf32_rna_pieces4_ms_m128n64_bk32_s3, SgbTf32Nn, 128, 64, 32, 4, 2, 3, 1)
+TF32_RNA_MS_TILE_PIECES(nn_sm80_tf32_rna_pieces4_ms_m128n64_bk32_s3, SgbTf32Nn, 128, 64, 32, 2, 2, 3, 1)
 TF32_RNA_MS_TILE_PIECES(nn_sm80_tf32_rna_pieces4_ms_m64n64_bk32_s3, SgbTf32Nn, 64, 64, 32, 2, 2, 3, 2)
 TF32_RNA_MS_TILE_PIECES(nt_sm80_tf32_rna_pieces4_ms_m64n128_bk16_s6, SgbTf32Nt, 64, 128, 16, 2, 2, 6, 1)
-TF32_RNA_MS_TILE_PIECES(nt_sm80_tf32_rna_pieces4_ms_m128n64_bk32_s3, SgbTf32Nt, 128, 64, 32, 4, 2, 3, 1)
+TF32_RNA_MS_TILE_PIECES(nt_sm80_tf32_rna_pieces4_ms_m128n64_bk32_s3, SgbTf32Nt, 128, 64, 32, 2, 2, 3, 1)
+TF32_RNA_MS_TILE_PIECES(nt_sm80_tf32_rna_pieces4_ms_m64n64_bk32_s3, SgbTf32Nt, 64, 64, 32, 2, 2, 3, 2)
 
 #undef TF32_RNA_MS_TILE_PIECES
+
+// The forward's 64 x 64 tile for operands whose rows or bases do not sit on
+// 16-byte boundaries: it stages them four bytes at a time into the same
+// slots, so it walks the same chain and folds the same pieces to the same
+// bits as the aligned tiles.
+extern "C" __global__ __launch_bounds__(128, 1)
+void nn_sm80_tf32_rna_ms_m64n64_bk32_s4_any(
+    float* output, const float* a, const float* b, const float* bias,
+    Sm80Tf32KernelParams params) {
+    tf32_ms_tile_kernel<SgbTf32Nn, 64, 64, 32, 2, 2, 4, 1, false>(output, a, b, bias, params);
+}
+
+extern "C" __global__ __launch_bounds__(128, 1)
+void nn_sm80_tf32_rna_pieces4_ms_m64n64_bk32_s4_any(
+    float* output, const float* a, const float* b, const float* bias,
+    Sm80Tf32KernelParams params) {
+    tf32_ms_tile_kernel<SgbTf32Nn, 64, 64, 32, 2, 2, 4, 4, false>(output, a, b, bias, params);
+}
 
 // The persistent forward: two resident CTAs a multiprocessor walk the
 // output tiles of a shape the 128 x 64 tile covers whole.

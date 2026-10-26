@@ -64,6 +64,39 @@
   twin of the fold do; models in bf16 or f16 keep the Inference family. A
   `Tf32` model therefore trains and serves with the same bits. These
   products change their bits once in this release.
+- A TF32 layer cut into four pieces runs in about the time of the same
+  layer uncut. The pieces tiles tested the end of a piece on every slab of
+  the sum, and the compiler turned that test into the piece close itself,
+  executed under a predicate on every slab: a third more instructions. They
+  now walk the pieces in an outer loop and a piece's slabs in an inner one,
+  keep the finished pieces' sum in registers from -0.0, and the multistage
+  128 x 64 pieces tile is back on the four warps of its one-chain tile. On
+  an RTX 6000 Ada the cut layers measured run within 6 percent of their
+  one-chain tiles' time, where they took 8 to 25 percent longer. The bits
+  do not change.
+- An exact forward or input gradient whose output covers half a wave to
+  three waves of the card in 32 x 64 tiles (a third of a wave for an input
+  gradient) runs on a new 32 x 64 tile that stages both operands along the
+  sum in 16-byte words and reads four consecutive inputs per load, where the
+  older tiles copied a transposed operand four bytes at a time. On an RTX
+  6000 Ada such products run in 0.50 to 0.86 of the 16 x 16 tile's time; the
+  window came within 0.45 percent of the faster tile per product over the
+  census, where the older tiles alone were 6.5 percent behind. Every exact
+  tile walks the same chain, so the bits do not change.
+- On SM89 the strict TF32 policy picks its tiles by rules measured on an
+  RTX 6000 Ada: a cut forward on the multistage 128 x 64 tile from half a
+  wave of its grid and on the 64 x 64 tile from eight waves of work or half
+  a wave of its own grid (the persistent tile, whose pieces still fold
+  through its output, no longer serves a cut layer); a cut input gradient
+  on a new multistage 64 x 64 tile below half a wave of 128 x 64 tiles; a
+  batch of up to 64 rows on new two-warp 16 x 32 multistage tiles; an uncut
+  forward of 512 to 8191 rows over 128 to 512 outputs on the 64 x 64 or the
+  128 x 64 tile by the card rounds each grid takes; and a cut forward whose
+  operands are off 16-byte boundaries on a 64 x 64 multistage tile that
+  stages them four bytes at a time. Over the census's cut forwards the rule
+  came within 0.23 percent of the fastest route per product; the new tiles
+  ran their products in 0.55 to 0.77 of the former routes' time. The bits
+  do not change.
 - A bf16 or f16 forward and input gradient pick their arithmetic by the
   layer's shape alone, so a row has the same bits at every batch size, with
   the tensor cores on or off. An input gradient takes the tensor-core tile
