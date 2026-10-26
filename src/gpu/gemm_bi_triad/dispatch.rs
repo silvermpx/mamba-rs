@@ -3009,6 +3009,9 @@ fn rna_layer_pieces_selection(
     let ada = availability
         .rna
         .is_some_and(|rna| rna.device.compute_capability == (8, 9));
+    let sm120 = availability
+        .rna
+        .is_some_and(|rna| rna.device.compute_capability.0 == 12);
     // The tiles the work fills, best first. The rules are measured per
     // architecture over the census's cut cells, each as the time of the
     // chosen tile against the fastest same-bit route of the cell. On an RTX
@@ -3063,8 +3066,69 @@ fn rna_layer_pieces_selection(
         } else {
             [None, None, None]
         }
+    } else if sm120 && forward {
+        // On an RTX 5090 a forward takes the 128 x 64 multistage tile from
+        // one and a half waves of its grid, the 64 x 64 tile from sixteen
+        // waves of work or a wave of its own grid, and below that the 32 x 32
+        // tile that stages four bytes at a time, from two thirds of a wave of
+        // its grid, ahead of the split members. Over the census's 365 cut
+        // forwards, every route forced in two passes, that came within 0.71%
+        // of the fastest route per cell in geometric mean (25 cells more than
+        // 3% off), where the rule without the 32 x 32 tile took 2.0% (66).
+        let small_tiles = rows.div_ceil(64).saturating_mul(columns.div_ceil(64));
+        let quarter_tiles = rows.div_ceil(32).saturating_mul(columns.div_ceil(32));
+        if rows >= 128 && wide_tiles.saturating_mul(2) >= sms.saturating_mul(3) {
+            [
+                Some(multistage(Tf32RnaWideTile::MsM128N64S3)),
+                Some(multistage(Tf32RnaWideTile::MsM64N64S3)),
+                None,
+            ]
+        } else if work >= sms.saturating_mul(16) || small_tiles >= sms {
+            [
+                Some(multistage(Tf32RnaWideTile::MsM64N64S3)),
+                Some(tile_64),
+                None,
+            ]
+        } else if rows >= 32 && quarter_tiles.saturating_mul(3) >= sms.saturating_mul(2) {
+            [
+                Some(multistage(Tf32RnaWideTile::MsM32N32S4AnyAlignment)),
+                None,
+                None,
+            ]
+        } else {
+            [None, None, None]
+        }
+    } else if sm120 {
+        // On an RTX 5090 an input gradient takes the 64 x 64 tile while the
+        // 128 x 64 tile's grid stays under four waves and its own covers a
+        // quarter of the card, the 128 x 64 tile from four waves, the
+        // portable 64 x 64 tile from thirty-two waves of work, and the split
+        // members below. Over the census's 414 cut input gradients that came
+        // within 0.78% of the fastest route per cell in geometric mean (24
+        // cells more than 3% off), where the rule measured before the nested
+        // walk took 6.9% (93).
+        let small_tiles = rows.div_ceil(64).saturating_mul(columns.div_ceil(64));
+        if rows >= 128 && wide_tiles < sms.saturating_mul(4) && small_tiles.saturating_mul(4) >= sms
+        {
+            [
+                Some(multistage(Tf32RnaWideTile::NtMsM64N64S3)),
+                Some(multistage(Tf32RnaWideTile::NtMsM128N64S3)),
+                Some(tile_64),
+            ]
+        } else if rows >= 128 && wide_tiles.saturating_mul(4) >= sms {
+            [
+                Some(multistage(Tf32RnaWideTile::NtMsM128N64S3)),
+                Some(tile_64),
+                None,
+            ]
+        } else if work >= sms.saturating_mul(32) {
+            [Some(tile_64), None, None]
+        } else {
+            [None, None, None]
+        }
     } else if forward {
-        // Measured on an RTX 5090.
+        // The rule an RTX 5090 took before the nested walk; the
+        // architectures not yet measured on their own cards run it.
         if work >= sms.saturating_mul(16) {
             [
                 Some(multistage(Tf32RnaWideTile::MsM64N64S3)),
@@ -8999,17 +9063,24 @@ pub(super) fn exact_batch_invariant_nn_plan(
     let big_fills = exact_big_tile_fills(m, n, waves, compute_capability);
     if exact_chunks(k, n) {
         let chunks = k.div_ceil(exact_chunk(k, n));
-        // A CC 12.x board folds a cut layer in the 128 x 128 tile where that
-        // tile's grid covers the card as a chain layer's would; every other
-        // board picks among the register tiles by its own census.
-        if compute_capability.0 == 12 {
-            if big_fills {
-                return Ok(ScalarDispatchPlan::NnExactPiecesBig);
-            }
-            if exact_pieces_m64_fills(m, n, waves) {
-                return Ok(ScalarDispatchPlan::NnExactPiecesM64);
-            }
-        } else if let Some(plan) = exact_cut_forward_register_tile(m, n, chunks, waves) {
+        // The slim partial takes the fold once its grid fills three quarters
+        // of a wave of the card.
+        let slim = m > 64
+            && m.div_ceil(128)
+                .saturating_mul(n.div_ceil(64))
+                .saturating_mul(chunks)
+                .saturating_mul(4)
+                >= waves.saturating_mul(3);
+        // Each architecture picks among the register tiles by its own census.
+        let tiles = exact_cut_tiles(compute_capability).forward;
+        let cut = ExactCutLayer {
+            m,
+            outputs: n,
+            chunks,
+            waves,
+            slim,
+        };
+        if let Some(plan) = exact_cut_forward_register_tile(cut, tiles) {
             return Ok(plan);
         }
         let piece_rows = (SPLITK_SCRATCH_CAP / chunks.saturating_mul(n).max(1)).clamp(1, m);
@@ -9019,15 +9090,10 @@ pub(super) fn exact_batch_invariant_nn_plan(
                  of {SPLITK_SCRATCH_CAP} floats"
             ));
         }
-        // The slim partial once its grid fills three quarters of a wave of
-        // the card, the small tile while its grid covers the card, and the
-        // 16 x 16 tile for one row or a grid of small tiles that leaves a
-        // multiprocessor idle.
-        let slim_grid = m
-            .div_ceil(128)
-            .saturating_mul(n.div_ceil(64))
-            .saturating_mul(chunks);
-        let partial = if m > 64 && slim_grid.saturating_mul(4) >= waves.saturating_mul(3) {
+        // The slim partial where it fills the card, the small tile while its
+        // grid covers the card, and the 16 x 16 tile for one row or a grid of
+        // small tiles that leaves a multiprocessor idle.
+        let partial = if slim {
             ExactChunkPartial::Slim
         } else if m == 1 || exact_small_partial_underfills(m, n, chunks, waves) {
             exact_narrow16_partial(piece_rows, n)
@@ -9111,88 +9177,234 @@ fn exact_small_partial_underfills(m: usize, outputs: usize, chunks: usize, waves
         < waves.saturating_mul(3)
 }
 
-/// The piece count up to which the 32 x 64 tile folds a cut layer; a deeper
-/// layer's chunk partials spread their extra pieces over more CTAs and win.
-const EXACT_KM_PIECES_MAX: usize = 6;
-
-/// Whether the 64 x 64 tile folds a cut forward: only once its rows fill a
-/// tile, since a thin batch over a wide layer (a language model's head over
-/// a 32000-word vocabulary) covers the card with tiles that are almost all
-/// padding, and the chunk partials then ran in 0.54 to 0.91 of its time on
-/// an RTX 5090 from 1 to 32 rows, while at 64 rows the tile ran 1.6x faster.
-fn exact_pieces_m64_fills(m: usize, n: usize, waves: usize) -> bool {
-    m >= EXACT_PIECES_M64_MIN_ROWS && m.div_ceil(64).saturating_mul(n.div_ceil(64)) >= waves
+/// A share of a wave of the card's multiprocessors, `num / den` of them: a
+/// grid covers it when its CTAs reach that many.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct WaveShare {
+    num: usize,
+    den: usize,
 }
 
-/// The register tile a cut forward of `m` rows into `n` outputs, cut into
-/// `chunks` pieces, folds its pieces in, or `None` for the chunk partials:
-/// the 128 x 128 tile from half a wave of its grid, the 128 x 64 tile from
-/// half a wave of its grid, the 64 x 64 tile from a wave of its grid once
-/// its rows fill a tile, then the 32 x 64 tile over a layer of up to six
-/// pieces from two thirds of a wave of its grid. Every route writes the same
-/// bits. Over the census's 371 cut forwards on an RTX 6000 Ada, every route
-/// forced in two passes, the rule came within 0.7% of the fastest route per
-/// cell in geometric mean (16 cells more than 3% off), where the 128 x 128
-/// tile from three quarters of a wave and the 64 x 64 tile alone took 3.1%
-/// (53 cells).
-fn exact_cut_forward_register_tile(
-    m: usize,
-    n: usize,
-    chunks: usize,
-    waves: usize,
+impl WaveShare {
+    const fn new(num: usize, den: usize) -> Self {
+        Self { num, den }
+    }
+
+    /// Whether `grid` CTAs cover this share of `waves` multiprocessors.
+    pub(super) fn covered(self, grid: usize, waves: usize) -> bool {
+        grid.saturating_mul(self.den) >= waves.saturating_mul(self.num)
+    }
+}
+
+/// One architecture's register tiles for a cut exact layer: the share of a
+/// wave each tile's grid must cover to fold the pieces (the 128 x 128, the
+/// 128 x 64 and the 64 x 64 tile, then the 32 x 64 tile, which an input
+/// gradient takes below `km_below` too), the most pieces the 32 x 64 tile
+/// folds, past which the chunk partials spread the pieces over more CTAs,
+/// and where that tile folds a layer the chunk fold would take on its slim
+/// partial. The shares read the live multiprocessor count, so every card of
+/// an architecture fills by them; every tile writes the same bits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct ExactCutTiles {
+    pub(super) big: WaveShare,
+    pub(super) wide: WaveShare,
+    pub(super) m64: Option<WaveShare>,
+    pub(super) km: WaveShare,
+    pub(super) km_below: Option<WaveShare>,
+    pub(super) km_max_pieces: usize,
+    pub(super) km_beside_slim: KmBesideSlim,
+}
+
+/// Where the 32 x 64 tile folds a cut layer that the chunk fold would take
+/// on its slim partial.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum KmBesideSlim {
+    /// Wherever its window and its most pieces take it.
+    Always,
+    /// Nowhere: the slim partial keeps every layer it covers.
+    Never,
+    /// While the layer's outputs reach its rows; a batch taller than the
+    /// layer is wide stays on the slim partial.
+    WhileOutputsReachRows,
+}
+
+impl KmBesideSlim {
+    /// Whether the 32 x 64 tile may fold `cut`, as far as the slim partial
+    /// goes.
+    fn allows(self, cut: ExactCutLayer) -> bool {
+        !cut.slim
+            || match self {
+                Self::Always => true,
+                Self::Never => false,
+                Self::WhileOutputsReachRows => cut.outputs >= cut.m,
+            }
+    }
+}
+
+/// An architecture's tables for cut forwards and cut input gradients.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct ExactCutRules {
+    pub(super) forward: ExactCutTiles,
+    pub(super) input_gradient: ExactCutTiles,
+}
+
+/// SM89, from the census's 788 cut cells on an RTX 6000 Ada, every route
+/// forced in two passes: the forwards came within 0.7% of the fastest route
+/// per cell in geometric mean, the input gradients within 0.34%.
+const EXACT_CUT_SM89: ExactCutRules = ExactCutRules {
+    forward: ExactCutTiles {
+        big: WaveShare::new(1, 2),
+        wide: WaveShare::new(1, 2),
+        m64: Some(WaveShare::new(1, 1)),
+        km: WaveShare::new(2, 3),
+        km_below: None,
+        km_max_pieces: 6,
+        km_beside_slim: KmBesideSlim::Always,
+    },
+    input_gradient: ExactCutTiles {
+        big: WaveShare::new(1, 2),
+        wide: WaveShare::new(2, 3),
+        m64: None,
+        km: WaveShare::new(1, 2),
+        km_below: Some(WaveShare::new(1, 1)),
+        km_max_pieces: 6,
+        km_beside_slim: KmBesideSlim::Always,
+    },
+};
+
+/// SM120, from the same census on an RTX 5090: the forwards came within
+/// 0.14% of the fastest route per cell in geometric mean (6 of 371 cells
+/// more than 3% off), the input gradients within 0.31% (14 of 417), where
+/// the rule this architecture ran before, the 128 x 128 and 64 x 64 tiles
+/// alone, took 0.82% (18) and 3.5% (47). The 32 x 64 tile beat the chunk
+/// partials up to 16 pieces on a forward, where the slim partial keeps the
+/// layers it covers, and up to 24 on an input gradient. Beside the slim
+/// partial over the transposed weight it ran in 0.63 to 0.97 of its time on
+/// 127 to 129 rows of 1536 to 2112 inputs, and lost up to 23% on 768 and
+/// 1024 rows of 256 and 384 inputs.
+const EXACT_CUT_SM120: ExactCutRules = ExactCutRules {
+    forward: ExactCutTiles {
+        big: WaveShare::new(1, 4),
+        wide: WaveShare::new(1, 2),
+        m64: Some(WaveShare::new(1, 1)),
+        km: WaveShare::new(1, 1),
+        km_below: None,
+        km_max_pieces: 16,
+        km_beside_slim: KmBesideSlim::Never,
+    },
+    input_gradient: ExactCutTiles {
+        big: WaveShare::new(4, 3),
+        wide: WaveShare::new(1, 2),
+        m64: None,
+        km: WaveShare::new(2, 3),
+        km_below: Some(WaveShare::new(1, 1)),
+        km_max_pieces: 24,
+        km_beside_slim: KmBesideSlim::WhileOutputsReachRows,
+    },
+};
+
+/// The cut exact layer's tables of the card's architecture: SM120 and SM89
+/// by their own censuses; an architecture not yet measured on its own card
+/// runs SM89's.
+pub(super) fn exact_cut_tiles(compute_capability: (u32, u32)) -> ExactCutRules {
+    match compute_capability {
+        (12, _) => EXACT_CUT_SM120,
+        _ => EXACT_CUT_SM89,
+    }
+}
+
+/// A cut layer as the register tiles see it: its rows, its outputs, the
+/// pieces its reduction is cut into, the card's multiprocessors, and whether
+/// the chunk fold would take its slim partial.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ExactCutLayer {
+    pub(super) m: usize,
+    pub(super) outputs: usize,
+    pub(super) chunks: usize,
+    pub(super) waves: usize,
+    pub(super) slim: bool,
+}
+
+/// The register tile a cut forward folds its pieces in under the
+/// architecture's `tiles`, or `None` for the chunk partials: the 128 x 128
+/// tile, the 128 x 64 tile and the 64 x 64 tile (once its rows fill a tile)
+/// each from its share of a wave of its grid, then the 32 x 64 tile over a
+/// layer of up to its most pieces, beside the slim partial where the table
+/// says so. Every route writes the same bits.
+pub(super) fn exact_cut_forward_register_tile(
+    cut: ExactCutLayer,
+    tiles: ExactCutTiles,
 ) -> Option<ScalarDispatchPlan> {
+    let ExactCutLayer {
+        m,
+        outputs: n,
+        chunks,
+        waves,
+        ..
+    } = cut;
     let big = m.div_ceil(128).saturating_mul(n.div_ceil(128));
-    if m >= GEMM_CUSTOM_MIN && n >= GEMM_CUSTOM_MIN && big.saturating_mul(2) >= waves {
+    if m >= GEMM_CUSTOM_MIN && n >= GEMM_CUSTOM_MIN && tiles.big.covered(big, waves) {
         return Some(ScalarDispatchPlan::NnExactPiecesBig);
     }
     let wide = m.div_ceil(128).saturating_mul(n.div_ceil(64));
-    if m >= GEMM_CUSTOM_MIN && wide.saturating_mul(2) >= waves {
+    if m >= GEMM_CUSTOM_MIN && tiles.wide.covered(wide, waves) {
         return Some(ScalarDispatchPlan::NnExactPiecesM128N64);
     }
-    if exact_pieces_m64_fills(m, n, waves) {
+    let small = m.div_ceil(64).saturating_mul(n.div_ceil(64));
+    if m >= EXACT_PIECES_M64_MIN_ROWS && tiles.m64.is_some_and(|share| share.covered(small, waves))
+    {
         return Some(ScalarDispatchPlan::NnExactPiecesM64);
     }
     let km = m.div_ceil(32).saturating_mul(n.div_ceil(64));
-    if n >= 32 && chunks <= EXACT_KM_PIECES_MAX && km.saturating_mul(3) >= waves.saturating_mul(2) {
+    if n >= 32
+        && chunks <= tiles.km_max_pieces
+        && tiles.km.covered(km, waves)
+        && tiles.km_beside_slim.allows(cut)
+    {
         return Some(ScalarDispatchPlan::NnExactKmPieces);
     }
     None
 }
 
-/// The register tile a cut input gradient of `m` rows into `n_in` outputs,
-/// cut into `chunks` pieces, folds its pieces in, or `None` for the chunk
-/// partials: over the transposed weight (`via`) the 128 x 128 tile from half
-/// a wave of its grid and the 128 x 64 tile from two thirds of a wave of its
-/// grid, then the 32 x 64 tile over the weight as it lies, up to six pieces,
-/// while its grid covers half a wave to one wave. Over the census's 417 cut
-/// input gradients on an RTX 6000 Ada the rule came within 0.34% of the
-/// fastest route per cell in geometric mean (12 cells more than 3% off),
-/// where the 128 x 128 tile from two fifths of a wave alone took 2.0% (43
-/// cells); the 64 x 64 tile over the transposed weight was never the
-/// fastest route.
-fn exact_cut_input_gradient_register_tile(
-    m: usize,
-    n_in: usize,
-    chunks: usize,
-    waves: usize,
+/// The register tile a cut input gradient folds its pieces in under the
+/// architecture's `tiles`, or `None` for the chunk partials: over the
+/// transposed weight (`via`) the 128 x 128 and the 128 x 64 tile each from
+/// its share of a wave of its grid, then the 32 x 64 tile over the weight as
+/// it lies, up to its most pieces, while its grid covers its window of a
+/// wave, beside the slim partial where the table says so.
+pub(super) fn exact_cut_input_gradient_register_tile(
+    cut: ExactCutLayer,
     via: bool,
+    tiles: ExactCutTiles,
 ) -> Option<ScalarDispatchPlan> {
+    let ExactCutLayer {
+        m,
+        outputs: n_in,
+        chunks,
+        waves,
+        ..
+    } = cut;
     if via {
         let big = m.div_ceil(128).saturating_mul(n_in.div_ceil(128));
-        if big.saturating_mul(2) >= waves {
+        if tiles.big.covered(big, waves) {
             return Some(ScalarDispatchPlan::NtExactPiecesViaTranspose {
                 tile: ExactPiecesTile::M128N128,
             });
         }
         let wide = m.div_ceil(128).saturating_mul(n_in.div_ceil(64));
-        if wide.saturating_mul(3) >= waves.saturating_mul(2) {
+        if tiles.wide.covered(wide, waves) {
             return Some(ScalarDispatchPlan::NtExactPiecesViaTranspose {
                 tile: ExactPiecesTile::M128N64,
             });
         }
     }
     let km = m.div_ceil(32).saturating_mul(n_in.div_ceil(64));
-    if n_in >= 32 && chunks <= EXACT_KM_PIECES_MAX && km.saturating_mul(2) >= waves && km < waves {
+    if n_in >= 32
+        && chunks <= tiles.km_max_pieces
+        && tiles.km.covered(km, waves)
+        && tiles.km_below.is_none_or(|top| !top.covered(km, waves))
+        && tiles.km_beside_slim.allows(cut)
+    {
         return Some(ScalarDispatchPlan::NtExactKmPieces);
     }
     None
@@ -9244,18 +9456,31 @@ pub(super) fn exact_batch_invariant_nt_plan(
     if exact_chunks(n_out, n_in) {
         let chunks = n_out.div_ceil(exact_chunk(n_out, n_in));
         let via = transposable && nt_pieces_via_transpose_request(request);
-        // A CC 12.x board, whose own kernels serve its aligned operands,
-        // takes the transposed weight on the 128 x 128 tile at the forward's
-        // threshold; every other board picks by its own census.
-        if compute_capability.0 == 12 {
-            if via && exact_big_tile_fills(m, n_in, waves, compute_capability) {
-                return Ok(ScalarDispatchPlan::NtExactPiecesViaTranspose {
-                    tile: ExactPiecesTile::M128N128,
-                });
-            }
-        } else if let Some(plan) =
-            exact_cut_input_gradient_register_tile(m, n_in, chunks, waves, via)
-        {
+        // The forward's slim partial over the weight transposed into the
+        // scratch writes the same planes as the native partials: each piece
+        // is the same chain of the same products. It takes over where the
+        // forward of the transposed shape takes it, once its grid fills
+        // three quarters of a wave. The native 32 x 64 partial reads the
+        // weight across its rows: on an RTX 5090 it ran NT 1024x384x1536 in
+        // 69 us, where the slim partial runs the forward of the same layer
+        // in 49.
+        let slim = m > 64
+            && m.div_ceil(128)
+                .saturating_mul(n_in.div_ceil(64))
+                .saturating_mul(chunks)
+                .saturating_mul(4)
+                >= waves.saturating_mul(3)
+            && nt_chunk_transpose_fits(request);
+        // Each architecture picks among the register tiles by its own census.
+        let tiles = exact_cut_tiles(compute_capability).input_gradient;
+        let cut = ExactCutLayer {
+            m,
+            outputs: n_in,
+            chunks,
+            waves,
+            slim,
+        };
+        if let Some(plan) = exact_cut_input_gradient_register_tile(cut, via, tiles) {
             return Ok(plan);
         }
         if chunks.saturating_mul(n_in) > SPLITK_SCRATCH_CAP {
@@ -9265,22 +9490,7 @@ pub(super) fn exact_batch_invariant_nt_plan(
             ));
         }
         let piece_rows = (SPLITK_SCRATCH_CAP / chunks.saturating_mul(n_in).max(1)).clamp(1, m);
-        // The forward's slim partial over the weight transposed into the
-        // scratch writes the same planes as the native partials: each piece
-        // is the same chain of the same products. It takes over where the
-        // forward of the transposed shape takes it, once its grid fills
-        // three quarters of a wave. The native 32 x 64 partial reads the
-        // weight across its rows: on an RTX 5090 it ran NT 1024x384x1536 in
-        // 69 us, where the slim partial runs the forward of the same layer
-        // in 49.
-        let slim_grid = m
-            .div_ceil(128)
-            .saturating_mul(n_in.div_ceil(64))
-            .saturating_mul(chunks);
-        let partial = if m > 64
-            && slim_grid.saturating_mul(4) >= (multiprocessors as usize).saturating_mul(3)
-            && nt_chunk_transpose_fits(request)
-        {
+        let partial = if slim {
             ExactChunkPartial::Slim
         } else if m == 1
             || exact_small_partial_underfills(m, n_in, chunks, multiprocessors as usize)
@@ -19486,10 +19696,9 @@ mod sm100_sm90a_auto_tests {
 #[cfg(test)]
 mod exact_batch_invariant_tests {
     use super::{
-        EXACT_KM_PIECES_MAX, EXACT_PIECES_M64_MIN_ROWS, ExactChunkPartial, ExactPiecesTile,
-        GEMM_CUSTOM_MIN, SPLITK_SCRATCH_CAP, ScalarDispatchPlan, exact_batch_invariant_nn_plan,
-        exact_batch_invariant_nt_plan, exact_big_tile_fills, exact_chunk, exact_chunks,
-        exact_cut_forward_register_tile, exact_cut_input_gradient_register_tile,
+        ExactChunkPartial, ExactCutLayer, GEMM_CUSTOM_MIN, SPLITK_SCRATCH_CAP, ScalarDispatchPlan,
+        exact_batch_invariant_nn_plan, exact_batch_invariant_nt_plan, exact_chunk, exact_chunks,
+        exact_cut_forward_register_tile, exact_cut_input_gradient_register_tile, exact_cut_tiles,
         nt_pieces_via_transpose_request, nt_slim_via_transpose_request, resolve_f32_triad_auto,
     };
     use crate::gpu::context::F32TriadPolicy;
@@ -19560,86 +19769,47 @@ mod exact_batch_invariant_tests {
                                         chunks as usize * rows * n <= SPLITK_SCRATCH_CAP,
                                         "{what}"
                                     );
+                                    let cut = ExactCutLayer {
+                                        m,
+                                        outputs: n,
+                                        chunks: pieces_n,
+                                        waves: multiprocessors as usize,
+                                        slim,
+                                    };
                                     assert!(
-                                        compute_capability.0 == 12
-                                            || exact_cut_forward_register_tile(
-                                                m,
-                                                n,
-                                                pieces_n,
-                                                multiprocessors as usize
-                                            )
-                                            .is_none(),
+                                        exact_cut_forward_register_tile(
+                                            cut,
+                                            exact_cut_tiles(compute_capability).forward,
+                                        )
+                                        .is_none(),
                                         "{what}"
                                     );
                                 }
                                 ScalarDispatchPlan::NnFinal { slim: false } => {
                                     assert!(!exact_chunks(k, n) && m >= 128 && n >= 128, "{what}");
                                 }
-                                ScalarDispatchPlan::NnExactPiecesM64 => {
-                                    assert!(
-                                        exact_chunks(k, n)
-                                            && m >= EXACT_PIECES_M64_MIN_ROWS
-                                            && m.div_ceil(64) * n.div_ceil(64)
-                                                >= multiprocessors as usize,
-                                        "{what}"
-                                    );
-                                    let sms = multiprocessors as usize;
-                                    assert!(
-                                        compute_capability.0 == 12
-                                            || !(m >= 128
-                                                && m.div_ceil(128) * n.div_ceil(64) * 2 >= sms),
-                                        "{what}"
-                                    );
-                                }
-                                ScalarDispatchPlan::NnExactPiecesBig => {
-                                    assert!(exact_chunks(k, n) && m >= 128 && n >= 128, "{what}");
-                                    if compute_capability.0 == 12 {
-                                        // The tile folds where it would run a
-                                        // chain layer of the same rows and
-                                        // outputs.
-                                        assert_eq!(
-                                            exact_batch_invariant_nn_plan(
-                                                nn(m, 64, n),
-                                                multiprocessors,
-                                                compute_capability,
-                                            )
-                                            .unwrap(),
-                                            ScalarDispatchPlan::NnFinal { slim: false },
-                                            "{what}"
-                                        );
-                                    } else {
-                                        assert!(
-                                            m.div_ceil(128) * n.div_ceil(128) * 2
-                                                >= multiprocessors as usize,
-                                            "{what}"
-                                        );
-                                    }
-                                }
-                                ScalarDispatchPlan::NnExactPiecesM128N64 => {
-                                    let sms = multiprocessors as usize;
-                                    assert!(
-                                        exact_chunks(k, n)
-                                            && compute_capability.0 != 12
-                                            && m >= 128
-                                            && m.div_ceil(128) * n.div_ceil(64) * 2 >= sms
-                                            && !(n >= 128
-                                                && m.div_ceil(128) * n.div_ceil(128) * 2 >= sms),
-                                        "{what}"
-                                    );
-                                }
-                                ScalarDispatchPlan::NnExactKmPieces => {
-                                    let sms = multiprocessors as usize;
-                                    let km = m.div_ceil(32) * n.div_ceil(64);
-                                    assert!(
-                                        exact_chunks(k, n)
-                                            && compute_capability.0 != 12
-                                            && n >= 32
-                                            && k.div_ceil(exact_chunk(k, n)) <= EXACT_KM_PIECES_MAX
-                                            && km * 3 >= 2 * sms
-                                            && (m < 128
-                                                || m.div_ceil(128) * n.div_ceil(64) * 2 < sms)
-                                            && !(m >= EXACT_PIECES_M64_MIN_ROWS
-                                                && m.div_ceil(64) * n.div_ceil(64) >= sms),
+                                ScalarDispatchPlan::NnExactPiecesM64
+                                | ScalarDispatchPlan::NnExactPiecesBig
+                                | ScalarDispatchPlan::NnExactPiecesM128N64
+                                | ScalarDispatchPlan::NnExactKmPieces => {
+                                    // The architecture's own table names the tile.
+                                    assert!(exact_chunks(k, n), "{what}");
+                                    let pieces_n = k.div_ceil(exact_chunk(k, n));
+                                    let cut = ExactCutLayer {
+                                        m,
+                                        outputs: n,
+                                        chunks: pieces_n,
+                                        waves: multiprocessors as usize,
+                                        slim: m > 64
+                                            && m.div_ceil(128) * n.div_ceil(64) * pieces_n * 4
+                                                >= multiprocessors as usize * 3,
+                                    };
+                                    assert_eq!(
+                                        exact_cut_forward_register_tile(
+                                            cut,
+                                            exact_cut_tiles(compute_capability).forward,
+                                        ),
+                                        Some(plan),
                                         "{what}"
                                     );
                                 }
@@ -19685,11 +19855,11 @@ mod exact_batch_invariant_tests {
                             compute_capability,
                         )
                         .unwrap();
-                        // Off a CC 12.x board a layer of up to six pieces
-                        // takes the 32 x 64 tile, whose 32-row tiles the
-                        // census measured ahead of the chunk partials there.
-                        let km = compute_capability.0 != 12
-                            && k.div_ceil(exact_chunk(k, 32_000)) <= EXACT_KM_PIECES_MAX;
+                        // A layer of up to the architecture's most pieces takes
+                        // the 32 x 64 tile, whose 32-row tiles its census
+                        // measured ahead of the chunk partials.
+                        let km = k.div_ceil(exact_chunk(k, 32_000))
+                            <= exact_cut_tiles(compute_capability).forward.km_max_pieces;
                         assert!(
                             matches!(plan, ScalarDispatchPlan::NnExactChunk { .. })
                                 || (km && plan == ScalarDispatchPlan::NnExactKmPieces),
@@ -19777,58 +19947,49 @@ mod exact_batch_invariant_tests {
                                     chunks as usize * rows * n_in <= SPLITK_SCRATCH_CAP,
                                     "{what}"
                                 );
+                                let layer = ExactCutLayer {
+                                    m,
+                                    outputs: n_in,
+                                    chunks: chunk_count,
+                                    waves: multiprocessors as usize,
+                                    slim,
+                                };
                                 assert!(
-                                    compute_capability.0 == 12
-                                        || exact_cut_input_gradient_register_tile(
-                                            m,
-                                            n_in,
-                                            chunk_count,
-                                            multiprocessors as usize,
-                                            transposable
-                                                && nt_pieces_via_transpose_request(request),
-                                        )
-                                        .is_none(),
+                                    exact_cut_input_gradient_register_tile(
+                                        layer,
+                                        transposable && nt_pieces_via_transpose_request(request),
+                                        exact_cut_tiles(compute_capability).input_gradient,
+                                    )
+                                    .is_none(),
                                     "{what}"
                                 );
                             }
                             ScalarDispatchPlan::NtFinal { slim: true } => {
                                 assert!(!cut && m >= GEMM_CUSTOM_MIN && n_out % 32 != 16, "{what}");
                             }
-                            ScalarDispatchPlan::NtExactPiecesViaTranspose { tile } => {
-                                let waves = multiprocessors as usize;
-                                let big = m.div_ceil(128) * n_in.div_ceil(128);
-                                let wide = m.div_ceil(128) * n_in.div_ceil(64);
-                                assert!(
-                                    cut && transposable && nt_pieces_via_transpose_request(request),
-                                    "{what}"
-                                );
-                                match tile {
-                                    ExactPiecesTile::M128N128 => assert!(
-                                        if compute_capability.0 == 12 {
-                                            exact_big_tile_fills(m, n_in, waves, compute_capability)
-                                        } else {
-                                            big * 2 >= waves
-                                        },
-                                        "{what}"
+                            ScalarDispatchPlan::NtExactPiecesViaTranspose { .. }
+                            | ScalarDispatchPlan::NtExactKmPieces => {
+                                // The architecture's own table names the tile.
+                                assert!(cut, "{what}");
+                                let chunk_count = n_out.div_ceil(exact_chunk(n_out, n_in));
+                                let layer = ExactCutLayer {
+                                    m,
+                                    outputs: n_in,
+                                    chunks: chunk_count,
+                                    waves: multiprocessors as usize,
+                                    slim: m > 64
+                                        && m.div_ceil(128) * n_in.div_ceil(64) * chunk_count * 4
+                                            >= multiprocessors as usize * 3
+                                        && n_in * n_out
+                                            <= super::super::contract::SCALAR_TRANSPOSE_SCRATCH_CAP_ELEMENTS,
+                                };
+                                assert_eq!(
+                                    exact_cut_input_gradient_register_tile(
+                                        layer,
+                                        transposable && nt_pieces_via_transpose_request(request),
+                                        exact_cut_tiles(compute_capability).input_gradient,
                                     ),
-                                    ExactPiecesTile::M128N64 => assert!(
-                                        compute_capability.0 != 12
-                                            && big * 2 < waves
-                                            && wide * 3 >= 2 * waves,
-                                        "{what}"
-                                    ),
-                                }
-                            }
-                            ScalarDispatchPlan::NtExactKmPieces => {
-                                let waves = multiprocessors as usize;
-                                let km = m.div_ceil(32) * n_in.div_ceil(64);
-                                assert!(
-                                    cut && compute_capability.0 != 12
-                                        && n_in >= 32
-                                        && n_out.div_ceil(exact_chunk(n_out, n_in))
-                                            <= EXACT_KM_PIECES_MAX
-                                        && km * 2 >= waves
-                                        && km < waves,
+                                    Some(plan),
                                     "{what}"
                                 );
                             }
@@ -19916,6 +20077,12 @@ mod exact_batch_invariant_tests {
                 ..
             }
         ));
+        // A thin batch over a wide layer keeps the 32 x 64 tile on SM120,
+        // where the slim partial covers it too.
+        assert_eq!(
+            exact_batch_invariant_nt_plan(nt(129, 1928, 768), 170, (12, 0), false).unwrap(),
+            ScalarDispatchPlan::NtExactKmPieces
+        );
     }
 
     #[test]
