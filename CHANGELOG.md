@@ -164,8 +164,19 @@
   stages 32-deep slabs of both operands by 16-byte copies and keeps the
   pieces' sum in registers, three blocks a multiprocessor where the
   128 x 64 pieces tile holds one: the training forwards of a 768-wide model
-  over 2048 to 4096 rows run in 0.83 to 0.99 of that tile's time. The bits
-  do not change.
+  over 2048 to 4096 rows run in 0.83 to 0.99 of that tile's time. Below
+  three waves the tile runs by the last wave of its grid, since a
+  multiprocessor's blocks share its arithmetic: it takes a forward from
+  two thirds of a wave and an input gradient over the transposed weight
+  from one and a half while that last wave holds at least half a wave
+  (0.75 to 0.99 of the former route's time; where it held less, 1.06 to
+  1.20 times). An SM80 input gradient takes the 32 x 64 tile beside the
+  slim partial once that tile's own grid covers one and a half waves,
+  where it waited for the layer's outputs to reach its rows (1024 rows into
+  768 outputs: 0.86 of the slim partial's time). Over 333 cut products on
+  an A100 the 143 that changed route run in 0.94 of their former time as
+  forwards and 0.88 as input gradients, the out_proj forward of a 768-wide
+  model over 1024 rows 206 to 192 microseconds. The bits do not change.
 - The f32 training step of the four families at batch 4 by 512 tokens,
   0.8.2 against 0.8.1: on an A100 Mamba 3 percent faster and the others
   within 1.5 percent either way; on an RTX 5090 Mamba 6 percent faster and

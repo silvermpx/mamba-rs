@@ -205,8 +205,15 @@ f32) take 3.62 ms instead of 4.17 on the 128-wide shape, 6.37 instead of
 geometric mean of every value: the Mamba GPU benchmark 1.42x, the Mamba
 mixer 1.80x, Mamba-3 1.42x, Mamba-2 and MIMO 1.15x, the Mamba-3 scan
 kernels 1.02x. The Mamba-2 chunked prompt of `m2_mimo_gpu_bench` at batch 1
-runs 3 to 6 percent slower than 0.8.1 in bf16 and f32, with the runs of
-each tree agreeing within 1 percent.
+ran 3 to 6 percent slower than 0.8.1 in bf16 and f32. Profiled kernel by
+kernel, a 1024-token bf16 window runs the same kernels in the same time on
+both trees (2.383 and 2.382 ms), so the bf16 difference is this host's
+noise. In f32 0.8.1 ran the window's products on its one-chain f32 kernel,
+where 0.8.2 folds them in pieces of 128 inputs, the same at every batch
+size and on every route. With the SM80 slab tile taken by the last wave
+of its grid the products of that window take 2.87 ms (2.99 before it), and
+the window 4.56 ms of kernel time; 0.8.1's profile, at clocks under which
+the same scan kernels also ran about 7 percent faster, took 4.25.
 
 ## MIMO chunk length, RTX 5090
 
