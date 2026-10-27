@@ -2357,8 +2357,7 @@ fn scalar_node_count(plan: ScalarDispatchPlan) -> usize {
         | ScalarDispatchPlan::TnSplitM { .. }
         | ScalarDispatchPlan::TnD768InSm89DualChunkQualified
         | ScalarDispatchPlan::TnD768OutSm89DirectBk16Qualified
-        | ScalarDispatchPlan::TnD384Sm89DirectBk16Qualified
-        | ScalarDispatchPlan::TnSm89DirectSplitM { .. } => 2,
+        | ScalarDispatchPlan::TnD384Sm89DirectBk16Qualified => 2,
         ScalarDispatchPlan::NtD768TransposeM64N64Qualified
         | ScalarDispatchPlan::NtD768OutTransposeM64N64Qualified
         | ScalarDispatchPlan::NtD768OutSm89InferenceCopyPlanQualified
@@ -2495,9 +2494,6 @@ fn scalar_plan_fields(plan: ScalarDispatchPlan) -> (u8, u64, u64) {
         ScalarDispatchPlan::TnD768InSm89DualChunkQualified => (41, 1_024, 2),
         ScalarDispatchPlan::TnD768OutSm89DirectBk16Qualified => (42, 512, 4),
         ScalarDispatchPlan::TnD384Sm89DirectBk16Qualified => (43, 784, 6),
-        ScalarDispatchPlan::TnSm89DirectSplitM { m_chunk, chunks } => {
-            (52, m_chunk as u64, chunks as u64)
-        }
         ScalarDispatchPlan::TnD128InSm89DirectFoldQualified => (44, 16, 64),
         ScalarDispatchPlan::TnD128OutSm89DirectFoldQualified => (45, 16, 64),
         ScalarDispatchPlan::TnM16N16SplitM16Qualified => (35, 0, 0),
@@ -2597,7 +2593,6 @@ fn scalar_argument_layout(
         | (ScalarDispatchPlan::TnD768InSm89DualChunkQualified, _)
         | (ScalarDispatchPlan::TnD768OutSm89DirectBk16Qualified, _)
         | (ScalarDispatchPlan::TnD384Sm89DirectBk16Qualified, _)
-        | (ScalarDispatchPlan::TnSm89DirectSplitM { .. }, _)
         | (ScalarDispatchPlan::TnD128InSm89DirectFoldQualified, _)
         | (ScalarDispatchPlan::TnD128OutSm89DirectFoldQualified, _)
         | (ScalarDispatchPlan::TnFinal { .. }, _)
@@ -3433,8 +3428,7 @@ fn scalar_physical_nodes(
             );
         }
         ScalarDispatchPlan::TnD768OutSm89DirectBk16Qualified
-        | ScalarDispatchPlan::TnD384Sm89DirectBk16Qualified
-        | ScalarDispatchPlan::TnSm89DirectSplitM { .. } => {
+        | ScalarDispatchPlan::TnD384Sm89DirectBk16Qualified => {
             let (symbol, raw_grid, chunks) = match plan {
                 ScalarDispatchPlan::TnD768OutSm89DirectBk16Qualified => {
                     (super::D768_OUT_RAW_SYMBOL, 288, 4)
@@ -3442,13 +3436,6 @@ fn scalar_physical_nodes(
                 ScalarDispatchPlan::TnD384Sm89DirectBk16Qualified => {
                     (super::D384_RAW_SYMBOL, 186, 6)
                 }
-                // The D768-out instance is the direct section itself, whose
-                // body serves any shape.
-                ScalarDispatchPlan::TnSm89DirectSplitM { chunks, .. } => (
-                    super::D768_OUT_RAW_SYMBOL,
-                    checked_tile_grid(k, 64, n, 64)?,
-                    checked_u32(chunks, "SM89 direct TN chunks")?,
-                ),
                 _ => unreachable!(),
             };
             push_scalar_node(
@@ -11889,7 +11876,6 @@ fn gemm_bi_backward_dw_with_control<C: ScalarLaunchController, Input: ScalarInpu
         scalar_plan,
         ScalarDispatchPlan::TnD768OutSm89DirectBk16Qualified
             | ScalarDispatchPlan::TnD384Sm89DirectBk16Qualified
-            | ScalarDispatchPlan::TnSm89DirectSplitM { .. }
     ) {
         let (symbol, raw_grid, chunks, m_chunk) = match scalar_plan {
             ScalarDispatchPlan::TnD768OutSm89DirectBk16Qualified => {
@@ -11898,12 +11884,6 @@ fn gemm_bi_backward_dw_with_control<C: ScalarLaunchController, Input: ScalarInpu
             ScalarDispatchPlan::TnD384Sm89DirectBk16Qualified => {
                 (super::D384_RAW_SYMBOL, 186, 6, 784)
             }
-            ScalarDispatchPlan::TnSm89DirectSplitM { m_chunk, chunks } => (
-                super::D768_OUT_RAW_SYMBOL,
-                checked_tile_grid(checked_dims.k_u32, 64, checked_dims.n_u32, 64)?,
-                chunks,
-                m_chunk,
-            ),
             _ => unreachable!(),
         };
         let partial_ptr = {

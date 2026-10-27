@@ -215,6 +215,71 @@ of its grid the products of that window take 2.87 ms (2.99 before it), and
 the window 4.56 ms of kernel time; 0.8.1's profile, at clocks under which
 the same scan kernels also ran about 7 percent faster, took 4.25.
 
+## 0.8.2 against 0.8.1, RTX 6000 Ada
+
+Measured on October 27, 2026 on an RTX 6000 Ada Generation (142 SMs, 300 W
+power limit, driver 615.71.10, CUDA 13.2 / NVRTC 13.2, Rust 1.99.1, release
+build, Intel Xeon Gold 5412U host). The two trees ran in turn, four runs
+each, and each cell is the median of its four runs.
+
+bf16 storage, 0.8.1 -> 0.8.2 (speedup):
+
+| family | decode, batch 1 | decode, batch 16 | prompt of 4096 | training step |
+|---|---:|---:|---:|---:|
+| Mamba | 158 -> 157 us (1.01x) | 202 -> 194 us (1.04x) | 1.09 -> 1.09 M tokens/s (1.00x) | 8.54 -> 7.85 ms (1.09x) |
+| Mamba-2 | 153 -> 152 us (1.00x) | 205 -> 205 us (1.00x) | 0.88 -> 0.89 M tokens/s (1.01x) | 10.13 -> 9.86 ms (1.03x) |
+| Mamba-3 SISO | 156 -> 156 us (1.00x) | 435 -> 435 us (1.00x) | 0.60 -> 0.59 M tokens/s (0.98x) | 10.38 -> 10.20 ms (1.02x) |
+| Mamba-3 MIMO | 146 -> 146 us (1.00x) | 232 -> 223 us (1.04x) | 0.24 -> 0.24 M tokens/s (1.02x) | 38.82 -> 39.01 ms (1.00x) |
+
+f32 storage, 0.8.1 -> 0.8.2 (speedup):
+
+| family | decode, batch 1 | decode, batch 16 | prompt of 4096 | training step |
+|---|---:|---:|---:|---:|
+| Mamba | 605 -> 146 us (4.14x) | 649 -> 189 us (3.44x) | 0.57 -> 0.60 M tokens/s (1.06x) | 15.07 -> 13.89 ms (1.08x) |
+| Mamba-2 | 409 -> 142 us (2.88x) | 525 -> 317 us (1.66x) | 0.46 -> 0.52 M tokens/s (1.12x) | 14.54 -> 14.85 ms (0.98x) |
+| Mamba-3 SISO | 434 -> 166 us (2.61x) | 733 -> 519 us (1.41x) | 0.34 -> 0.34 M tokens/s (1.02x) | 16.95 -> 17.07 ms (0.99x) |
+| Mamba-3 MIMO | 405 -> 144 us (2.81x) | 560 -> 357 us (1.57x) | 0.19 -> 0.20 M tokens/s (1.02x) | 49.25 -> 49.29 ms (1.00x) |
+
+The batch-1 decode of this bench lands on two levels about 10 microseconds
+apart from run to run, on both trees; the decode step alone, timed by a
+probe in rotated order (four runs of 400 steps per family and tree), puts
+the two trees within 2 percent either way, with the same kernels in the
+same captured graph. The f32 training step varies by about 2 percent
+between runs of one tree in this bench; the probe over the public trainer,
+in rotated order, four runs each, the minimum of each, `old/new` above 1
+meaning 0.8.2 is faster:
+
+| family | batch 4 by 512 | batch 8 by 512 | batch 16 by 512 |
+|---|---:|---:|---:|
+| Mamba | 1.051x | 1.018x | 1.022x |
+| Mamba-2 | 0.994x | 1.008x | 1.017x |
+| Mamba-3 SISO | 1.002x | 0.995x | 1.014x |
+| Mamba-3 MIMO | 0.991x | 0.998x | 1.005x |
+
+The medians of the same runs agree within 1.6 percent (Mamba-2 at batch 4:
+1.016x). Under f32 training this card runs at its 300 W limit, where the
+clock sets the pace and a kernel that moves more bytes per multiply-add
+slows the whole step. SM89 keeps a weight gradient that the shape cuts
+into row chunks on the portable 128 x 128 partial, as 0.8.1 did: a direct
+64 x 64 partial of the same partition writes the same planes in about half
+the time alone on the card, but moves twice the L2 bytes and one and a
+half times the shared words per multiply-add, and in the step the card
+then clocked lower at the same power. With it the step ran 3 to 4 percent
+slower at batch 8 and 16 (Mamba and Mamba-2) and no faster at batch 4.
+
+The Mamba-2 chunked prompt of the probe (the minimum of four runs) takes
+0.995 to 1.005 of 0.8.1's time in bf16 and runs 1.004x, 1.025x and 1.076x
+faster in f32 at batch 1 by 1024, batch 1 by 4096 and batch 8 by 1024
+tokens. A process that builds a model from cached kernels starts in about
+2.6 seconds here, where 0.8.1 took 2.8: each GEMM module is loaded once and
+the check of its kernels' parameters reads that module: 12 module loads,
+where earlier 0.8.2 builds loaded a copy of the module for each check, 30
+loads in all, and started in about 3.0 seconds. The run's other benches,
+0.8.2 against 0.8.1, geometric mean of every value each bench prints: the
+Mamba GPU benchmark 1.43x, the Mamba mixer 1.74x, Mamba-3 1.52x, Mamba-2 and
+MIMO 1.12x, the GEMMs of a training step alone 1.06x, the Mamba-3 scan
+kernels 0.99x (the same kernels on both trees).
+
 ## MIMO chunk length, RTX 5090
 
 Measured earlier on October 19 on another RTX 5090 (driver 595.71.05,

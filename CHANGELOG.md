@@ -182,8 +182,10 @@
   within 1.5 percent either way; on an RTX 5090 Mamba 6 percent faster and
   Mamba-2, Mamba-3 SISO and MIMO 0.6 to 1.6 percent slower, the cost there
   of a batch-invariant input projection over 2048 rows, and within 0.5
-  percent at batch 8 and 16 by 512 tokens. f32 decode runs
-  1.7 to 5 times faster on both. See the
+  percent at batch 8 and 16 by 512 tokens; on an RTX 6000 Ada Mamba 5
+  percent faster and the others within 1 percent at batch 4, and Mamba,
+  Mamba-2 and Mamba-3 SISO 1.4 to 2.2 percent faster at batch 16. f32 decode
+  runs 1.4 to 5 times faster on all three. See the
   [family benchmarks](docs/family-benchmarks.md).
 - Exact narrow weight gradients, with 2 to 127 outputs, split their batch
   like wider ones on every architecture (384 x 101 over 1024 rows: 33 to 10
