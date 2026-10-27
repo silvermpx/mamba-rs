@@ -177,6 +177,21 @@
   an A100 the 143 that changed route run in 0.94 of their former time as
   forwards and 0.88 as input gradients, the out_proj forward of a 768-wide
   model over 1024 rows 206 to 192 microseconds. The bits do not change.
+- On SM89 a few more cut exact products take faster tiles, by rules
+  from a census on an RTX 6000 Ada that gives each forced route a run of
+  its own, where before every route of a product ran back to back: on this
+  card, held at its 300 W limit, a route timed right after other routes ran
+  up to 40 percent off its own time and ranked them wrongly. A
+  forward of at most six pieces whose 64 x 64 grid covers four to five
+  waves runs on the 64 x 64 slab tile; the 32 x 64 tile folds any number of
+  pieces over 17 to 64 rows, and up to eight pieces on an input gradient;
+  and a layer the slim partial's 128-row tiles would pad more than the
+  32-row tiles do takes the 32 x 64 partial while that partial's grid stays
+  under three and a quarter waves. Of the 788 cut products of the census
+  the 16 that change route run in 0.65 to 0.93 of their former time (64
+  rows into 8192 outputs over 2048 inputs: 0.65), with the plans of both
+  tables timed alone, and no other product changes. The bits do not
+  change.
 - The f32 training step of the four families at batch 4 by 512 tokens,
   0.8.2 against 0.8.1: on an A100 Mamba 3 percent faster and the others
   within 1.5 percent either way; on an RTX 5090 Mamba 6 percent faster and
