@@ -362,6 +362,7 @@ fn scalar_blob() -> String {
         include_str!("../kernels/gemm_bi_triad/scalar_nt_m2n16.cu"),
         include_str!("../kernels/gemm_bi_triad/scalar_tn_m16n16.cu"),
         include_str!("../kernels/gemm_bi_triad/scalar_nn_m128n64.cu"),
+        include_str!("../kernels/gemm_bi_triad/scalar_nn_m64n64_bk32.cu"),
     ])
 }
 
@@ -1017,6 +1018,11 @@ fn sm120_tf32_symbols() -> Vec<String> {
     }
     for tile in ["m128n64", "m64n128", "m64n64"] {
         symbols.push(format!("nt_sm120_tma_fma_{tile}_bk16_s2_kvec"));
+    }
+    for op in ["nn", "tn"] {
+        for tile in ["m128n64", "m64n128", "m64n64"] {
+            symbols.push(format!("{op}_sm120_tma_fma_{tile}_bk16_s2_fold"));
+        }
     }
     symbols
 }
@@ -4419,6 +4425,7 @@ fn scalar_sm89_main_and_splitk_have_bounded_resources_without_reduction_instruct
         ("nn_m64n64_bk16_s2", 128, 3, 128),
         ("nn_m64n64_pieces4", 128, 3, 168),
         ("nn_m128n64_pieces_keep", 128, 1, 255),
+        ("nn_m64n64_bk32_pieces_keep", 128, 3, 168),
         ("tn_big", 256, 2, 128),
         ("tn_aligned", 256, 2, 128),
         ("nt_big", 256, 2, 128),
@@ -5066,7 +5073,7 @@ fn compiles_generic_sm120_triad_modules_with_exact_ptx_contract() {
             &ptx,
             emitted,
             &expected,
-            128,
+            134,
         )
         .unwrap();
 
@@ -5191,7 +5198,7 @@ fn compiles_generic_sm120_triad_modules_with_exact_ptx_contract() {
             );
             assert!(!entry.contains("call.uni"), "device call in {symbol}");
         }
-        assert_eq!(sm120_tf32_symbols().len(), 30);
+        assert_eq!(sm120_tf32_symbols().len(), 36);
         for symbol in sm120_tf32_symbols() {
             let entry = parsed.entry(&symbol);
             assert_compile_gate_entry_tokens(

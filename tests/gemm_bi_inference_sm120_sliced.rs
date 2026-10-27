@@ -659,7 +659,7 @@ fn assert_exact_n64_graph(
             (128, 128),
             (256, 128),
             (384, 8),
-            (392, if triad_exact { 36 } else { 32 }),
+            (392, if triad_exact { 40 } else { 32 }),
         ]
     } else if compact {
         vec![(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)]
@@ -722,10 +722,12 @@ fn assert_exact_n64_graph(
             f.k.div_ceil(16) as u32,
         ];
         if triad_exact {
-            // Its column tail starts at the output width: the plan has none.
-            let captured = graph_parameter::<[u32; 9]>(&params, 6);
+            // Its column tail starts at the output width: the plan has none,
+            // and every unit walks a single piece.
+            let captured = graph_parameter::<[u32; 10]>(&params, 6);
             assert_eq!(captured[..8], words);
             assert_eq!(captured[8], f.n as u32);
+            assert_eq!(captured[9], 1);
         } else {
             assert_eq!(graph_parameter::<[u32; 8]>(&params, 6), words);
         }

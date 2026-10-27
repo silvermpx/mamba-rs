@@ -28,6 +28,7 @@ const SCALAR_ENTRIES: &[&str] = &[
     "nn_m64n64_bk16_s2",
     "nn_m64n64_pieces4",
     "nn_m128n64_pieces_keep",
+    "nn_m64n64_bk32_pieces_keep",
     "nn_splitk32_m32n64_exact",
     "nn_d384_m64n64_bk16_s2",
     "nn_zero_reduction",

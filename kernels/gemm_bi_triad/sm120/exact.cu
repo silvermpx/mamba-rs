@@ -21,7 +21,17 @@
 // columns from chain_from on as one chain over the whole reduction, as the
 // portable tail kernel does; an NT k-vector CTA that folds its own pieces
 // keeps those columns out of the fold, and the other kernels never see such
-// a cut.
+// a cut. A CTA that folds its own pieces keeps their sum in a second set of
+// registers, which the fold kernels (the NT k-vector arms and the _fold
+// arms) pay for with two blocks a multiprocessor instead of three: moving
+// the sum through L2 at every piece end cost more than the third block.
+// A grid too small to fill the card that way is cut into pairs of pieces
+// instead: unit s of a tile walks pieces 2s and 2s+1, holding the first in
+// the fold registers and the second in the accumulators, then adds both in
+// order to the running sum unit s-1 publishes and publishes its own; the
+// last unit owns the tile. That is the same left fold, one slab a pair. A
+// unit waits only for one launched before it, so no pair can wait on a
+// block that has no room to run.
 //
 // Shape of the schedule:
 //   - A and B tiles arrive through cp.async.bulk.tensor, one 2d box each
@@ -57,9 +67,11 @@ struct Sm120FmaKernelParams {
     int splits;
     int tiles_per_split;
     int chain_from;
+    // 2 when each unit of a fold kernel walks a pair of pieces, else 1.
+    int pieces_per_unit;
 };
 
-static_assert(sizeof(Sm120FmaKernelParams) == 36,
+static_assert(sizeof(Sm120FmaKernelParams) == 40,
               "SM120 FMA parameter ABI drift");
 static_assert(alignof(Sm120FmaKernelParams) == 4,
               "SM120 FMA parameter alignment drift");
@@ -120,7 +132,7 @@ static __device__ __forceinline__ unsigned sm120_fma_flag_read(
     return value;
 }
 
-template <int OP, int BM, int BN, int WM, int WN, int THREADS, bool NT_KVEC>
+template <int OP, int BM, int BN, int WM, int WN, int THREADS, bool NT_KVEC, bool FOLD>
 __device__ __forceinline__ void sm120_fma_body(
     float* __restrict__ C,
     const float* __restrict__ bias,
@@ -153,23 +165,34 @@ __device__ __forceinline__ void sm120_fma_body(
                   "TMA stages must keep the swizzle span aligned");
     static_assert(!NT_KVEC || OP == SM120_FMA_OP_NT,
                   "the k-vector B fragment only exists for NT");
+    static_assert(!NT_KVEC || FOLD,
+                  "the NT k-vector arms fold their own pieces in registers");
 
     extern __shared__ __align__(1024) float sm120_fma_smem[];
     float* stages = sm120_fma_smem;
     unsigned smem_base = __cvta_generic_to_shared(sm120_fma_smem);
     unsigned barrier_base = smem_base + K_PIPE * STAGE_BYTES;
 
-    // A negative split count asks one CTA to walk every piece of its tile:
-    // -splits pieces of tiles_per_split k tiles, each a chain from zero,
-    // folded in piece order through the tile's slab; k tiles past the
+    // A negative split count asks one CTA of a fold kernel to walk every
+    // piece of its tile: -splits pieces of tiles_per_split k tiles, each a
+    // chain from zero, folded in piece order in registers; k tiles past the
     // pieces are the tail a portable plan adds after the fold, and they
-    // continue the folded chain.
-    bool fold_pieces = params.splits < 0;
+    // continue the folded chain. The host never sends one to a plain kernel.
+    bool fold_pieces = FOLD && params.splits < 0;
+    bool paired = FOLD && params.splits > 1 && params.pieces_per_unit == 2;
     int pieces = fold_pieces ? -params.splits : 1;
-    int splits = fold_pieces ? 1 : params.splits;
+    int splits = params.splits < 0 ? 1 : params.splits;
     int unit = blockIdx.x;
     int tile_id = unit / splits;
     int split = unit - tile_id * splits;
+    if (paired) {
+        // The grid lists every tile's first pair, then every tile's second,
+        // and so on: a pair then starts about when the pair before it has
+        // published its sum, instead of holding a block while it waits.
+        int tiles = (int)gridDim.x / splits;
+        tile_id = unit % tiles;
+        split = unit / tiles;
+    }
     bool owner = split == splits - 1;
 
     int num_pid_m = (params.m + BM - 1) / BM;
@@ -362,81 +385,129 @@ __device__ __forceinline__ void sm120_fma_body(
     };
 
     int step = 0;
-    if (fold_pieces) {
-        if constexpr (OP == SM120_FMA_OP_NT && NT_KVEC) {
-            // The NT k-vector kernels hold the fold in registers, which
-            // their two blocks a multiprocessor leave room for: the thin
-            // cut's two-tile pieces would otherwise spend longer moving the
-            // fold through L2 than computing. Only these kernels serve a cut
+    if constexpr (FOLD) {
+        if (paired) {
+            // A unit's range is a pair of pieces; the last unit of a tile
+            // may hold one piece, whose partner is -0.0, the one value that
+            // leaves the sum it is added to as it was.
+            int piece = params.tiles_per_split / 2;
+            float folded[TM * TN];
+            for (int first_end = min(piece, range); step < first_end; ++step) {
+                k_step(step);
+            }
+            if (range > piece) {
+                #pragma unroll
+                for (int result = 0; result < TM * TN; ++result) {
+                    folded[result] = threadResults[result];
+                    threadResults[result] = 0.0f;
+                }
+                for (; step < range; ++step) {
+                    k_step(step);
+                }
+            } else {
+                #pragma unroll
+                for (int result = 0; result < TM * TN; ++result) {
+                    folded[result] = threadResults[result];
+                    threadResults[result] = -0.0f;
+                }
+            }
+            float* pair_slabs = partials + (size_t)tile_id * (splits - 1) * SLAB_FLOATS;
+            unsigned* pair_flags = flags + (size_t)tile_id * (splits - 1);
+            if (split > 0) {
+                if (threadIdx.x == 0) {
+                    while (sm120_fma_flag_read(pair_flags + split - 1) == 0u) {
+                    }
+                }
+                __syncthreads();
+                // One float4 of the microtile at a time: the running sum,
+                // then the pair's first piece, then its second.
+                #pragma unroll
+                for (int chunk = 0; chunk < TM * TN / 4; ++chunk) {
+                    float4 previous = __ldcg(reinterpret_cast<const float4*>(
+                        pair_slabs + (size_t)(split - 1) * SLAB_FLOATS
+                        + ((size_t)chunk * THREADS + threadIdx.x) * 4));
+                    float* first = folded + chunk * 4;
+                    const float* second = threadResults + chunk * 4;
+                    first[0] = __fadd_rn(__fadd_rn(previous.x, first[0]), second[0]);
+                    first[1] = __fadd_rn(__fadd_rn(previous.y, first[1]), second[1]);
+                    first[2] = __fadd_rn(__fadd_rn(previous.z, first[2]), second[2]);
+                    first[3] = __fadd_rn(__fadd_rn(previous.w, first[3]), second[3]);
+                }
+                // Every thread has read the slab before its flag is reset
+                // for the next launch.
+                __syncthreads();
+                if (threadIdx.x == 0) {
+                    pair_flags[split - 1] = 0u;
+                }
+            } else {
+                #pragma unroll
+                for (int result = 0; result < TM * TN; ++result) {
+                    folded[result] = __fadd_rn(folded[result], threadResults[result]);
+                }
+            }
+            if (!owner) {
+                float* slab = pair_slabs + (size_t)split * SLAB_FLOATS;
+                #pragma unroll
+                for (int chunk = 0; chunk < TM * TN / 4; ++chunk) {
+                    float4 value = {
+                        folded[chunk * 4 + 0],
+                        folded[chunk * 4 + 1],
+                        folded[chunk * 4 + 2],
+                        folded[chunk * 4 + 3]
+                    };
+                    __stcg(reinterpret_cast<float4*>(
+                               slab + ((size_t)chunk * THREADS + threadIdx.x) * 4),
+                           value);
+                }
+                __threadfence();
+                __syncthreads();
+                if (threadIdx.x == 0) {
+                    sm120_fma_flag_raise(pair_flags + split);
+                }
+                return;
+            }
+            // A weight gradient scales the whole sum once, as splitm_reduce
+            // does.
+            #pragma unroll
+            for (int result = 0; result < TM * TN; ++result) {
+                threadResults[result] = OP == SM120_FMA_OP_TN
+                    ? __fmul_rn(params.alpha, folded[result])
+                    : folded[result];
+            }
+        }
+        if (fold_pieces) {
+            // The finished pieces' sum starts at -0.0, the one value whose
+            // sum with any chain is that chain, so the first piece end adds
+            // like every other. Only the NT k-vector kernels serve a cut
             // with a column tail, and only a CTA on the last column tile
             // holds tail columns, whose chains run on through every piece.
-            bool chains = pid_n * BN + BN > params.chain_from;
+            bool chains = OP == SM120_FMA_OP_NT && pid_n * BN + BN > params.chain_from;
             float folded[TM * TN];
+            #pragma unroll
+            for (int result = 0; result < TM * TN; ++result) {
+                folded[result] = -0.0f;
+            }
             for (int piece_start = 0; piece_start < piece_end;
                  piece_start += params.tiles_per_split) {
                 int stop = min(piece_start + params.tiles_per_split, piece_end);
                 for (; step < stop; ++step) {
                     k_step(step);
                 }
-                bool first = piece_start == 0;
                 bool last = stop == piece_end;
                 #pragma unroll
                 for (int result = 0; result < TM * TN; ++result) {
-                    if (chains) {
+                    if (OP == SM120_FMA_OP_NT && chains) {
                         int global_column = pid_n * BN + local_column(result % TN);
                         if (global_column >= params.chain_from && global_column < params.n) {
                             continue;
                         }
                     }
-                    float sum = first
-                        ? threadResults[result]
-                        : __fadd_rn(folded[result], threadResults[result]);
+                    float sum = __fadd_rn(folded[result], threadResults[result]);
                     if (last) {
                         threadResults[result] = sum;
                     } else {
                         folded[result] = sum;
                         threadResults[result] = 0.0f;
-                    }
-                }
-            }
-        } else {
-            // The end of a piece: its chain joins the fold, which waits in
-            // this thread's own cells of the tile's slab until the last piece
-            // takes it back into the registers, where a tail then continues
-            // it.
-            float* slab = partials + (size_t)tile_id * SLAB_FLOATS;
-            for (int piece_start = 0; piece_start < piece_end;
-                 piece_start += params.tiles_per_split) {
-                int stop = min(piece_start + params.tiles_per_split, piece_end);
-                for (; step < stop; ++step) {
-                    k_step(step);
-                }
-                bool first = piece_start == 0;
-                bool last = stop == piece_end;
-                #pragma unroll
-                for (int chunk = 0; chunk < TM * TN / 4; ++chunk) {
-                    float4* cell = reinterpret_cast<float4*>(
-                        slab + ((size_t)chunk * THREADS + threadIdx.x) * 4);
-                    float* own = threadResults + chunk * 4;
-                    float4 sum = {own[0], own[1], own[2], own[3]};
-                    if (!first) {
-                        float4 held = __ldcg(cell);
-                        sum.x = __fadd_rn(held.x, own[0]);
-                        sum.y = __fadd_rn(held.y, own[1]);
-                        sum.z = __fadd_rn(held.z, own[2]);
-                        sum.w = __fadd_rn(held.w, own[3]);
-                    }
-                    if (last) {
-                        own[0] = sum.x;
-                        own[1] = sum.y;
-                        own[2] = sum.z;
-                        own[3] = sum.w;
-                    } else {
-                        __stcg(cell, sum);
-                        own[0] = 0.0f;
-                        own[1] = 0.0f;
-                        own[2] = 0.0f;
-                        own[3] = 0.0f;
                     }
                 }
             }
@@ -454,7 +525,7 @@ __device__ __forceinline__ void sm120_fma_body(
         }
     }
 
-    if (splits > 1) {
+    if (splits > 1 && !paired) {
         // Slab layout is chunk-major so a warp's float4 stores and loads
         // stay contiguous.
         float* slabs = partials + (size_t)tile_id * (splits - 1) * SLAB_FLOATS;
@@ -608,7 +679,7 @@ __device__ __forceinline__ void sm120_fma_body(
 
 // The parameter order follows the SM120 stream-K ABI: output, slabs, flags,
 // the two tensor maps, bias, then the parameter bundle.
-#define SM120_DEFINE_FMA_KERNEL(NAME, OP, BM, BN, WM, WN, THREADS, MIN_BLOCKS, NT_KVEC) \
+#define SM120_DEFINE_FMA_KERNEL(NAME, OP, BM, BN, WM, WN, THREADS, MIN_BLOCKS, NT_KVEC, FOLD) \
     extern "C" __global__ __launch_bounds__(THREADS, MIN_BLOCKS)                     \
     void NAME(                                                                        \
         float* __restrict__ C,                                                        \
@@ -620,25 +691,32 @@ __device__ __forceinline__ void sm120_fma_body(
         const __grid_constant__ Sm120FmaKernelParams params                           \
     ) {                                                                               \
         assert(params.alpha == 1.0f || bias == nullptr);                              \
-        sm120_fma_body<OP, BM, BN, WM, WN, THREADS, NT_KVEC>(                         \
+        sm120_fma_body<OP, BM, BN, WM, WN, THREADS, NT_KVEC, FOLD>(                   \
             C, bias, partials, flags, params, a_map, b_map);                          \
     }
 
 // 128x64: four warps stacked, each 32x64. 64x128: four warps side by side,
 // each 64x32. 64x64: two warps stacked, each 32x64. The NT k-vector arms
-// keep a float4-along-k B fragment and pay for it with two blocks per SM.
-SM120_DEFINE_FMA_KERNEL(nn_sm120_tma_fma_m128n64_bk16_s2, SM120_FMA_OP_NN, 128, 64, 32, 64, 128, 3, false)
-SM120_DEFINE_FMA_KERNEL(nn_sm120_tma_fma_m64n128_bk16_s2, SM120_FMA_OP_NN, 64, 128, 64, 32, 128, 3, false)
-SM120_DEFINE_FMA_KERNEL(nn_sm120_tma_fma_m64n64_bk16_s2, SM120_FMA_OP_NN, 64, 64, 32, 64, 64, 5, false)
-SM120_DEFINE_FMA_KERNEL(tn_sm120_tma_fma_m128n64_bk16_s2, SM120_FMA_OP_TN, 128, 64, 32, 64, 128, 3, false)
-SM120_DEFINE_FMA_KERNEL(tn_sm120_tma_fma_m64n128_bk16_s2, SM120_FMA_OP_TN, 64, 128, 64, 32, 128, 3, false)
-SM120_DEFINE_FMA_KERNEL(tn_sm120_tma_fma_m64n64_bk16_s2, SM120_FMA_OP_TN, 64, 64, 32, 64, 64, 5, false)
-SM120_DEFINE_FMA_KERNEL(nt_sm120_tma_fma_m128n64_bk16_s2, SM120_FMA_OP_NT, 128, 64, 32, 64, 128, 3, false)
-SM120_DEFINE_FMA_KERNEL(nt_sm120_tma_fma_m64n128_bk16_s2, SM120_FMA_OP_NT, 64, 128, 64, 32, 128, 3, false)
-SM120_DEFINE_FMA_KERNEL(nt_sm120_tma_fma_m64n64_bk16_s2, SM120_FMA_OP_NT, 64, 64, 32, 64, 64, 5, false)
-SM120_DEFINE_FMA_KERNEL(nt_sm120_tma_fma_m128n64_bk16_s2_kvec, SM120_FMA_OP_NT, 128, 64, 32, 64, 128, 2, true)
-SM120_DEFINE_FMA_KERNEL(nt_sm120_tma_fma_m64n128_bk16_s2_kvec, SM120_FMA_OP_NT, 64, 128, 64, 32, 128, 2, true)
-SM120_DEFINE_FMA_KERNEL(nt_sm120_tma_fma_m64n64_bk16_s2_kvec, SM120_FMA_OP_NT, 64, 64, 32, 64, 64, 4, true)
+// keep a float4-along-k B fragment, and the fold arms the finished pieces'
+// sum, and both pay for it with two blocks per SM.
+SM120_DEFINE_FMA_KERNEL(nn_sm120_tma_fma_m128n64_bk16_s2, SM120_FMA_OP_NN, 128, 64, 32, 64, 128, 3, false, false)
+SM120_DEFINE_FMA_KERNEL(nn_sm120_tma_fma_m64n128_bk16_s2, SM120_FMA_OP_NN, 64, 128, 64, 32, 128, 3, false, false)
+SM120_DEFINE_FMA_KERNEL(nn_sm120_tma_fma_m64n64_bk16_s2, SM120_FMA_OP_NN, 64, 64, 32, 64, 64, 5, false, false)
+SM120_DEFINE_FMA_KERNEL(tn_sm120_tma_fma_m128n64_bk16_s2, SM120_FMA_OP_TN, 128, 64, 32, 64, 128, 3, false, false)
+SM120_DEFINE_FMA_KERNEL(tn_sm120_tma_fma_m64n128_bk16_s2, SM120_FMA_OP_TN, 64, 128, 64, 32, 128, 3, false, false)
+SM120_DEFINE_FMA_KERNEL(tn_sm120_tma_fma_m64n64_bk16_s2, SM120_FMA_OP_TN, 64, 64, 32, 64, 64, 5, false, false)
+SM120_DEFINE_FMA_KERNEL(nt_sm120_tma_fma_m128n64_bk16_s2, SM120_FMA_OP_NT, 128, 64, 32, 64, 128, 3, false, false)
+SM120_DEFINE_FMA_KERNEL(nt_sm120_tma_fma_m64n128_bk16_s2, SM120_FMA_OP_NT, 64, 128, 64, 32, 128, 3, false, false)
+SM120_DEFINE_FMA_KERNEL(nt_sm120_tma_fma_m64n64_bk16_s2, SM120_FMA_OP_NT, 64, 64, 32, 64, 64, 5, false, false)
+SM120_DEFINE_FMA_KERNEL(nt_sm120_tma_fma_m128n64_bk16_s2_kvec, SM120_FMA_OP_NT, 128, 64, 32, 64, 128, 2, true, true)
+SM120_DEFINE_FMA_KERNEL(nt_sm120_tma_fma_m64n128_bk16_s2_kvec, SM120_FMA_OP_NT, 64, 128, 64, 32, 128, 2, true, true)
+SM120_DEFINE_FMA_KERNEL(nt_sm120_tma_fma_m64n64_bk16_s2_kvec, SM120_FMA_OP_NT, 64, 64, 32, 64, 64, 4, true, true)
+SM120_DEFINE_FMA_KERNEL(nn_sm120_tma_fma_m128n64_bk16_s2_fold, SM120_FMA_OP_NN, 128, 64, 32, 64, 128, 2, false, true)
+SM120_DEFINE_FMA_KERNEL(nn_sm120_tma_fma_m64n128_bk16_s2_fold, SM120_FMA_OP_NN, 64, 128, 64, 32, 128, 2, false, true)
+SM120_DEFINE_FMA_KERNEL(nn_sm120_tma_fma_m64n64_bk16_s2_fold, SM120_FMA_OP_NN, 64, 64, 32, 64, 64, 4, false, true)
+SM120_DEFINE_FMA_KERNEL(tn_sm120_tma_fma_m128n64_bk16_s2_fold, SM120_FMA_OP_TN, 128, 64, 32, 64, 128, 2, false, true)
+SM120_DEFINE_FMA_KERNEL(tn_sm120_tma_fma_m64n128_bk16_s2_fold, SM120_FMA_OP_TN, 64, 128, 64, 32, 128, 2, false, true)
+SM120_DEFINE_FMA_KERNEL(tn_sm120_tma_fma_m64n64_bk16_s2_fold, SM120_FMA_OP_TN, 64, 64, 32, 64, 64, 4, false, true)
 
 #undef SM120_DEFINE_FMA_KERNEL
 #undef SM120_FMA_K_PIPE

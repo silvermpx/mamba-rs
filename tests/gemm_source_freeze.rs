@@ -188,6 +188,11 @@ const GEMM_SOURCES: &[(&str, u64, usize)] = &[
         36779,
     ),
     (
+        "kernels/gemm_bi_triad/scalar_nn_m64n64_bk32.cu",
+        0x28904483a9bd1f01,
+        11405,
+    ),
+    (
         "kernels/gemm_bi_triad/scalar_nn_splitk_m32n64.cu",
         0x32d9fd3695d9cd6d,
         8227,
@@ -214,8 +219,8 @@ const GEMM_SOURCES: &[(&str, u64, usize)] = &[
     ),
     (
         "kernels/gemm_bi_triad/sm120/exact.cu",
-        0xe1331185e8cda1fc,
-        28901,
+        0x5128202e348ce299,
+        33412,
     ),
     (
         "kernels/gemm_bi_triad/sm120/tma.cu",

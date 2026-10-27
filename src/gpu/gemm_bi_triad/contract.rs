@@ -843,10 +843,15 @@ pub(super) fn append_tf32_route_digest(
                 .required(b"kvec", &[u8::from(route.kvec)])
                 .required(b"splits", &[route.splits])
                 .required(b"in-cta", &[u8::from(route.in_cta)]);
-            // Only a layer-fold route adds the word, so the digests of the
-            // portable-cut routes stay what they were.
-            if route.layer_fold {
+            // Only a layer-fold route and a paired one add their words, so
+            // the digests of the other routes stay what they were.
+            let digest = if route.layer_fold {
                 digest.required(b"layer-fold", &[1])
+            } else {
+                digest
+            };
+            if route.pairs {
+                digest.required(b"pairs", &[1])
             } else {
                 digest
             }
@@ -1749,7 +1754,7 @@ pub struct Tf32Sm120Route {
 /// The reduction tile of the exact-F32 SM120 routes.
 pub const SM120_FMA_BK: u32 = 16;
 /// Register gate of the exact-F32 SM120 routes: the plain arms keep three
-/// blocks per multiprocessor, the NT k-vector arms two.
+/// blocks per multiprocessor, the NT k-vector and the fold arms two.
 pub const SM120_FMA_REGISTER_CAP: u32 = 168;
 pub const SM120_FMA_KVEC_REGISTER_CAP: u32 = 255;
 
@@ -1784,8 +1789,11 @@ impl Sm120FmaTile {
         2 * (bm * SM120_FMA_BK + SM120_FMA_BK * bn) * 4 + 2 * 8
     }
 
-    pub const fn min_blocks(self, kvec: bool) -> u32 {
-        match (self, kvec) {
+    /// Blocks a multiprocessor holds: three (five for 64 x 64) for the plain
+    /// arms, two (four) for the arms that keep a second register set, the NT
+    /// k-vector fragment or the folded pieces' sum.
+    pub const fn min_blocks(self, second_set: bool) -> u32 {
+        match (self, second_set) {
             (Self::M64N64, false) => 5,
             (Self::M64N64, true) => 4,
             (_, false) => 3,
@@ -1805,7 +1813,8 @@ impl Sm120FmaTile {
 /// One exact-F32 SM120 route: the block tile, whether an NT arm keeps its B
 /// fragment as float4 along k, and how many reduction splits the launch
 /// deals. One split reproduces the scalar chain bit for bit; more splits
-/// fold fixed-order partials.
+/// fold fixed-order partials, dealt to a CTA each or folded in registers by
+/// one CTA of a fold arm (an NT k-vector arm folds its own).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Sm120FmaRoute {
     pub tile: Sm120FmaTile,
@@ -1817,6 +1826,11 @@ pub struct Sm120FmaRoute {
     /// The cut is the batch-invariant forward's, read from the layer alone
     /// ([`crate::gemm_fold`]), instead of the portable plan's.
     pub layer_fold: bool,
+    /// The pieces are dealt two to a CTA of the fold arm, which adds its
+    /// pair to the running sum the previous CTA of its tile publishes:
+    /// the in-CTA fold's bits on a grid too small to fill the card with
+    /// one CTA a tile.
+    pub pairs: bool,
 }
 
 impl Sm120FmaRoute {
@@ -1830,21 +1844,33 @@ impl Sm120FmaRoute {
         if self.in_cta && self.splits < 2 {
             return Err("an in-CTA fold needs at least two pieces".into());
         }
+        if self.in_cta && op == ResolvedGemmOp::Nt && !self.kvec {
+            return Err("an NT CTA folds its own pieces in the k-vector kernels only".into());
+        }
         if self.layer_fold && op == ResolvedGemmOp::Tn {
             return Err("the layer's fold serves the forward and the input gradient".into());
+        }
+        if self.pairs && (self.in_cta || self.splits < 3) {
+            return Err("pairs of pieces need three pieces and a CTA per pair".into());
+        }
+        if self.pairs && op == ResolvedGemmOp::Nt && !self.kvec {
+            return Err("an NT pair of pieces folds in the k-vector kernels only".into());
         }
         Ok(())
     }
 
-    /// The route with its split count normalized to one: the kernel is the
-    /// same, only the launch deals differently.
+    /// The route as the kernel inventory keys it: one split, and a fold in
+    /// registers (of all the pieces or of a pair) only where it picks a
+    /// kernel of its own, the fold arm of a plain tile (a k-vector arm folds
+    /// in registers whichever way it is launched).
     pub const fn spec_key(self) -> Self {
         Self {
             tile: self.tile,
             kvec: self.kvec,
             splits: 1,
-            in_cta: false,
+            in_cta: (self.in_cta || self.pairs) && !self.kvec,
             layer_fold: false,
+            pairs: false,
         }
     }
 }
@@ -2114,18 +2140,18 @@ pub enum F32TriadSelection {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Sm120FmaExclusions(u16);
+pub struct Sm120FmaExclusions(u32);
 
 impl Sm120FmaExclusions {
     pub(crate) fn from_routes(routes: &[(ResolvedGemmOp, Sm120FmaRoute)]) -> Result<Self, String> {
-        let mut bits = 0_u16;
+        let mut bits = 0_u32;
         for &(op, route) in routes {
             let key = Tf32PhysicalRoute::Sm120TmaFmaExact(route.spec_key());
             let index = SM120_FMA_ROUTE_SPECS
                 .iter()
                 .position(|spec| spec.op == op && spec.route == key)
                 .ok_or_else(|| format!("{op:?} exact-F32 route {route:?} is not inventoried"))?;
-            bits |= 1_u16 << index;
+            bits |= 1_u32 << index;
         }
         Ok(Self(bits))
     }
@@ -2135,7 +2161,7 @@ impl Sm120FmaExclusions {
         SM120_FMA_ROUTE_SPECS
             .iter()
             .position(|spec| spec.op == op && spec.route == key)
-            .is_some_and(|index| self.0 & (1_u16 << index) != 0)
+            .is_some_and(|index| self.0 & (1_u32 << index) != 0)
     }
 }
 
@@ -2181,6 +2207,7 @@ pub struct Sm120FmaKernelParams {
     pub splits: i32,
     pub tiles_per_split: i32,
     pub chain_from: i32,
+    pub pieces_per_unit: i32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3783,7 +3810,7 @@ const SM120_TF32_TN_M64N128_S3_PAIR_STREAMK: Tf32KernelSpec = Tf32KernelSpec {
 const fn sm120_fma_spec(
     op: ResolvedGemmOp,
     tile: Sm120FmaTile,
-    kvec: bool,
+    (kvec, fold): (bool, bool),
     symbol: &'static str,
 ) -> Tf32KernelSpec {
     Tf32KernelSpec {
@@ -3792,8 +3819,9 @@ const fn sm120_fma_spec(
             tile,
             kvec,
             splits: 1,
-            in_cta: false,
+            in_cta: fold,
             layer_fold: false,
+            pairs: false,
         }),
         symbol,
         module_kind: ModuleKind::TriadSm120,
@@ -3811,84 +3839,120 @@ const fn sm120_fma_spec(
     }
 }
 
-/// The exact-F32 SM120 inventory: three tiles per operation plus the NT
-/// k-vector arms.
-pub const SM120_FMA_ROUTE_SPECS: [Tf32KernelSpec; 12] = [
+/// The exact-F32 SM120 inventory: three tiles per operation, the NT
+/// k-vector arms, and the forward and weight-gradient fold arms.
+pub const SM120_FMA_ROUTE_SPECS: [Tf32KernelSpec; 18] = [
     sm120_fma_spec(
         ResolvedGemmOp::Nn,
         Sm120FmaTile::M128N64,
-        false,
+        (false, false),
         "nn_sm120_tma_fma_m128n64_bk16_s2",
     ),
     sm120_fma_spec(
         ResolvedGemmOp::Nn,
         Sm120FmaTile::M64N128,
-        false,
+        (false, false),
         "nn_sm120_tma_fma_m64n128_bk16_s2",
     ),
     sm120_fma_spec(
         ResolvedGemmOp::Nn,
         Sm120FmaTile::M64N64,
-        false,
+        (false, false),
         "nn_sm120_tma_fma_m64n64_bk16_s2",
     ),
     sm120_fma_spec(
         ResolvedGemmOp::Tn,
         Sm120FmaTile::M128N64,
-        false,
+        (false, false),
         "tn_sm120_tma_fma_m128n64_bk16_s2",
     ),
     sm120_fma_spec(
         ResolvedGemmOp::Tn,
         Sm120FmaTile::M64N128,
-        false,
+        (false, false),
         "tn_sm120_tma_fma_m64n128_bk16_s2",
     ),
     sm120_fma_spec(
         ResolvedGemmOp::Tn,
         Sm120FmaTile::M64N64,
-        false,
+        (false, false),
         "tn_sm120_tma_fma_m64n64_bk16_s2",
     ),
     sm120_fma_spec(
         ResolvedGemmOp::Nt,
         Sm120FmaTile::M128N64,
-        false,
+        (false, false),
         "nt_sm120_tma_fma_m128n64_bk16_s2",
     ),
     sm120_fma_spec(
         ResolvedGemmOp::Nt,
         Sm120FmaTile::M64N128,
-        false,
+        (false, false),
         "nt_sm120_tma_fma_m64n128_bk16_s2",
     ),
     sm120_fma_spec(
         ResolvedGemmOp::Nt,
         Sm120FmaTile::M64N64,
-        false,
+        (false, false),
         "nt_sm120_tma_fma_m64n64_bk16_s2",
     ),
     sm120_fma_spec(
         ResolvedGemmOp::Nt,
         Sm120FmaTile::M128N64,
-        true,
+        (true, false),
         "nt_sm120_tma_fma_m128n64_bk16_s2_kvec",
     ),
     sm120_fma_spec(
         ResolvedGemmOp::Nt,
         Sm120FmaTile::M64N128,
-        true,
+        (true, false),
         "nt_sm120_tma_fma_m64n128_bk16_s2_kvec",
     ),
     sm120_fma_spec(
         ResolvedGemmOp::Nt,
         Sm120FmaTile::M64N64,
-        true,
+        (true, false),
         "nt_sm120_tma_fma_m64n64_bk16_s2_kvec",
+    ),
+    sm120_fma_spec(
+        ResolvedGemmOp::Nn,
+        Sm120FmaTile::M128N64,
+        (false, true),
+        "nn_sm120_tma_fma_m128n64_bk16_s2_fold",
+    ),
+    sm120_fma_spec(
+        ResolvedGemmOp::Nn,
+        Sm120FmaTile::M64N128,
+        (false, true),
+        "nn_sm120_tma_fma_m64n128_bk16_s2_fold",
+    ),
+    sm120_fma_spec(
+        ResolvedGemmOp::Nn,
+        Sm120FmaTile::M64N64,
+        (false, true),
+        "nn_sm120_tma_fma_m64n64_bk16_s2_fold",
+    ),
+    sm120_fma_spec(
+        ResolvedGemmOp::Tn,
+        Sm120FmaTile::M128N64,
+        (false, true),
+        "tn_sm120_tma_fma_m128n64_bk16_s2_fold",
+    ),
+    sm120_fma_spec(
+        ResolvedGemmOp::Tn,
+        Sm120FmaTile::M64N128,
+        (false, true),
+        "tn_sm120_tma_fma_m64n128_bk16_s2_fold",
+    ),
+    sm120_fma_spec(
+        ResolvedGemmOp::Tn,
+        Sm120FmaTile::M64N64,
+        (false, true),
+        "tn_sm120_tma_fma_m64n64_bk16_s2_fold",
     ),
 ];
 
-pub const SM120_TF32_ROUTE_SPECS: [Tf32KernelSpec; 30] = [
+pub const SM120_TF32_ROUTE_SPECS: [Tf32KernelSpec; 36] = [
     SM120_TF32_NN[0],
     SM120_TF32_NN[1],
     SM120_TF32_NN[2],
@@ -3919,6 +3983,12 @@ pub const SM120_TF32_ROUTE_SPECS: [Tf32KernelSpec; 30] = [
     SM120_FMA_ROUTE_SPECS[9],
     SM120_FMA_ROUTE_SPECS[10],
     SM120_FMA_ROUTE_SPECS[11],
+    SM120_FMA_ROUTE_SPECS[12],
+    SM120_FMA_ROUTE_SPECS[13],
+    SM120_FMA_ROUTE_SPECS[14],
+    SM120_FMA_ROUTE_SPECS[15],
+    SM120_FMA_ROUTE_SPECS[16],
+    SM120_FMA_ROUTE_SPECS[17],
 ];
 
 pub fn tf32_route_specs(module_kind: ModuleKind) -> &'static [Tf32KernelSpec] {
@@ -7957,6 +8027,53 @@ mod tests {
         validate_tf32_issued_coordinates, zeroed_tensor_map_sentinel,
     };
 
+    #[test]
+    fn sm120_pairs_need_three_pieces_a_cta_per_pair_and_the_kvec_arm_for_nt() {
+        use super::{ResolvedGemmOp, Sm120FmaRoute, Sm120FmaTile};
+        let pairs = Sm120FmaRoute {
+            tile: Sm120FmaTile::M64N128,
+            kvec: false,
+            splits: 3,
+            in_cta: false,
+            layer_fold: true,
+            pairs: true,
+        };
+        assert!(pairs.validate(ResolvedGemmOp::Nn).is_ok());
+        assert!(
+            Sm120FmaRoute { splits: 2, ..pairs }
+                .validate(ResolvedGemmOp::Nn)
+                .is_err()
+        );
+        assert!(
+            Sm120FmaRoute {
+                in_cta: true,
+                ..pairs
+            }
+            .validate(ResolvedGemmOp::Nn)
+            .is_err()
+        );
+        assert!(pairs.validate(ResolvedGemmOp::Nt).is_err());
+        assert!(
+            Sm120FmaRoute {
+                kvec: true,
+                ..pairs
+            }
+            .validate(ResolvedGemmOp::Nt)
+            .is_ok()
+        );
+        // A pair runs on the fold arm of its tile, keyed like an in-CTA fold.
+        assert_eq!(
+            pairs.spec_key(),
+            Sm120FmaRoute {
+                splits: 1,
+                in_cta: true,
+                layer_fold: false,
+                pairs: false,
+                ..pairs
+            }
+        );
+    }
+
     const TEST_ALLOCATION_DOMAIN: AllocationDomain = AllocationDomain {
         context_handle: 0x1234,
         device_ordinal: 2,
@@ -8150,7 +8267,7 @@ mod tests {
             (ModuleKind::TriadSm89Tf32Joint, 11, [2, 6, 3]),
             (ModuleKind::TriadSm90a, 6, [2, 2, 2]),
             (ModuleKind::TriadSm100, 36, [12, 12, 12]),
-            (ModuleKind::TriadSm120, 30, [9, 10, 11]),
+            (ModuleKind::TriadSm120, 36, [12, 13, 11]),
             (ModuleKind::TriadTf32Rna, 27, [19, 0, 8]),
         ];
         let expected_total = expected.iter().map(|(_, count, _)| count).sum::<usize>();

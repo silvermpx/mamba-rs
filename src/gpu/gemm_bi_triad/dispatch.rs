@@ -4838,20 +4838,9 @@ fn sm120_fma_generic_tile(
     multiprocessors: u32,
     splits: u8,
 ) -> Option<(Sm120FmaTile, bool)> {
-    let (tile, kvec) = match request.op {
-        ResolvedGemmOp::Nn => (Sm120FmaTile::M128N64, false),
-        ResolvedGemmOp::Tn => (Sm120FmaTile::M64N128, false),
-        ResolvedGemmOp::Nt => (Sm120FmaTile::M128N64, true),
-    };
+    let (tile, kvec) = sm120_fma_op_tile(request)?;
     let rows = request.shape.output_rows(request.op);
     let columns = request.shape.output_columns(request.op);
-    let reduction = request.shape.reduction(request.op);
-    if rows < SM120_FMA_GENERIC_MIN_EDGE
-        || columns < SM120_FMA_GENERIC_MIN_EDGE
-        || reduction < SM120_FMA_GENERIC_MIN_REDUCTION
-    {
-        return None;
-    }
     let (bm, bn) = tile.dims();
     let tiles = rows
         .div_ceil(bm as usize)
@@ -4861,10 +4850,96 @@ fn sm120_fma_generic_tile(
         .then_some((tile, kvec))
 }
 
+/// The tile an operation takes past the measured cells, where its output
+/// and reduction are long enough for the kernels at all.
+fn sm120_fma_op_tile(request: F32TriadRequest) -> Option<(Sm120FmaTile, bool)> {
+    let rows = request.shape.output_rows(request.op);
+    let columns = request.shape.output_columns(request.op);
+    let reduction = request.shape.reduction(request.op);
+    if rows < SM120_FMA_GENERIC_MIN_EDGE
+        || columns < SM120_FMA_GENERIC_MIN_EDGE
+        || reduction < SM120_FMA_GENERIC_MIN_REDUCTION
+    {
+        return None;
+    }
+    Some(match request.op {
+        ResolvedGemmOp::Nn => (Sm120FmaTile::M128N64, false),
+        ResolvedGemmOp::Tn => (Sm120FmaTile::M64N128, false),
+        ResolvedGemmOp::Nt => (Sm120FmaTile::M128N64, true),
+    })
+}
+
+/// Whether a cut of `pieces` over `tiles` output tiles of `tile` deals its
+/// pieces two to a CTA of the fold arm, each CTA adding its pair to the
+/// running sum the CTA before it publishes, instead of one CTA a tile
+/// folding them all; both write the in-CTA fold's bits. Pairs pay a
+/// hand-off a unit and a grid of their own, so they serve where one CTA a
+/// tile leaves the card badly balanced: the tiles leave two fifths of the
+/// multiprocessors idle (up to nine units); a thin second CTA lands on a
+/// few multiprocessors (tiles up to 1.3 of them, an even cut, up to six
+/// units); a thin last wave of the fold blocks (tiles up to 1.15 of them, an
+/// even cut, three units at most); or, for the long batch chunks of a weight
+/// gradient (`long_pieces`), one hand-off while the tiles fit one CTA a
+/// multiprocessor. An odd cut leaves its last unit a single piece and
+/// unbalances a short chain. On an RTX 5090's 156 cut layers this choice
+/// came within 0.4% of the faster route per cell in geometric mean (pairs
+/// ran 0.77 to 0.98 of the in-CTA fold where taken), where pairs on every
+/// cut grid under a wave and a quarter of the fold blocks lost 0.6% to
+/// folding everything in one CTA. The 64 x 64 tile was not measured and
+/// keeps its fold.
+fn sm120_pairs_take_cut(
+    tiles: usize,
+    pieces: u8,
+    tile: Sm120FmaTile,
+    multiprocessors: u32,
+    long_pieces: bool,
+) -> bool {
+    let sms = multiprocessors as usize;
+    let blocks = sms.saturating_mul(tile.min_blocks(true) as usize);
+    let units = usize::from(pieces).div_ceil(2);
+    let even = pieces.is_multiple_of(2);
+    if tile == Sm120FmaTile::M64N64
+        || pieces < 3
+        || tiles.saturating_mul(units).saturating_mul(5) < sms.saturating_mul(4)
+    {
+        return false;
+    }
+    let idle = tiles.saturating_mul(5) <= sms.saturating_mul(3) && units <= 9;
+    let thin_second =
+        even && units <= 6 && sms < tiles && tiles.saturating_mul(10) <= sms.saturating_mul(13);
+    let thin_wave = even
+        && units <= 3
+        && blocks < tiles
+        && tiles.saturating_mul(20) <= blocks.saturating_mul(23);
+    let one_hand_off = long_pieces && pieces == 4 && tiles <= sms;
+    idle || thin_second || thin_wave || one_hand_off
+}
+
 /// The longest piece, in k tiles, that one CTA folds with the others of its
 /// tile rather than dealing a CTA to each: the thin plans' 32 inputs and the
 /// slim plans' 64.
 const SM120_FMA_SHORT_PIECE_TILES: usize = 4;
+
+/// The weight gradients whose batch chunks one CTA folds in registers: a
+/// grid of 64 x 128 tiles from half a wave of the card up to the two waves
+/// the fold arms hold at once (two CTAs a multiprocessor).
+const SM120_TN_FOLD_WINDOW: WaveWindow =
+    WaveWindow::new(WaveShare::new(1, 2), WaveShare::new(2, 1));
+
+/// The output tiles of `tile` over a request's output.
+fn sm120_generic_tiles(request: F32TriadRequest, tile: Sm120FmaTile) -> usize {
+    let (bm, bn) = tile.dims();
+    request
+        .shape
+        .output_rows(request.op)
+        .div_ceil(bm as usize)
+        .saturating_mul(
+            request
+                .shape
+                .output_columns(request.op)
+                .div_ceil(bn as usize),
+        )
+}
 
 /// How the portable exact plan of a request cuts its reduction, in the
 /// SM120 kernels' 16-deep k tiles.
@@ -5014,16 +5089,43 @@ pub(super) fn sm120_fma_exact_route(
     // from the portable route ran in 0.46 to 0.89 of their time on 14 of 16
     // shapes (1.03 and 1.11 on two of 96 and 100 tiles), where a CTA per
     // piece managed 0.78 to 0.97 and lost up to 1.24 on short reductions.
-    // Long pieces, the split-M weight gradients', run a CTA each: one CTA
-    // walking them in a row was 1.27 to 1.57 times slower.
+    // Long pieces, the split-M weight gradients', fold in one CTA while
+    // their tiles fit one wave of the fold arms and fill half the card (the
+    // RTX 5090's training weight gradients ran in 0.82 to 0.98 of a CTA per
+    // piece there), and run a CTA each past it, where a second wave of
+    // folding CTAs cost up to 1.33 times the dealt pieces.
+    // A weight gradient whose chunks would leave the fold arms short of the
+    // card deals them in pairs instead (see [`sm120_pairs_take_cut`]).
+    let pairs = request.op == ResolvedGemmOp::Tn
+        && !cut.tail
+        && cut.chain_from.is_none()
+        && cut.piece_tiles > SM120_FMA_SHORT_PIECE_TILES
+        && sm120_pairs_take_cut(
+            sm120_generic_tiles(request, Sm120FmaTile::M64N128),
+            cut.splits,
+            Sm120FmaTile::M64N128,
+            multiprocessors,
+            true,
+        );
     let in_cta = cut.splits > 1
-        && (cut.tail || cut.chain_from.is_some() || cut.piece_tiles <= SM120_FMA_SHORT_PIECE_TILES);
+        && !pairs
+        && (cut.tail
+            || cut.chain_from.is_some()
+            || cut.piece_tiles <= SM120_FMA_SHORT_PIECE_TILES
+            || (request.op == ResolvedGemmOp::Tn
+                && SM120_TN_FOLD_WINDOW.holds(
+                    sm120_generic_tiles(request, Sm120FmaTile::M64N128),
+                    multiprocessors as usize,
+                )));
+    // An NT CTA folds its own pieces on the k-vector arm of its tile, which
+    // walks the same chains in the same order.
     let with_cut = |(tile, kvec): (Sm120FmaTile, bool)| Sm120FmaRoute {
         tile,
-        kvec,
+        kvec: kvec || ((in_cta || pairs) && request.op == ResolvedGemmOp::Nt),
         splits: cut.splits,
         in_cta,
         layer_fold: false,
+        pairs,
     };
     let route = SM120_FMA_MEASURED_CELLS
         .iter()
@@ -5035,19 +5137,23 @@ pub(super) fn sm120_fma_exact_route(
                 .is_excluded(request.op, *route)
         })
         .or_else(|| {
-            // A CTA that folds its own pieces fills the card like one chain.
+            // A CTA that folds its own pieces fills the card like one chain,
+            // and pairs of pieces already passed their own fill.
             let dealt = if in_cta || cut.splits == 1 {
                 1
             } else {
                 cut.splits
             };
-            sm120_fma_generic_tile(request, multiprocessors, dealt)
-                .map(with_cut)
-                .filter(|route| {
-                    !qualified
-                        .sm120_fma_exclusions
-                        .is_excluded(request.op, *route)
-                })
+            let tile = if pairs {
+                sm120_fma_op_tile(request)
+            } else {
+                sm120_fma_generic_tile(request, multiprocessors, dealt)
+            };
+            tile.map(with_cut).filter(|route| {
+                !qualified
+                    .sm120_fma_exclusions
+                    .is_excluded(request.op, *route)
+            })
         })?;
     super::launch::sm120_fma_launch_plan(request, route).ok()?;
     Some(route)
@@ -5103,26 +5209,39 @@ pub(super) fn sm120_fma_layer_route(
         reduction
     };
     let splits = u8::try_from(reduction.div_ceil(piece)).ok()?;
-    let (tile, kvec) = sm120_fma_generic_tile(request, qualified.device.multiprocessor_count, 1)?;
-    // A forward's CTA folds its own pieces; an input gradient deals a CTA
-    // to each, which ran ahead of the k-vector fold on most of the RTX
-    // 5090's input gradients.
+    let outputs = (shape.output_rows(request.op), columns);
+    let multiprocessors = qualified.device.multiprocessor_count;
+    // A cut layer passes its own fills below; one chain needs the generic
+    // tile's.
+    let (tile, kvec) = if cut {
+        sm120_fma_op_tile(request)?
+    } else {
+        sm120_fma_generic_tile(request, multiprocessors, 1)?
+    };
+    // The CTA folds its own pieces in registers, or a pair of them: a
+    // forward on its tile's fold arm, an input gradient on the k-vector arm.
+    let tile = if cut && request.op == ResolvedGemmOp::Nn {
+        sm120_layer_forward_tile(outputs, multiprocessors)
+    } else {
+        tile
+    };
+    let pairs = cut
+        && sm120_pairs_take_cut(
+            sm120_generic_tiles(request, tile),
+            splits,
+            tile,
+            multiprocessors,
+            false,
+        );
     let route = Sm120FmaRoute {
         tile,
         kvec,
         splits,
-        in_cta: splits > 1 && request.op == ResolvedGemmOp::Nn,
+        in_cta: splits > 1 && !pairs,
         layer_fold: true,
+        pairs,
     };
-    if cut
-        && !sm120_layer_takes_cut(
-            request.op,
-            (shape.output_rows(request.op), columns),
-            tile,
-            splits,
-            qualified.device.multiprocessor_count,
-        )
-    {
+    if cut && !pairs && !sm120_layer_takes_cut(outputs, multiprocessors) {
         return None;
     }
     if qualified
@@ -5136,35 +5255,31 @@ pub(super) fn sm120_fma_layer_route(
 }
 
 /// Whether the SM120 layer kernels take a cut layer of `rows` x `columns`
-/// outputs on `tile`, cut into `splits` pieces. A forward's CTA folds its
-/// own pieces, and the kernels take it while their grid stays under three
-/// waves of the card. An input gradient deals a CTA to each piece, and the
-/// kernels take it while its rows fill three quarters of their tiles and
-/// its tiles times its pieces fall from three to eight waves. Past those
-/// bounds the portable register tiles and chunk partials, which write the
-/// same bits, run faster: over the census's 120 cut forwards and 132 cut
-/// input gradients on an RTX 5090, every route forced in two passes, the
-/// bounds came within 0.68% and 0.76% of the faster route per cell in
-/// geometric mean, where half a tile per multiprocessor alone took 2.3%
-/// and 3.2% (up to 1.28 and 1.25 times the faster route's time).
-fn sm120_layer_takes_cut(
-    op: ResolvedGemmOp,
-    (rows, columns): (usize, usize),
-    tile: Sm120FmaTile,
-    splits: u8,
-    multiprocessors: u32,
-) -> bool {
-    let waves = multiprocessors as usize;
-    let (bm, bn) = tile.dims();
-    let (bm, bn) = (bm as usize, bn as usize);
-    let tiles = rows.div_ceil(bm).saturating_mul(columns.div_ceil(bn));
-    if op == ResolvedGemmOp::Nn {
-        return tiles < waves.saturating_mul(3);
+/// outputs, each CTA folding its own pieces in registers: while its 128 x 64
+/// tiles cover half a wave of the card. Below that the portable chunk
+/// partials, which deal the pieces to more CTAs and write the same bits,
+/// keep more of the card busy. Over the RTX 5090's census of 421 cut
+/// forwards and 370 cut input gradients, every route forced, the bound came
+/// within 0.31% and 0.01% of the fastest route per cell in geometric mean,
+/// with the forward's tile chosen by [`sm120_layer_forward_tile`].
+fn sm120_layer_takes_cut((rows, columns): (usize, usize), multiprocessors: u32) -> bool {
+    WaveShare::new(1, 2).covered(
+        rows.div_ceil(128).saturating_mul(columns.div_ceil(64)),
+        multiprocessors as usize,
+    )
+}
+
+/// The tile a cut forward folds on in the SM120 layer kernels: the 64 x 128
+/// tile while its layer's 128 x 64 tiles stay under eight waves of the card,
+/// where the wider rows of the 128 x 64 tile lost to its shorter grid, and
+/// the 128 x 64 tile past them.
+fn sm120_layer_forward_tile((rows, columns): (usize, usize), multiprocessors: u32) -> Sm120FmaTile {
+    let tiles = rows.div_ceil(128).saturating_mul(columns.div_ceil(64));
+    if WaveShare::new(8, 1).covered(tiles, multiprocessors as usize) {
+        Sm120FmaTile::M128N64
+    } else {
+        Sm120FmaTile::M64N128
     }
-    let dealt = tiles.saturating_mul(usize::from(splits));
-    rows.saturating_mul(4) >= rows.div_ceil(bm).saturating_mul(bm * 3)
-        && dealt >= waves.saturating_mul(3)
-        && dealt < waves.saturating_mul(8)
 }
 
 pub const SM90A_AUTO_CELLS: &[Sm90aForcedRoute] = &[];
@@ -8816,6 +8931,8 @@ pub(super) enum ExactPiecesTile {
     M128N128,
     /// The 128 x 64 tile on 128 threads, twice the CTAs.
     M128N64,
+    /// The 64 x 64 tile staged in 32-deep slabs, three CTAs a multiprocessor.
+    M64N64Bk32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -8872,6 +8989,10 @@ pub(super) enum ScalarDispatchPlan {
     /// The 128 x 64 tile over a cut layer: the 128 x 128 tile's fold on half
     /// its columns, twice the CTAs.
     NnExactPiecesM128N64,
+    /// The 64 x 64 tile over a cut layer, staged in 32-deep slabs by 16-byte
+    /// copies, eight rows by four columns a thread: half the accumulators of
+    /// the other tiles, so three CTAs share a multiprocessor.
+    NnExactPiecesM64N64Bk32,
     /// The input gradient's thin tile under its layer's fold, a row per
     /// thread: the forward's tile over the weight read transposed.
     NtExactThin,
@@ -9387,6 +9508,9 @@ impl WaveShare {
 /// an architecture fills by them; every tile writes the same bits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ExactCutTiles {
+    /// The 64 x 64 slab tile from this share of a wave of its grid, before
+    /// every other tile, or nowhere.
+    pub(super) slab: Option<WaveShare>,
     pub(super) big: WaveShare,
     pub(super) wide: WaveShare,
     pub(super) m64: Option<WaveShare>,
@@ -9509,13 +9633,16 @@ impl ExactChunkPartials {
 /// to 127 forward outputs
 /// the narrow tile while the 64 x 64 grid falls in `nt_narrow`, the native
 /// slim tile from `nt_slim` of a wave of its grid, and the 64 x 64 chain
-/// tile over the transposed weight from `nt_via` of a wave of its grid.
+/// tile over the transposed weight from `nt_via` of a wave of its grid. An
+/// input gradient into 16 to `nt_km_thin_below` forward outputs, off a
+/// multiple of 32, takes the 32 x 64 tile past its window's upper end too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ExactUncutTiles {
     pub(super) nn_km: WaveWindow,
     pub(super) big: WaveShare,
     pub(super) m64_min_columns: usize,
     pub(super) nt_km: WaveWindow,
+    pub(super) nt_km_thin_below: usize,
     pub(super) nt_narrow: Option<WaveWindow>,
     pub(super) nt_slim: WaveShare,
     pub(super) nt_via: WaveShare,
@@ -9548,6 +9675,7 @@ pub(super) struct ExactRules {
 /// half a wave came within 0.4%.
 const EXACT_SM89: ExactRules = ExactRules {
     forward: ExactCutTiles {
+        slab: None,
         big: WaveShare::new(1, 2),
         wide: WaveShare::new(1, 2),
         m64: Some(WaveShare::new(1, 1)),
@@ -9557,6 +9685,7 @@ const EXACT_SM89: ExactRules = ExactRules {
         km_beside_slim: KmBesideSlim::Always,
     },
     input_gradient: ExactCutTiles {
+        slab: None,
         big: WaveShare::new(1, 2),
         wide: WaveShare::new(2, 3),
         m64: None,
@@ -9577,6 +9706,7 @@ const EXACT_SM89: ExactRules = ExactRules {
         big: WaveShare::new(3, 4),
         m64_min_columns: 1,
         nt_km: WaveWindow::new(WaveShare::new(1, 3), WaveShare::new(3, 1)),
+        nt_km_thin_below: 0,
         nt_narrow: Some(WaveWindow::new(WaveShare::new(1, 4), WaveShare::new(1, 1))),
         nt_slim: WaveShare::new(1, 2),
         nt_via: WaveShare::new(1, 2),
@@ -9602,9 +9732,14 @@ const EXACT_SM89: ExactRules = ExactRules {
 /// fastest tile (the rule this architecture ran before took 2.2%), and over
 /// 414 uncut input gradients the chain tile from a third of a wave to three
 /// waves, the native slim tile from one and a half waves and the transposed
-/// chain tile from a third of a wave came within 0.26% (7.0% before).
+/// chain tile from a third of a wave came within 0.26% (7.0% before). Over
+/// 140 input gradients of 16 to 112 inputs the chain tile won past three
+/// waves too, off a multiple of 32 (the 16 x 16 tile it replaced there ran
+/// up to 2.3 times its time); taking them came within 1.3% of the fastest
+/// tile (31% before) and left the 414 cells above as they were.
 const EXACT_SM120: ExactRules = ExactRules {
     forward: ExactCutTiles {
+        slab: None,
         big: WaveShare::new(1, 4),
         wide: WaveShare::new(1, 2),
         m64: Some(WaveShare::new(1, 1)),
@@ -9614,6 +9749,7 @@ const EXACT_SM120: ExactRules = ExactRules {
         km_beside_slim: KmBesideSlim::Never,
     },
     input_gradient: ExactCutTiles {
+        slab: None,
         big: WaveShare::new(4, 3),
         wide: WaveShare::new(1, 2),
         m64: None,
@@ -9634,6 +9770,7 @@ const EXACT_SM120: ExactRules = ExactRules {
         big: WaveShare::new(4, 1),
         m64_min_columns: 1,
         nt_km: WaveWindow::new(WaveShare::new(1, 3), WaveShare::new(3, 1)),
+        nt_km_thin_below: 128,
         nt_narrow: None,
         nt_slim: WaveShare::new(3, 2),
         nt_via: WaveShare::new(1, 3),
@@ -9661,6 +9798,7 @@ const EXACT_SM120: ExactRules = ExactRules {
 /// it).
 const EXACT_SM80: ExactRules = ExactRules {
     forward: ExactCutTiles {
+        slab: Some(WaveShare::new(3, 1)),
         big: WaveShare::new(16, 1),
         wide: WaveShare::new(3, 2),
         m64: Some(WaveShare::new(6, 1)),
@@ -9670,6 +9808,7 @@ const EXACT_SM80: ExactRules = ExactRules {
         km_beside_slim: KmBesideSlim::Always,
     },
     input_gradient: ExactCutTiles {
+        slab: Some(WaveShare::new(3, 1)),
         big: WaveShare::new(16, 1),
         wide: WaveShare::new(3, 2),
         m64: None,
@@ -9690,6 +9829,7 @@ const EXACT_SM80: ExactRules = ExactRules {
         big: WaveShare::new(4, 1),
         m64_min_columns: 64,
         nt_km: WaveWindow::from(WaveShare::new(1, 3)),
+        nt_km_thin_below: 0,
         nt_narrow: Some(WaveWindow::new(WaveShare::new(1, 4), WaveShare::new(1, 1))),
         nt_slim: WaveShare::new(1, 2),
         nt_via: WaveShare::new(1, 2),
@@ -9736,6 +9876,11 @@ pub(super) fn exact_cut_forward_register_tile(
         waves,
         ..
     } = cut;
+    let slab = m.div_ceil(64).saturating_mul(n.div_ceil(64));
+    if m >= EXACT_PIECES_SLAB_MIN_ROWS && tiles.slab.is_some_and(|share| share.covered(slab, waves))
+    {
+        return Some(ScalarDispatchPlan::NnExactPiecesM64N64Bk32);
+    }
     let big = m.div_ceil(128).saturating_mul(n.div_ceil(128));
     if m >= GEMM_CUSTOM_MIN && n >= GEMM_CUSTOM_MIN && tiles.big.covered(big, waves) {
         return Some(ScalarDispatchPlan::NnExactPiecesBig);
@@ -9779,6 +9924,14 @@ pub(super) fn exact_cut_input_gradient_register_tile(
         ..
     } = cut;
     if via {
+        let slab = m.div_ceil(64).saturating_mul(n_in.div_ceil(64));
+        if m >= EXACT_PIECES_SLAB_MIN_ROWS
+            && tiles.slab.is_some_and(|share| share.covered(slab, waves))
+        {
+            return Some(ScalarDispatchPlan::NtExactPiecesViaTranspose {
+                tile: ExactPiecesTile::M64N64Bk32,
+            });
+        }
         let big = m.div_ceil(128).saturating_mul(n_in.div_ceil(128));
         if tiles.big.covered(big, waves) {
             return Some(ScalarDispatchPlan::NtExactPiecesViaTranspose {
@@ -9811,6 +9964,10 @@ pub(super) const EXACT_SLAB_GRID_ROWS_MAX: usize = 65_535;
 /// The rows from which a cut layer's forward folds its pieces in the 64 x 64
 /// tile; a thinner batch takes the chunk partials, which write the same bits.
 pub(super) const EXACT_PIECES_M64_MIN_ROWS: usize = 64;
+
+/// The fewest rows the 64 x 64 slab tile folds a cut layer for: the batches
+/// it was measured on, a thin batch staying on the tiles its census chose.
+pub(super) const EXACT_PIECES_SLAB_MIN_ROWS: usize = 128;
 
 /// The input gradient's plan under its layer's fold: `dX[m][i]` sums
 /// `dY[m][r] * W[i][r]` over the forward's outputs r, cut as a forward of
@@ -9905,7 +10062,10 @@ pub(super) fn exact_batch_invariant_nt_plan(
     // architecture's share of a wave of its grid, and the 16 x 16 tile below.
     let uncut = rules.uncut;
     let km_grid = m.div_ceil(32).saturating_mul(n_in.div_ceil(64));
-    if n_in >= 32 && uncut.nt_km.holds(km_grid, waves) {
+    let thin = (16..uncut.nt_km_thin_below).contains(&n_out) && !n_out.is_multiple_of(32);
+    if n_in >= 32
+        && (uncut.nt_km.holds(km_grid, waves) || (thin && uncut.nt_km.from.covered(km_grid, waves)))
+    {
         return Ok(ScalarDispatchPlan::NtExactKm);
     }
     let transposed_tiles = m.div_ceil(64).saturating_mul(n_in.div_ceil(64));
@@ -15026,7 +15186,8 @@ mod tf32_tests {
                             request, route,
                         )
                         .unwrap();
-                        assert_eq!(launch.tiles_per_split, cut.piece_tiles);
+                        let per_unit = if route.pairs { 2 } else { 1 };
+                        assert_eq!(launch.tiles_per_split, cut.piece_tiles * per_unit);
                         served[usize::from(route.splits > 1)] += 1;
                     }
                 }
@@ -15082,14 +15243,17 @@ mod tf32_tests {
                                 let cut = super::exact_chunks(k, n);
                                 let piece = if cut { super::exact_chunk(k, n) } else { k };
                                 assert_eq!(usize::from(route.splits), k.div_ceil(piece), "{what}");
-                                assert_eq!(route.in_cta, route.splits > 1, "{what}");
+                                assert_eq!(route.in_cta || route.pairs, route.splits > 1, "{what}");
+                                assert!(!(route.in_cta && route.pairs), "{what}");
                                 assert!(!(cut && k % 32 == 16), "{what}");
                                 let launch =
                                     crate::gpu::gemm_bi_triad::launch::sm120_fma_launch_plan(
                                         request, route,
                                     )
                                     .unwrap();
-                                let piece_tiles = if route.splits > 1 {
+                                let piece_tiles = if route.pairs {
+                                    piece / 8
+                                } else if route.splits > 1 {
                                     piece / 16
                                 } else {
                                     k.div_ceil(16)
@@ -15150,7 +15314,7 @@ mod tf32_tests {
     }
 
     #[test]
-    fn sm120_input_gradient_cuts_by_the_layer_and_deals_its_pieces() {
+    fn sm120_input_gradient_cuts_by_the_layer_and_folds_its_pieces_in_the_cta() {
         let availability = sm120_availability_for(sm120_cohort().identity);
         let operands = F32TriadOperands {
             output: 0x1000,
@@ -15160,8 +15324,8 @@ mod tf32_tests {
             alpha: 1.0,
             beta: 0.0,
         };
-        // Wide cut layers deal more pieces than the layer kernels take and stay
-        // portable; the cut layers inside their window fold on them.
+        // A cut input gradient's CTA folds its own pieces on the k-vector
+        // arm, from half a wave of tiles; an uncut one runs one chain.
         let mut served = [0_usize; 2];
         for (m, n_in, n_out) in [
             (4_096, 512, 2_048),
@@ -15186,7 +15350,12 @@ mod tf32_tests {
             let what = format!("NT {m}x{n_in}x{n_out}: {selection:?}");
             match selection {
                 F32TriadSelection::ExactSm120Fma(route) => {
-                    assert!(route.layer_fold && !route.in_cta, "{what}");
+                    assert!(
+                        route.layer_fold
+                            && route.kvec
+                            && (route.in_cta || route.pairs) == (route.splits > 1),
+                        "{what}"
+                    );
                     let cut = super::exact_chunks(n_out, n_in);
                     let piece = if cut {
                         super::exact_chunk(n_out, n_in)
@@ -15209,10 +15378,81 @@ mod tf32_tests {
     }
 
     #[test]
+    fn sm120_small_cut_layers_deal_their_pieces_in_pairs() {
+        let availability = sm120_availability_for(sm120_cohort().identity);
+        let operands = F32TriadOperands {
+            output: 0x1000,
+            a: 0x2000,
+            b: 0x3000,
+            bias: None,
+            alpha: 1.0,
+            beta: 0.0,
+        };
+        let layer = |op, dims| {
+            let request = F32TriadRequest {
+                op,
+                shape: F32TriadShape::contiguous(op, dims),
+            };
+            super::sm120_fma_layer_route(request, operands, availability).map(|route| {
+                let launch =
+                    crate::gpu::gemm_bi_triad::launch::sm120_fma_launch_plan(request, route)
+                        .unwrap();
+                (route, launch)
+            })
+        };
+        // The test card holds 142 multiprocessors. A forward of 512 rows
+        // over 1536 inputs: twelve pieces over 48 tiles, which leave most of
+        // the card idle, six pairs a tile and five hand-offs.
+        let (small, launch) =
+            layer(ResolvedGemmOp::Nn, (512, 1_536, 768)).expect("a small forward");
+        assert!(
+            small.pairs && !small.in_cta && small.splits == 12,
+            "{small:?}"
+        );
+        assert_eq!(launch.tiles, 48, "{launch:?}");
+        assert_eq!(launch.units as usize, launch.tiles * 6, "{launch:?}");
+        assert_eq!(launch.tiles_per_split, 16, "{launch:?}");
+        assert_eq!(launch.flag_elements, launch.tiles * 5, "{launch:?}");
+        assert_eq!(
+            launch.slab_elements,
+            launch.tiles * 5 * 64 * 128,
+            "{launch:?}"
+        );
+        // 160 tiles put a thin second CTA on a few multiprocessors.
+        let (thin, _) = layer(ResolvedGemmOp::Nn, (2_048, 1_536, 640)).expect("a thin layer");
+        assert!(thin.pairs, "{thin:?}");
+        // An input gradient whose 288 tiles leave a thin last wave of the
+        // 284 fold blocks: six pieces, three pairs a tile.
+        let (gradient, launch) =
+            layer(ResolvedGemmOp::Nt, (2_048, 1_152, 768)).expect("a thin-wave gradient");
+        assert!(
+            gradient.pairs && gradient.kvec && gradient.splits == 6,
+            "{gradient:?}"
+        );
+        assert_eq!(launch.units as usize, launch.tiles * 3, "{launch:?}");
+        // The out_proj forward's 192 tiles and the in_proj's 864 balance on
+        // the card, and the in_proj input gradient's 27 pieces would hand
+        // their sum through 14 CTAs: one CTA a tile folds them all.
+        for (op, dims) in [
+            (ResolvedGemmOp::Nn, (2_048, 1_536, 768)),
+            (ResolvedGemmOp::Nn, (2_048, 768, 3_352)),
+            (ResolvedGemmOp::Nt, (2_048, 768, 3_352)),
+        ] {
+            let (route, _) = layer(op, dims).expect("a cut layer");
+            assert!(route.in_cta && !route.pairs, "{op:?} {dims:?}: {route:?}");
+        }
+        // Too few pairs to fill the card, and too few tiles to fold: the
+        // portable chunk partials keep it.
+        assert_eq!(layer(ResolvedGemmOp::Nn, (128, 1_536, 768)), None);
+    }
+
+    #[test]
     fn sm120_exact_folds_short_pieces_and_tails_in_one_cta() {
         // A thin cut's two-tile pieces and a cut with a tail fold inside one
         // CTA per tile, which half the card's tiles admit; the long pieces
-        // of a split-M weight gradient get a CTA each.
+        // of a split-M weight gradient fold in one CTA while their tiles fit
+        // one wave of the fold arms, two to a CTA where one CTA a tile would
+        // leave the card unbalanced, and get a CTA each past the wave.
         let identity = sm120_cohort().identity;
         let availability = sm120_availability_for(identity);
         let route = |op, dims| {
@@ -15251,9 +15491,23 @@ mod tf32_tests {
         );
         let (tail, _) = route(ResolvedGemmOp::Nt, (1_024, 768, 1_000)).expect("a cut with a tail");
         assert!(tail.splits > 1 && tail.in_cta, "{tail:?}");
+        // Two chunks over 264 tiles, inside the 142-SM card's window of 71
+        // to 284 tiles.
         let (split_m, _) =
-            route(ResolvedGemmOp::Tn, (8_192, 1_024, 1_536)).expect("a split-M gradient");
-        assert!(split_m.splits > 1 && !split_m.in_cta, "{split_m:?}");
+            route(ResolvedGemmOp::Tn, (2_048, 704, 3_072)).expect("a split-M gradient");
+        assert!(split_m.splits == 2 && split_m.in_cta, "{split_m:?}");
+        let (three, _) =
+            route(ResolvedGemmOp::Tn, (8_192, 1_024, 1_536)).expect("a three-chunk gradient");
+        assert!(three.splits == 3 && three.in_cta, "{three:?}");
+        let (paired, launch) =
+            route(ResolvedGemmOp::Tn, (2_048, 1_536, 768)).expect("a four-chunk gradient");
+        assert!(
+            paired.splits == 4 && paired.pairs && !paired.in_cta,
+            "{paired:?}"
+        );
+        assert_eq!(launch.units as usize, launch.tiles * 2, "{launch:?}");
+        let (wide, _) = route(ResolvedGemmOp::Tn, (2_048, 768, 4_200)).expect("a wide gradient");
+        assert!(wide.splits > 1 && !wide.in_cta && !wide.pairs, "{wide:?}");
     }
 
     #[test]
@@ -15327,6 +15581,15 @@ mod tf32_tests {
             crate::gpu::gemm_bi_triad::launch::sm120_fma_launch_plan(request, dealt).is_err(),
             "a CTA per piece cannot keep the tail's chains"
         );
+        let paired = Sm120FmaRoute {
+            in_cta: false,
+            pairs: true,
+            ..route
+        };
+        assert!(
+            crate::gpu::gemm_bi_triad::launch::sm120_fma_launch_plan(request, paired).is_err(),
+            "a CTA per pair cannot keep the tail's chains"
+        );
         let scalar_b = Sm120FmaRoute {
             kvec: false,
             ..route
@@ -15348,6 +15611,7 @@ mod tf32_tests {
             splits: 2,
             in_cta: false,
             layer_fold: false,
+            pairs: false,
         };
         let error = crate::gpu::gemm_bi_triad::launch::sm120_fma_launch_plan(request, route)
             .expect_err("a split the portable plan does not make");
@@ -15386,15 +15650,34 @@ mod tf32_tests {
                     F32TriadSelection::ExactSm120Fma,
                 )
             } else {
+                let multiprocessors = availability
+                    .specialized
+                    .expect("the SM120 cohort binds its module")
+                    .device
+                    .multiprocessor_count;
+                let tiles = super::sm120_generic_tiles(request, Sm120FmaTile::M64N128);
+                let pairs = !cut.tail
+                    && cut.chain_from.is_none()
+                    && cut.piece_tiles > super::SM120_FMA_SHORT_PIECE_TILES
+                    && super::sm120_pairs_take_cut(
+                        tiles,
+                        cut.splits,
+                        Sm120FmaTile::M64N128,
+                        multiprocessors,
+                        true,
+                    );
                 F32TriadSelection::ExactSm120Fma(Sm120FmaRoute {
                     tile: cell.tile,
                     kvec: cell.kvec,
                     splits: cut.splits,
                     in_cta: cut.splits > 1
+                        && !pairs
                         && (cut.tail
                             || cut.chain_from.is_some()
-                            || cut.piece_tiles <= super::SM120_FMA_SHORT_PIECE_TILES),
+                            || cut.piece_tiles <= super::SM120_FMA_SHORT_PIECE_TILES
+                            || super::SM120_TN_FOLD_WINDOW.holds(tiles, multiprocessors as usize)),
                     layer_fold: false,
+                    pairs,
                 })
             };
             assert_eq!(
@@ -15479,6 +15762,7 @@ mod tf32_tests {
             splits: 1,
             in_cta: false,
             layer_fold: false,
+            pairs: false,
         };
         let availability =
             exact_sm120_availability_with_exclusions(&[(ResolvedGemmOp::Nt, measured)]);
@@ -15530,6 +15814,7 @@ mod tf32_tests {
             splits: 2,
             in_cta: false,
             layer_fold: false,
+            pairs: false,
         };
         let generic = Sm120FmaRoute {
             tile: Sm120FmaTile::M128N64,
@@ -15537,6 +15822,7 @@ mod tf32_tests {
             splits: 2,
             in_cta: false,
             layer_fold: false,
+            pairs: false,
         };
         let availability = exact_sm120_availability_with_exclusions(&[
             (ResolvedGemmOp::Nt, measured),
@@ -15564,23 +15850,29 @@ mod tf32_tests {
             splits: 2,
             in_cta: false,
             layer_fold: false,
+            pairs: false,
         };
         let availability =
             exact_sm120_availability_with_exclusions(&[(ResolvedGemmOp::Nt, excluded)]);
         for (op, dims, expected) in [
             (
-                // The forward folds by its layer: twelve pieces of 128 inputs.
+                // The forward folds by its layer: twelve pieces of 128 inputs,
+                // on the 64 x 128 tile under eight waves of 128 x 64 tiles.
                 ResolvedGemmOp::Nn,
                 (2_048, 1_536, 768),
                 Sm120FmaRoute {
-                    tile: Sm120FmaTile::M128N64,
+                    tile: Sm120FmaTile::M64N128,
                     kvec: false,
                     splits: 12,
                     in_cta: true,
                     layer_fold: true,
+                    pairs: false,
                 },
             ),
             (
+                // The weight gradient's four batch chunks go in pairs on its
+                // measured tile: its 144 tiles put a thin second CTA on a few
+                // of the 142 multiprocessors.
                 ResolvedGemmOp::Tn,
                 (2_048, 1_536, 768),
                 Sm120FmaRoute {
@@ -15589,6 +15881,7 @@ mod tf32_tests {
                     splits: 4,
                     in_cta: false,
                     layer_fold: false,
+                    pairs: true,
                 },
             ),
         ] {
@@ -15625,6 +15918,7 @@ mod tf32_tests {
             splits: 2,
             in_cta: false,
             layer_fold: false,
+            pairs: false,
         };
         let availability = exact_sm120_availability_with_exclusions(&[(ResolvedGemmOp::Nt, exact)]);
         let (request, _) = nt_d768_out_request_and_operands();
@@ -20178,6 +20472,7 @@ mod exact_batch_invariant_tests {
                                 ScalarDispatchPlan::NnExactPiecesM64
                                 | ScalarDispatchPlan::NnExactPiecesBig
                                 | ScalarDispatchPlan::NnExactPiecesM128N64
+                                | ScalarDispatchPlan::NnExactPiecesM64N64Bk32
                                 | ScalarDispatchPlan::NnExactKmPieces => {
                                     // The architecture's own table names the tile.
                                     assert!(exact_chunks(k, n), "{what}");
@@ -20420,12 +20715,17 @@ mod exact_batch_invariant_tests {
                             }
                             ScalarDispatchPlan::NtExactKm => {
                                 let grid = m.div_ceil(32) * n_in.div_ceil(64);
+                                let uncut = exact_rules(compute_capability).uncut;
+                                let thin = (16..uncut.nt_km_thin_below).contains(&n_out)
+                                    && !n_out.is_multiple_of(32);
                                 assert!(
                                     !cut && n_in >= 32
-                                        && exact_rules(compute_capability)
-                                            .uncut
-                                            .nt_km
-                                            .holds(grid, multiprocessors as usize),
+                                        && (uncut.nt_km.holds(grid, multiprocessors as usize)
+                                            || (thin
+                                                && uncut
+                                                    .nt_km
+                                                    .from
+                                                    .covered(grid, multiprocessors as usize))),
                                     "{what}"
                                 );
                             }
@@ -20489,53 +20789,69 @@ mod exact_batch_invariant_tests {
     #[test]
     fn sm120_layer_kernels_take_a_cut_layer_inside_their_window() {
         use super::super::contract::Sm120FmaTile;
-        use super::sm120_layer_takes_cut;
-        let pieces = |reduction: usize| u8::try_from(reduction.div_ceil(128)).unwrap();
-        // A forward's grid of 128 x 64 tiles under three waves of 170.
-        assert!(sm120_layer_takes_cut(
-            ResolvedGemmOp::Nn,
-            (4096, 256),
-            Sm120FmaTile::M128N64,
-            pieces(512),
-            170
-        ));
-        assert!(!sm120_layer_takes_cut(
-            ResolvedGemmOp::Nn,
-            (3136, 1536),
-            Sm120FmaTile::M128N64,
-            pieces(768),
-            170
-        ));
-        // An input gradient's tiles times pieces from three to eight waves.
-        assert!(sm120_layer_takes_cut(
-            ResolvedGemmOp::Nt,
-            (2048, 384),
-            Sm120FmaTile::M128N64,
-            pieces(768),
-            170
-        ));
-        assert!(!sm120_layer_takes_cut(
-            ResolvedGemmOp::Nt,
-            (4096, 256),
-            Sm120FmaTile::M128N64,
-            pieces(2112),
-            170
-        ));
-        // Rows that leave half their last tile empty stay portable.
-        assert!(!sm120_layer_takes_cut(
-            ResolvedGemmOp::Nt,
-            (129, 1928),
-            Sm120FmaTile::M128N64,
-            pieces(1536),
-            170
-        ));
-        assert!(sm120_layer_takes_cut(
-            ResolvedGemmOp::Nt,
-            (255, 1928),
-            Sm120FmaTile::M128N64,
-            pieces(1536),
-            170
-        ));
+        use super::{sm120_layer_forward_tile, sm120_layer_takes_cut};
+        // From half a wave of 128 x 64 tiles: 85 of them on 170
+        // multiprocessors.
+        assert!(sm120_layer_takes_cut((1024, 704), 170));
+        assert!(!sm120_layer_takes_cut((1024, 640), 170));
+        assert!(sm120_layer_takes_cut((8192, 6144), 170));
+        // The share reads the card's own multiprocessors.
+        assert!(sm120_layer_takes_cut((1024, 640), 120));
+        // A forward folds on the 64 x 128 tile under eight waves of 128 x 64
+        // tiles and on the 128 x 64 tile from there.
+        assert_eq!(
+            sm120_layer_forward_tile((2048, 3352), 170),
+            Sm120FmaTile::M64N128
+        );
+        assert_eq!(
+            sm120_layer_forward_tile((4096, 3072), 170),
+            Sm120FmaTile::M128N64
+        );
+        assert_eq!(
+            sm120_layer_forward_tile((4096, 3072), 200),
+            Sm120FmaTile::M64N128
+        );
+    }
+
+    #[test]
+    fn sm120_pairs_serve_cut_grids_one_cta_a_tile_leaves_unbalanced() {
+        use super::super::contract::Sm120FmaTile::{M64N64, M64N128, M128N64};
+        use super::sm120_pairs_take_cut as pairs;
+        // 170 multiprocessors, 340 blocks of a 128-thread fold arm. Tiles
+        // that leave two fifths of the card idle (102 of them) pair up to
+        // nine units, and the pairs must reach four fifths of the card.
+        assert!(pairs(96, 6, M64N128, 170, false));
+        assert!(pairs(102, 18, M64N128, 170, false));
+        assert!(!pairs(96, 20, M64N128, 170, false));
+        assert!(!pairs(103, 6, M64N128, 170, false));
+        assert!(pairs(48, 6, M64N128, 170, false));
+        assert!(!pairs(40, 6, M64N128, 170, false));
+        // A thin second CTA on a few multiprocessors: up to 221 tiles, an
+        // even cut, six units at most.
+        assert!(pairs(192, 12, M64N128, 170, false));
+        assert!(pairs(192, 6, M128N64, 170, false));
+        assert!(!pairs(192, 14, M64N128, 170, false));
+        assert!(!pairs(192, 9, M64N128, 170, false));
+        assert!(!pairs(222, 6, M64N128, 170, false));
+        // A thin last wave of the fold blocks: up to 391 tiles, an even cut,
+        // three units at most.
+        assert!(pairs(384, 6, M128N64, 170, false));
+        assert!(!pairs(384, 8, M128N64, 170, false));
+        assert!(!pairs(392, 6, M128N64, 170, false));
+        // A balanced in-CTA grid keeps its fold.
+        assert!(!pairs(144, 6, M64N128, 170, false));
+        assert!(!pairs(288, 6, M64N128, 170, false));
+        // One hand-off of a weight gradient's long chunks while the tiles fit
+        // one CTA a multiprocessor; an odd count of chunks keeps the fold.
+        assert!(pairs(144, 4, M64N128, 170, true));
+        assert!(!pairs(144, 4, M64N128, 170, false));
+        assert!(!pairs(144, 3, M64N128, 170, true));
+        // Two pieces are one unit, and the 64 x 64 tile was never measured.
+        assert!(!pairs(96, 2, M64N128, 170, false));
+        assert!(!pairs(96, 6, M64N64, 170, false));
+        // The window reads the card's own multiprocessors.
+        assert!(!pairs(192, 12, M64N128, 142, false));
+        assert!(pairs(160, 12, M64N128, 142, false));
     }
 
     #[test]
@@ -20545,13 +20861,14 @@ mod exact_batch_invariant_tests {
             shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, (m, n_in, n_out)),
         };
         // Past the 32 x 64 tile's window (three waves of its grid on a 170-SM
-        // card), the transposed tiles take the chain from a third of the card.
-        for (m, n_in, n_out) in [
-            (4096, 256, 128),
-            (6144, 256, 128),
-            (4096, 384, 101),
-            (8192, 128, 128),
-        ] {
+        // card), the transposed tiles take the chain from a third of the card,
+        // except over a thin reduction off a multiple of 32, where the chain
+        // tile stays.
+        assert_eq!(
+            exact_batch_invariant_nt_plan(nt(4096, 384, 101), 170, (12, 0), true).unwrap(),
+            ScalarDispatchPlan::NtExactKm
+        );
+        for (m, n_in, n_out) in [(4096, 256, 128), (6144, 256, 128), (8192, 128, 128)] {
             assert_eq!(
                 exact_batch_invariant_nt_plan(nt(m, n_in, n_out), 170, (12, 0), true).unwrap(),
                 ScalarDispatchPlan::NtSlimViaTranspose,
@@ -20575,10 +20892,12 @@ mod exact_batch_invariant_tests {
                 );
             }
         }
-        // A reduction 16 past 32 stays on the 16 x 16 tile.
+        // A thin reduction 16 past a multiple of 32, which the slim tile does
+        // not take, runs the 32 x 64 tile past its window too: the 16 x 16
+        // tile ran up to 2.3 times its time there.
         assert_eq!(
             exact_batch_invariant_nt_plan(nt(4096, 256, 112), 170, (12, 0), true).unwrap(),
-            ScalarDispatchPlan::NtExactNarrow16
+            ScalarDispatchPlan::NtExactKm
         );
     }
 

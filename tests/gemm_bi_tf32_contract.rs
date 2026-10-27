@@ -1408,14 +1408,19 @@ fn tf32_resource_caps(symbol: &str) -> (u64, u64) {
     }
     if symbol.contains("_tma_fma_") {
         // Two dense 16-deep stages plus one mbarrier per stage; the NT
-        // k-vector arms keep a float4 B fragment per column and run two
-        // blocks per multiprocessor.
+        // k-vector arms keep a float4 B fragment per column, the fold arms
+        // the finished pieces' sum, and both run two blocks per
+        // multiprocessor.
         let shared = if symbol.contains("_m64n64_") {
             16_400
         } else {
             24_592
         };
-        let registers = if symbol.ends_with("_kvec") { 255 } else { 168 };
+        let registers = if symbol.ends_with("_kvec") || symbol.ends_with("_fold") {
+            255
+        } else {
+            168
+        };
         return (registers, shared);
     }
     if symbol.contains("_m80n32_bk64_s2") {

@@ -132,6 +132,48 @@
   serve more products, and a sum cut into short pieces is added inside one
   block. On an RTX PRO 6000 a set of about 400 exact products runs in 0.90
   to 0.93 of its former time, and thin products in as little as half.
+- An RTX 5090 or RTX PRO 6000 block that folds a cut layer's pieces keeps
+  their sum in a second set of registers, on fold kernels of their own
+  that hold two blocks a multiprocessor, where the plain kernels moved the
+  sum through L2 at every piece's end. Over the RTX 5090's census of large
+  cut products the fastest route with these bits runs within 2.5 percent
+  of one uncut chain, where it took 7.4 percent longer with the sum in L2.
+  The bits do not change.
+- A cut exact product that one block a tile would leave unbalanced on an
+  RTX 5090 or RTX PRO 6000 deals its pieces two to a block: each block
+  holds one piece in the fold registers and the next in its accumulators,
+  adds both in order to the running sum the block before it hands on, and
+  hands its own on, and the last block writes the output. The grid lists
+  every tile's first pair, then every tile's second, so a block starts
+  about when the sum it waits for is ready. The bits are those of a block
+  that folds all the pieces. The choice reads the cut and the card's
+  multiprocessors: over 156 cut layers on an RTX 5090 it came within 0.4
+  percent of the faster route per layer, and the layers it takes run in
+  0.77 to 0.98 of their time folded in one block (the out_proj of a
+  768-wide model over 2048 rows: the forward 127 to 120 microseconds, the
+  input gradient 131 to 119, the weight gradient 107 to 99).
+- An RTX 5090 or RTX PRO 6000 weight gradient whose 64 x 128 tiles cover
+  half a wave to two waves of the card folds its batch chunks in one block,
+  in 0.82 to 0.98 of the time of a block per chunk, and an uncut exact
+  input gradient over a thin sum of 16 to 112 outputs off a multiple of 32
+  runs on the 32 x 64 tile, where the 16 x 16 tile took up to 2.3 times as
+  long (2048 x 1536 over 80 outputs: 41.8 to 19.9 microseconds). The bits
+  do not change.
+- On an A100 and the other SM80 boards a cut forward or input gradient
+  whose 64 x 64 grid covers three waves runs on a new 64 x 64 tile that
+  stages 32-deep slabs of both operands by 16-byte copies and keeps the
+  pieces' sum in registers, three blocks a multiprocessor where the
+  128 x 64 pieces tile holds one: the training forwards of a 768-wide model
+  over 2048 to 4096 rows run in 0.83 to 0.99 of that tile's time. The bits
+  do not change.
+- The f32 training step of the four families at batch 4 by 512 tokens,
+  0.8.2 against 0.8.1: on an A100 Mamba 3 percent faster and the others
+  within 1.5 percent either way; on an RTX 5090 Mamba 6 percent faster and
+  Mamba-2, Mamba-3 SISO and MIMO 0.6 to 1.6 percent slower, the cost there
+  of a batch-invariant input projection over 2048 rows, and within 0.5
+  percent at batch 8 and 16 by 512 tokens. f32 decode runs
+  1.7 to 5 times faster on both. See the
+  [family benchmarks](docs/family-benchmarks.md).
 - Exact narrow weight gradients, with 2 to 127 outputs, split their batch
   like wider ones on every architecture (384 x 101 over 1024 rows: 33 to 10
   microseconds on an RTX 5090). A slim exact input gradient runs at the

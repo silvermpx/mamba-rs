@@ -426,7 +426,7 @@ abi_const_assert_eq!(std::mem::offset_of!(Sm120KernelParams, m), 24);
 abi_const_assert_eq!(std::mem::offset_of!(Sm120KernelParams, k), 28);
 abi_const_assert_eq!(std::mem::offset_of!(Sm120KernelParams, n), 32);
 abi_const_assert_eq!(std::mem::offset_of!(Sm120KernelParams, ldc), 36);
-abi_const_assert_eq!(std::mem::size_of::<Sm120FmaKernelParams>(), 36);
+abi_const_assert_eq!(std::mem::size_of::<Sm120FmaKernelParams>(), 40);
 abi_const_assert_eq!(std::mem::align_of::<Sm120FmaKernelParams>(), 4);
 abi_const_assert_eq!(std::mem::offset_of!(Sm120FmaKernelParams, alpha), 0);
 abi_const_assert_eq!(std::mem::offset_of!(Sm120FmaKernelParams, beta), 4);
@@ -440,6 +440,10 @@ abi_const_assert_eq!(
     28
 );
 abi_const_assert_eq!(std::mem::offset_of!(Sm120FmaKernelParams, chain_from), 32);
+abi_const_assert_eq!(
+    std::mem::offset_of!(Sm120FmaKernelParams, pieces_per_unit),
+    36
+);
 
 #[cfg(test)]
 mod sm120_fma_abi_tests {
@@ -2377,6 +2381,7 @@ fn scalar_plan_requires_zero_beta(plan: ScalarDispatchPlan) -> bool {
         ScalarDispatchPlan::NnExactPiecesBig
             | ScalarDispatchPlan::NnExactPiecesM64
             | ScalarDispatchPlan::NnExactPiecesM128N64
+            | ScalarDispatchPlan::NnExactPiecesM64N64Bk32
             | ScalarDispatchPlan::NnExactKmPieces
             | ScalarDispatchPlan::NtExactKmPieces
             | ScalarDispatchPlan::NnSplitKThinTail { .. }
@@ -2408,6 +2413,7 @@ fn scalar_plan_requires_unit_alpha(plan: ScalarDispatchPlan) -> bool {
         ScalarDispatchPlan::NnExactPiecesBig
             | ScalarDispatchPlan::NnExactPiecesM64
             | ScalarDispatchPlan::NnExactPiecesM128N64
+            | ScalarDispatchPlan::NnExactPiecesM64N64Bk32
             | ScalarDispatchPlan::NnExactKmPieces
             | ScalarDispatchPlan::NtExactKmPieces
             | ScalarDispatchPlan::NtExactPiecesViaTranspose { .. }
@@ -2440,10 +2446,12 @@ fn scalar_plan_fields(plan: ScalarDispatchPlan) -> (u8, u64, u64) {
         ScalarDispatchPlan::NnExactPiecesBig => (59, 4, 0),
         ScalarDispatchPlan::NnExactPiecesM64 => (61, 4, 0),
         ScalarDispatchPlan::NnExactPiecesM128N64 => (71, 4, 0),
+        ScalarDispatchPlan::NnExactPiecesM64N64Bk32 => (73, 4, 0),
         ScalarDispatchPlan::NtExactPiecesViaTranspose { tile } => (
             match tile {
                 ExactPiecesTile::M128N128 => 63,
                 ExactPiecesTile::M128N64 => 72,
+                ExactPiecesTile::M64N64Bk32 => 74,
             },
             4,
             0,
@@ -3021,6 +3029,22 @@ fn scalar_physical_nodes(
                 ),
                 (128, 1, 1),
                 super::contract::EXACT_NN_M128N64_DYNAMIC_SHARED_BYTES,
+            ),
+        ),
+        ScalarDispatchPlan::NnExactPiecesM64N64Bk32 => push_scalar_node(
+            &mut nodes,
+            context,
+            "nn_m64n64_bk32_pieces_keep",
+            (64, 64),
+            (32, 2),
+            cfg(
+                (
+                    checked_grid_product(m.div_ceil(64), n.div_ceil(64), 1)?,
+                    1,
+                    1,
+                ),
+                (128, 1, 1),
+                0,
             ),
         ),
         ScalarDispatchPlan::NnExactChunk {
@@ -3635,8 +3659,8 @@ fn scalar_physical_nodes(
                 (1, 1),
                 cfg((n.div_ceil(32), k.div_ceil(32), 1), (32, 16, 1), 0),
             );
-            if tile == ExactPiecesTile::M128N128 {
-                push_scalar_node(
+            match tile {
+                ExactPiecesTile::M128N128 => push_scalar_node(
                     &mut nodes,
                     context,
                     "nn_big_pieces_keep",
@@ -3651,9 +3675,8 @@ fn scalar_physical_nodes(
                         (256, 1, 1),
                         34 * 1024,
                     ),
-                );
-            } else {
-                push_scalar_node(
+                ),
+                ExactPiecesTile::M128N64 => push_scalar_node(
                     &mut nodes,
                     context,
                     "nn_m128n64_pieces_keep",
@@ -3668,7 +3691,23 @@ fn scalar_physical_nodes(
                         (128, 1, 1),
                         super::contract::EXACT_NN_M128N64_DYNAMIC_SHARED_BYTES,
                     ),
-                );
+                ),
+                ExactPiecesTile::M64N64Bk32 => push_scalar_node(
+                    &mut nodes,
+                    context,
+                    "nn_m64n64_bk32_pieces_keep",
+                    (64, 64),
+                    (32, 2),
+                    cfg(
+                        (
+                            checked_grid_product(m.div_ceil(64), k.div_ceil(64), 1)?,
+                            1,
+                            1,
+                        ),
+                        (128, 1, 1),
+                        0,
+                    ),
+                ),
             }
         }
         ScalarDispatchPlan::NtSplitKTail { k_main, .. } => {
@@ -3896,6 +3935,7 @@ fn scalar_route_contract(
         "nn_big_pieces_keep"
             | "nn_m64n64_pieces4"
             | "nn_m128n64_pieces_keep"
+            | "nn_m64n64_bk32_pieces_keep"
             | "nn_exact_km_pieces_m32n64_bk16_s4"
             | "nt_exact_km_pieces_m32n64_bk16_s4"
     ) {
@@ -4290,9 +4330,11 @@ fn tf32_params(
                 k: checked_i32(shape.reduction(request.op), "exact-F32 reduction")?,
                 ldc,
                 // A negative count tells the kernel the CTA folds its own
-                // pieces.
+                // pieces; a paired route counts its units, a pair each.
                 splits: if exact.in_cta {
                     -i32::from(exact.splits)
+                } else if exact.pairs {
+                    i32::from(exact.splits.div_ceil(2))
                 } else {
                     i32::from(exact.splits)
                 },
@@ -4301,6 +4343,7 @@ fn tf32_params(
                     plan.chain_from.unwrap_or(columns),
                     "exact-F32 column tail",
                 )?,
+                pieces_per_unit: if exact.pairs { 2 } else { 1 },
             })
         }
     })
@@ -4377,13 +4420,23 @@ pub(super) fn sm120_fma_launch_plan(
             }
         }
     };
-    // One unit per tile and piece, or one per tile when the CTA folds its
-    // own pieces: through a slab of its tile, or in registers in the NT
-    // k-vector kernels, which take no workspace.
-    let (dealt, slabs_per_tile, flags_per_tile) = match (route.in_cta, route.kvec) {
-        (true, true) => (1, 0, 0),
-        (true, false) => (1, 1, 0),
-        (false, _) => (splits, splits - 1, splits - 1),
+    // One unit per tile and piece, one per pair of pieces that hands its
+    // running sum to the next, or one per tile when the CTA folds its own
+    // pieces in registers, which takes no workspace.
+    let (dealt, slabs_per_tile, flags_per_tile) = if route.in_cta {
+        (1, 0, 0)
+    } else if route.pairs {
+        let units = splits.div_ceil(2);
+        (units, units - 1, units - 1)
+    } else {
+        (splits, splits - 1, splits - 1)
+    };
+    let tiles_per_split = if route.pairs {
+        tiles_per_split
+            .checked_mul(2)
+            .ok_or_else(|| invalid_gemm_dimensions("exact-F32 pair extent overflows usize"))?
+    } else {
+        tiles_per_split
     };
     let units = tiles
         .checked_mul(dealt)
@@ -6834,6 +6887,7 @@ pub(in crate::gpu) fn launch_cached_inference_sm120_exact_tma<O: PhysicalLaunchO
         splits: 1,
         in_cta: false,
         layer_fold: false,
+        pairs: false,
     });
     if resolve_tf32_forced(request, ctx.kernels.f32_triad_availability(), route).is_err() {
         return Ok(false);
@@ -11257,6 +11311,53 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
         return Ok(());
     }
 
+    if scalar_plan == ScalarDispatchPlan::NnExactPiecesM64N64Bk32 {
+        // The 64 x 64 register pieces tile staged in 32-deep slabs, the
+        // plan's piece length at launch in 16-deep tiles.
+        let piece_tiles = checked_i32(
+            super::dispatch::exact_chunk(n_in, n_out) / 16,
+            "64 x 64 piece tiles",
+        )?;
+        let symbol = "nn_m64n64_bk32_pieces_keep";
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: (
+                checked_tile_grid(checked_dims.m_u32, 64, checked_dims.n_u32, 64)?,
+                1,
+                1,
+            ),
+            block_dim: (128, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let mut builder = scalar_launch_builder(
+            stream,
+            &kernels.gemm_bi_nn_m64n64_bk32_pieces_keep,
+            &control,
+        );
+        builder.arg_buffer_mut(y);
+        builder.arg(&x_ptr);
+        builder.arg(&w_ptr);
+        builder.arg(&bias_ptr);
+        builder.arg(&alpha);
+        builder.arg(&beta);
+        builder.arg(&checked_dims.m_i32);
+        builder.arg(&checked_dims.n_i32);
+        builder.arg(&checked_dims.k_i32);
+        builder.arg(&lda_i);
+        builder.arg(&checked_dims.n_i32);
+        builder.arg(&checked_dims.n_i32);
+        builder.arg(&piece_tiles);
+        enqueue_scalar_forward(
+            &mut control,
+            request,
+            actual_operands,
+            symbol,
+            cfg,
+            &mut builder,
+        )
+        .map_err(|error| error.with_driver_context(format_args!("{symbol} forward")))?;
+        return Ok(());
+    }
+
     // Custom deterministic GEMM.
     // Envelope: M ≥ 128, N ≥ 128, K ≥ 1. Non-%4 N handled by kernel scalar N-epilogue.
     // Non-%4 K handled by kernel scalar K-fallback (runtime lda%4 check).
@@ -12516,20 +12617,27 @@ fn gemm_bi_backward_dx_with_control<
         )?;
         let bias = 0_u64;
         // The transposed forward: m rows, n_in outputs, n_out inputs.
-        let (function, symbol, columns, threads, shared) = match tile {
+        let (function, symbol, (tile_rows, columns), threads, shared) = match tile {
             ExactPiecesTile::M128N128 => (
                 &kernels.gemm_bi_nn_big_pieces_keep,
                 "nn_big_pieces_keep",
-                128,
+                (128, 128),
                 256,
                 34 * 1024,
             ),
             ExactPiecesTile::M128N64 => (
                 &kernels.gemm_bi_nn_m128n64_pieces_keep,
                 "nn_m128n64_pieces_keep",
-                64,
+                (128, 64),
                 128,
                 super::contract::EXACT_NN_M128N64_DYNAMIC_SHARED_BYTES,
+            ),
+            ExactPiecesTile::M64N64Bk32 => (
+                &kernels.gemm_bi_nn_m64n64_bk32_pieces_keep,
+                "nn_m64n64_bk32_pieces_keep",
+                (64, 64),
+                128,
+                0,
             ),
         };
         let rows_i = checked_dims.m_i32;
@@ -12538,7 +12646,7 @@ fn gemm_bi_backward_dx_with_control<
         let beta = 0.0f32;
         let cfg = cudarc::driver::LaunchConfig {
             grid_dim: (
-                checked_tile_grid(checked_dims.m_u32, 128, checked_dims.k_u32, columns)?,
+                checked_tile_grid(checked_dims.m_u32, tile_rows, checked_dims.k_u32, columns)?,
                 1,
                 1,
             ),
@@ -16738,6 +16846,7 @@ mod prepared_f32_launch_tests {
             splits: 1,
             in_cta: false,
             layer_fold: false,
+            pairs: false,
         });
         assert_distinct(
             context_token,
@@ -16763,6 +16872,7 @@ mod prepared_f32_launch_tests {
                     splits: 1,
                     in_cta: false,
                     layer_fold: false,
+                    pairs: false,
                 },)),
                 request,
                 operands,

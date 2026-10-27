@@ -8111,7 +8111,7 @@ fn validate_sm120_ptx(arch: &str, ptx: &str) -> Result<(), String> {
         .map(|spec| spec.symbol)
         .collect();
     expected.extend(super::contract::tf32_module_symbols(ModuleKind::TriadSm120));
-    let parsed = validate_exact_ptx_exports("TriadSm120", 128, &expected, ptx)?;
+    let parsed = validate_exact_ptx_exports("TriadSm120", 134, &expected, ptx)?;
     validate_sm120_entry_features(&parsed)?;
     // The stream-K kernels count each tile's parts in with one wrapping
     // atomicInc; every other entry holds no atomic at all.
@@ -8629,6 +8629,11 @@ const SCALAR_SOURCE_FRAGMENTS: &[SourceFragment] = &[
         source: include_str!("../../../kernels/gemm_bi_triad/scalar_nn_m128n64.cu"),
         allowed_quoted_includes: &[],
     },
+    SourceFragment {
+        logical_name: "kernels/gemm_bi_triad/scalar_nn_m64n64_bk32.cu",
+        source: include_str!("../../../kernels/gemm_bi_triad/scalar_nn_m64n64_bk32.cu"),
+        allowed_quoted_includes: &[],
+    },
 ];
 
 const SM80_SOURCE_FRAGMENTS: &[SourceFragment] = &[
@@ -8750,6 +8755,7 @@ pub(super) const SCALAR_SYMBOLS: &[&str] = &[
     "nn_m64n64_bk16_s2",
     "nn_m64n64_pieces4",
     "nn_m128n64_pieces_keep",
+    "nn_m64n64_bk32_pieces_keep",
     "nn_splitk32_m32n64_exact",
     "nn_d384_m64n64_bk16_s2",
     "nn_zero_reduction",
@@ -10126,6 +10132,9 @@ pub struct GemmBiKernels {
     pub gemm_bi_nn_m64n64_pieces4: CudaFunction,
     /// The 128 x 64 register pieces tile over a cut layer.
     pub gemm_bi_nn_m128n64_pieces_keep: CudaFunction,
+    /// The 64 x 64 register pieces tile staged in 32-deep slabs, three CTAs a
+    /// multiprocessor.
+    pub gemm_bi_nn_m64n64_bk32_pieces_keep: CudaFunction,
     pub gemm_bi_nn_splitk32_m32n64_exact: CudaFunction,
     pub gemm_bi_nn_d384_m64n64_bk16_s2: CudaFunction,
     pub gemm_bi_tn: CudaFunction,
@@ -10570,6 +10579,7 @@ impl GemmBiKernels {
             "nn_m128n64_pieces_keep",
             super::contract::EXACT_NN_M128N64_DYNAMIC_SHARED_BYTES as i32,
         )?;
+        let gemm_bi_nn_m64n64_bk32_pieces_keep = load("nn_m64n64_bk32_pieces_keep")?;
         let gemm_bi_nn_splitk32_m32n64_exact = load("nn_splitk32_m32n64_exact")?;
         let gemm_bi_nn_d384_m64n64_bk16_s2 = load("nn_d384_m64n64_bk16_s2")?;
         set_dynamic_shared(
@@ -10744,6 +10754,7 @@ impl GemmBiKernels {
             gemm_bi_nn_m64n64_bk16_s2,
             gemm_bi_nn_m64n64_pieces4,
             gemm_bi_nn_m128n64_pieces_keep,
+            gemm_bi_nn_m64n64_bk32_pieces_keep,
             gemm_bi_nn_splitk32_m32n64_exact,
             gemm_bi_nn_d384_m64n64_bk16_s2,
             gemm_bi_tn,
@@ -11652,8 +11663,12 @@ fn tf32_register_cap(module_kind: ModuleKind, symbol: &str) -> Result<u32, Strin
         // spends the register file on its pipeline state and boundary code.
         ModuleKind::TriadSm120 if symbol.ends_with("_pair_streamk") => Ok(240),
         // The exact FMA routes hold a 64-accumulator microtile; the NT
-        // k-vector arms also keep a float4 B fragment per column.
-        ModuleKind::TriadSm120 if symbol.contains("_tma_fma_") && symbol.ends_with("_kvec") => {
+        // k-vector arms also keep a float4 B fragment per column, and the
+        // fold arms the finished pieces' sum.
+        ModuleKind::TriadSm120
+            if symbol.contains("_tma_fma_")
+                && (symbol.ends_with("_kvec") || symbol.ends_with("_fold")) =>
+        {
             Ok(super::contract::SM120_FMA_KVEC_REGISTER_CAP)
         }
         ModuleKind::TriadSm120 if symbol.contains("_tma_fma_") => {
@@ -13943,6 +13958,7 @@ mod tests {
             splits: 2,
             in_cta: false,
             layer_fold: false,
+            pairs: false,
         };
         let excluded_symbol = "nt_sm120_tma_fma_m64n128_bk16_s2";
         let exclusions = [
@@ -14046,7 +14062,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(accepted_exact, 11);
+        assert_eq!(accepted_exact, SM120_FMA_ROUTE_SPECS.len() - 1);
     }
 
     #[test]
@@ -14851,7 +14867,7 @@ mod tests {
         const D768_TRANSPOSE_SYMBOL: &str = "transpose_f32_32x16_d768";
         const TN_M16N16_SYMBOL: &str = "tn_m16n16_bk16_s2_splitm16";
         let valid = synthetic_scalar_splitm_module_ptx();
-        assert_eq!(super::SCALAR_SYMBOLS.len(), 73);
+        assert_eq!(super::SCALAR_SYMBOLS.len(), 74);
         validate_module_ptx(ModuleKind::TriadScalar, "sm_80", &valid)
             .expect("complete TriadScalar export inventory");
 
@@ -15114,7 +15130,7 @@ mod tests {
         let expected_count = match module_kind {
             ModuleKind::TriadSm90a => 18,
             ModuleKind::TriadSm100 => 108,
-            ModuleKind::TriadSm120 => 128,
+            ModuleKind::TriadSm120 => 134,
             _ => unreachable!(),
         };
         assert_eq!(symbols.len(), expected_count);
@@ -15776,7 +15792,7 @@ mod tests {
             (ModuleKind::TriadSm80, 30),
             (ModuleKind::TriadSm90a, 6),
             (ModuleKind::TriadSm100, 36),
-            (ModuleKind::TriadSm120, 30),
+            (ModuleKind::TriadSm120, 36),
         ] {
             let kernel_specs = super::super::contract::tf32_route_specs(module_kind);
             let symbols: BTreeSet<_> =
@@ -16155,6 +16171,7 @@ mod tests {
         "kernels/gemm_bi_triad/scalar_tn_m16n16.cu",
         "kernels/gemm_bi_triad/sm80/exact_thin.cu",
         "kernels/gemm_bi_triad/scalar_nn_m128n64.cu",
+        "kernels/gemm_bi_triad/scalar_nn_m64n64_bk32.cu",
     ];
 
     const SM80_FRAGMENTS: &[&str] = &[
@@ -16200,6 +16217,7 @@ mod tests {
         "nn_m64n64_bk16_s2",
         "nn_m64n64_pieces4",
         "nn_m128n64_pieces_keep",
+        "nn_m64n64_bk32_pieces_keep",
         "nn_splitk32_m32n64_exact",
         "nn_d384_m64n64_bk16_s2",
         "nn_zero_reduction",
@@ -16662,7 +16680,7 @@ mod tests {
 
         let scalar: BTreeSet<_> = SCALAR_SYMBOLS.iter().copied().collect();
         let sm80: BTreeSet<_> = SM80_SYMBOLS.iter().copied().collect();
-        assert_eq!(scalar.len(), 73);
+        assert_eq!(scalar.len(), 74);
         assert_eq!(sm80.len(), 16);
         let sm80_streamk: BTreeSet<_> = super::SM80_STREAMK_SYMBOLS.iter().copied().collect();
         assert_eq!(sm80_streamk.len(), 2);
@@ -16707,7 +16725,7 @@ mod tests {
         assert!(sm80.is_disjoint(&sm90a));
         assert!(sm80.is_disjoint(&sm100));
         assert!(sm90a.is_disjoint(&sm100));
-        assert_eq!(scalar.union(&sm80).count(), 89);
+        assert_eq!(scalar.union(&sm80).count(), 90);
         assert!(
             scalar
                 .union(&sm80)
