@@ -90,15 +90,15 @@
   of their former time. The bits do not change.
 - A cut exact layer folds its pieces in registers on more tiles, picked by
   rules measured on an RTX 6000 Ada over every cut product of the census
-  with every route forced, in two passes: a new 128 x 64 tile (the
-  128 x 128 tile's fold on half its columns) from half a wave of its grid,
-  over the transposed weight for an input gradient from two thirds; the
-  32 x 64 tile over a layer of up to six pieces; and the 128 x 128 tile from
-  half a wave of its grid instead of three quarters. Over the census's cut
-  forwards the rules came within 0.7 percent of the fastest route per
-  product, where the former ones were 3.1 percent behind; over its cut input
-  gradients within 0.34 percent, where they were 2.0 percent behind. A CC
-  12.x board keeps its thresholds. Every route writes the same bits.
+  with every route forced, in two passes: a new 128 x 64 tile (the 128 x 128
+  tile's fold on half its columns) from half a wave of its grid, over the
+  transposed weight for an input gradient from two thirds; the 32 x 64 tile
+  over a layer of up to six pieces; and the 128 x 128 tile from half a wave
+  of its grid instead of three quarters. That census timed every route of a
+  product back to back, which on this card ranks some routes wrongly; the
+  SM89 entry below refits the rules from routes timed alone. SM80 and CC
+  12.x boards have tables of their own, and an architecture not yet measured
+  on its own card runs SM89's. Every route writes the same bits.
 - On SM89 the strict TF32 policy picks its tiles by rules measured on an
   RTX 6000 Ada: a cut forward on the multistage 128 x 64 tile from half a
   wave of its grid and on the 64 x 64 tile from eight waves of work or half
@@ -177,21 +177,27 @@
   an A100 the 143 that changed route run in 0.94 of their former time as
   forwards and 0.88 as input gradients, the out_proj forward of a 768-wide
   model over 1024 rows 206 to 192 microseconds. The bits do not change.
-- On SM89 a few more cut exact products take faster tiles, by rules
-  from a census on an RTX 6000 Ada that gives each forced route a run of
-  its own, where before every route of a product ran back to back: on this
-  card, held at its 300 W limit, a route timed right after other routes ran
-  up to 40 percent off its own time and ranked them wrongly. A
-  forward of at most six pieces whose 64 x 64 grid covers four to five
-  waves runs on the 64 x 64 slab tile; the 32 x 64 tile folds any number of
-  pieces over 17 to 64 rows, and up to eight pieces on an input gradient;
-  and a layer the slim partial's 128-row tiles would pad more than the
-  32-row tiles do takes the 32 x 64 partial while that partial's grid stays
-  under three and a quarter waves. Of the 788 cut products of the census
-  the 16 that change route run in 0.65 to 0.93 of their former time (64
-  rows into 8192 outputs over 2048 inputs: 0.65), with the plans of both
-  tables timed alone, and no other product changes. The bits do not
-  change.
+- On SM89 more cut exact products take faster tiles, by rules from censuses
+  on an RTX 6000 Ada that time each route in a run of its own: on this card,
+  held at its 300 W limit, a route timed right after other routes ran up to
+  40 percent off its own time and ranked them wrongly, and a change was kept
+  only where the plans of the old and the new table, each timed alone over
+  the 788 cut products, agreed. On a forward the 64 x 64 slab tile takes a
+  grid of four to five waves over at most six pieces and runs the 64 x 64
+  rung from three quarters of a wave, and the 32 x 64 tile folds any number
+  of pieces over 17 to 64 rows; on an input gradient the slab tile over the
+  transposed weight takes a grid of two thirds of a wave to one, and the
+  32 x 64 tile folds up to eight pieces, or up to sixteen on a layer with at
+  least as many outputs as rows. Among the chunk partials the 32 x 64
+  partial takes the layers the slim partial's 128-row tiles would pad more
+  than its own while its grid stays under three and a half waves, a single
+  row stays on the 16 x 16 partial only while that partial's grid stays
+  under sixteen waves, and rows the 16-row tiles pad no less than the 32-row
+  ones leave it from four thirds of a wave of the 32 x 64 partial's grid. 64
+  of the 788 products change route, each change running in 0.65 to 0.99 of
+  the time before it (64 rows into 32000 outputs over 768 inputs: 0.77; an
+  input gradient of 129 rows into 1536 outputs over 1536 inputs: 0.76), and
+  none runs slower. The bits do not change.
 - The f32 training step of the four families at batch 4 by 512 tokens,
   0.8.2 against 0.8.1: on an A100 Mamba 3 percent faster and the others
   within 1.5 percent either way; on an RTX 5090 Mamba 6 percent faster and

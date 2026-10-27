@@ -9493,6 +9493,9 @@ pub(super) struct ExactCutTiles {
     pub(super) big: WaveShare,
     pub(super) wide: WaveShare,
     pub(super) m64: Option<WaveShare>,
+    /// Whether the 64 x 64 rung runs the slab tile in place of the 64 x 64
+    /// chain tile: three of its CTAs share a multiprocessor.
+    pub(super) m64_on_slab: bool,
     pub(super) km: WaveShare,
     pub(super) km_below: Option<WaveShare>,
     pub(super) km_max_pieces: usize,
@@ -9501,16 +9504,30 @@ pub(super) struct ExactCutTiles {
     /// partials' 32-row tiles mostly empty, where the 32 x 64 tile walks
     /// the pieces in one CTA.
     pub(super) km_any_pieces_rows: Option<(usize, usize)>,
+    /// From the share of a wave of its grid the 32 x 64 tile folds up to
+    /// the count of pieces of a layer with at least as many outputs as
+    /// rows: its CTAs nearly fill the card and walk the long reduction in
+    /// one pass, where the chunk partials write and fold every piece's
+    /// plane.
+    pub(super) km_wide_pieces: Option<(WaveShare, usize)>,
     pub(super) km_beside_slim: KmBesideSlim,
 }
 
 impl ExactCutTiles {
-    /// Whether the 32 x 64 tile may fold `chunks` pieces over `m` rows.
-    fn km_takes_pieces(self, m: usize, chunks: usize) -> bool {
-        chunks <= self.km_max_pieces
+    /// Whether the 32 x 64 tile may fold the pieces of `cut`.
+    fn km_takes_pieces(self, cut: ExactCutLayer) -> bool {
+        cut.chunks <= self.km_max_pieces
             || self
                 .km_any_pieces_rows
-                .is_some_and(|(first, last)| (first..=last).contains(&m))
+                .is_some_and(|(first, last)| (first..=last).contains(&cut.m))
+            || self.km_wide_pieces.is_some_and(|(share, most)| {
+                cut.chunks <= most
+                    && cut.outputs >= cut.m
+                    && share.covered(
+                        cut.m.div_ceil(32).saturating_mul(cut.outputs.div_ceil(64)),
+                        cut.waves,
+                    )
+            })
     }
 }
 
@@ -9576,12 +9593,14 @@ impl WaveWindow {
 
 /// One architecture's chunk partials for a cut layer that no register tile
 /// folds: the slim partial from `slim_rows` rows once its grid covers
-/// `slim_from` of a wave, the 16 x 16 partial up to `narrow_rows` rows or
-/// while the 32 x 64 partial's grid stays under `narrow_below` of a wave,
-/// folded by its last arriving CTAs in the same launch (`fused`, where the
-/// piece's tiles fit the arrival counters) or by `splitk_reduce`, and the
-/// 32 x 64 partial otherwise. Every partial writes the same planes and both
-/// folds add them in the same order.
+/// `slim_from` of a wave, the 16 x 16 partial up to `narrow_rows` rows
+/// (while its own grid stays under `narrow_rows_below`, where set) or while
+/// the 32 x 64 partial's grid stays under `narrow_below` of a wave
+/// (`narrow_below_unpadded` on rows its 16-row tiles pad no less), folded by
+/// its last arriving CTAs in the same launch (`fused`, where the piece's
+/// tiles fit the arrival counters) or by `splitk_reduce`, and the 32 x 64
+/// partial otherwise. Every partial writes the same planes and both folds
+/// add them in the same order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ExactChunkPartials {
     slim_from: WaveShare,
@@ -9592,7 +9611,15 @@ pub(super) struct ExactChunkPartials {
     /// while the 32 x 64 partial's grid stays below the share of a wave.
     slim_padding: Option<((usize, usize), WaveShare)>,
     narrow_below: WaveShare,
+    /// The share of a wave below which the 32 x 64 partial's grid gives a
+    /// layer to the 16 x 16 partial where the 16-row tiles pad its rows no
+    /// less than the 32-row ones (17 to 32 rows), in place of
+    /// `narrow_below`: there the 16 x 16 partial only adds CTAs.
+    narrow_below_unpadded: Option<WaveShare>,
     narrow_rows: usize,
+    /// The share of a wave the 16 x 16 partial's own grid stays under to
+    /// take a layer of up to `narrow_rows` rows.
+    narrow_rows_below: Option<WaveShare>,
     fused: bool,
 }
 
@@ -9621,11 +9648,24 @@ impl ExactChunkPartials {
     /// Whether a cut layer of `m` rows into `outputs` columns, cut into
     /// `chunks` pieces, takes the 16 x 16 partial.
     pub(super) fn narrow(self, m: usize, outputs: usize, chunks: usize, waves: usize) -> bool {
+        if m <= self.narrow_rows {
+            let narrow = m
+                .div_ceil(16)
+                .saturating_mul(outputs.div_ceil(16))
+                .saturating_mul(chunks);
+            return self
+                .narrow_rows_below
+                .is_none_or(|below| !below.covered(narrow, waves));
+        }
         let small = m
             .div_ceil(32)
             .saturating_mul(outputs.div_ceil(64))
             .saturating_mul(chunks);
-        m <= self.narrow_rows || !self.narrow_below.covered(small, waves)
+        let below = match self.narrow_below_unpadded {
+            Some(unpadded) if m.div_ceil(16) * 16 >= m.div_ceil(32) * 32 => unpadded,
+            _ => self.narrow_below,
+        };
+        !below.covered(small, waves)
     }
 
     /// The 16 x 16 partial of a piece of `piece_rows` rows over `columns`
@@ -9676,31 +9716,44 @@ pub(super) struct ExactRules {
 }
 
 /// SM89, from the censuses on an RTX 6000 Ada. This card holds its 300 W
-/// limit under these products and a route's time follows what ran before
-/// it, so each route of the 788 cut cells was timed in a run of its own,
-/// two passes, which agree within 1.1% per cell for four in five cells
-/// (routes timed back to back in one run moved up to 40% and ranked them
-/// wrongly), and each change below was checked by timing the plans of the
-/// two tables alone over all 788 cells. The rules put 16 cells on a faster
-/// route (129 rows into 768 outputs over 768 inputs in 0.73 of its time, 64
-/// rows into 8192 outputs over 2048 in 0.63): the slab tile on a forward of
-/// at most six pieces from four to five waves of its grid (beyond five,
-/// 8192 rows into 384 outputs ran 1.22 times the 128 x 128 tile's time);
-/// the 32 x 64 tile over any number of pieces on 17 to 64 rows, and up to
-/// eight pieces on an input gradient; and the 32 x 64 partial where the
-/// slim partial's tiles would pad the rows more than its own while its
-/// grid stays under three and a quarter waves. Over 112 cut cells of 16 to 128 rows the 16 x 16
-/// partial below one and a half waves of the 32 x 64 partial's grid came
-/// within 1.3% of the fastest partial (one wave took 3.2%), and folding it
-/// in the same launch ran ahead of the reducer. Over the uncut forwards and
-/// input gradients the 32 x 64 chain tile's windows came within 0.45% of
+/// limit under these products and a route's time follows what ran just
+/// before it: routes timed back to back in one run moved up to 40% and
+/// ranked them wrongly. So each route of the 788 cut cells was timed in a
+/// run that times nothing else, over two passes, and a change was kept only
+/// where the plans of the old and the new table, each timed alone over all
+/// 788 cells, agreed. On a forward the slab tile takes a grid of four to
+/// five waves over at most six pieces (beyond five, 8192 rows into 384
+/// outputs ran 1.22 times the 128 x 128 tile's time), and the 64 x 64 rung
+/// runs it from three quarters of a wave, where a head of 64 rows into 32000
+/// outputs over 768 inputs ran in 0.77 of the 64 x 64 chain tile's time; the
+/// 32 x 64 tile folds any number of pieces over 17 to 64 rows. On an input
+/// gradient the slab tile over the transposed weight takes a grid of two
+/// thirds of a wave to one over at most eight pieces, and the 32 x 64 tile
+/// folds up to eight pieces, or up to sixteen from three quarters of a wave
+/// on a layer with at least as many outputs as rows (129 rows into 1536
+/// outputs over 1536 inputs in 0.76 of the slim partial's time; over
+/// seventeen pieces, 128 rows into 1928 outputs ran 1.07 times it). The
+/// 32 x 64 partial takes the layers the slim partial's tiles would pad more
+/// than its own while its grid stays under three and a half waves. The
+/// 16 x 16 partial takes a single row while its own grid stays under sixteen
+/// waves (one row into 8192 outputs over 2048 inputs ran on the 32 x 64
+/// partial in 0.84 of its time), and on rows its 16-row tiles pad no less
+/// than the 32-row ones it takes a layer only below four thirds of a wave of
+/// the 32 x 64 partial's grid (17 rows into 2112 outputs over 768 inputs ran
+/// on the 32 x 64 partial in 0.83 of its time). The two refits from these
+/// censuses moved 64 cells, each change to 0.65 to 0.99 of the time before
+/// it, and none to a slower route. Over 112 cut cells of 16 to 128 rows the
+/// 16 x 16 partial below one and a half waves of the 32 x 64 partial's grid
+/// came within 1.3% of the fastest partial (one wave took 3.2%), and folding
+/// it in the same launch ran ahead of the reducer. Over the uncut forwards
+/// and input gradients the 32 x 64 chain tile's windows came within 0.45% of
 /// the fastest tile per cell (the older tiles alone took 6.5%); over 164
 /// shapes of 64 to 384 inputs the 128 x 128 tile from three quarters of a
-/// wave came within 0.6% (0.53 to 0.94 of the 64 x 64 tile's time); over
-/// 252 input gradients into fewer than 128 outputs the narrow tile's window
-/// came within 1.7% (the chain tiles alone took 5.7%); and over 427 uncut
-/// input gradients the native slim tile and the transposed chain tile from
-/// half a wave came within 0.4%.
+/// wave came within 0.6% (0.53 to 0.94 of the 64 x 64 tile's time); over 252
+/// input gradients into fewer than 128 outputs the narrow tile's window came
+/// within 1.7% (the chain tiles alone took 5.7%); and over 427 uncut input
+/// gradients the native slim tile and the transposed chain tile from half a
+/// wave came within 0.4%.
 const EXACT_SM89: ExactRules = ExactRules {
     forward: ExactCutTiles {
         slab: Some(SlabGate {
@@ -9711,30 +9764,41 @@ const EXACT_SM89: ExactRules = ExactRules {
         }),
         big: WaveShare::new(1, 2),
         wide: WaveShare::new(1, 2),
-        m64: Some(WaveShare::new(1, 1)),
+        m64: Some(WaveShare::new(3, 4)),
+        m64_on_slab: true,
         km: WaveShare::new(2, 3),
         km_below: None,
         km_max_pieces: 6,
         km_any_pieces_rows: Some((17, 64)),
+        km_wide_pieces: None,
         km_beside_slim: KmBesideSlim::Always,
     },
     input_gradient: ExactCutTiles {
-        slab: None,
+        slab: Some(SlabGate {
+            full: None,
+            filled: Some((WaveShare::new(2, 3), None)),
+            below: Some(WaveShare::new(1, 1)),
+            max_pieces: Some(8),
+        }),
         big: WaveShare::new(1, 2),
         wide: WaveShare::new(2, 3),
         m64: None,
+        m64_on_slab: false,
         km: WaveShare::new(1, 2),
         km_below: Some(WaveShare::new(1, 1)),
         km_max_pieces: 8,
         km_any_pieces_rows: None,
+        km_wide_pieces: Some((WaveShare::new(3, 4), 16)),
         km_beside_slim: KmBesideSlim::Always,
     },
     partials: ExactChunkPartials {
         slim_from: WaveShare::new(3, 4),
         slim_rows: 65,
-        slim_padding: Some(((1, 1), WaveShare::new(13, 4))),
+        slim_padding: Some(((1, 1), WaveShare::new(7, 2))),
         narrow_below: WaveShare::new(3, 2),
+        narrow_below_unpadded: Some(WaveShare::new(4, 3)),
         narrow_rows: 1,
+        narrow_rows_below: Some(WaveShare::new(16, 1)),
         fused: true,
     },
     uncut: ExactUncutTiles {
@@ -9779,10 +9843,12 @@ const EXACT_SM120: ExactRules = ExactRules {
         big: WaveShare::new(1, 4),
         wide: WaveShare::new(1, 2),
         m64: Some(WaveShare::new(1, 1)),
+        m64_on_slab: false,
         km: WaveShare::new(1, 1),
         km_below: None,
         km_max_pieces: 16,
         km_any_pieces_rows: None,
+        km_wide_pieces: None,
         km_beside_slim: KmBesideSlim::Never,
     },
     input_gradient: ExactCutTiles {
@@ -9790,10 +9856,12 @@ const EXACT_SM120: ExactRules = ExactRules {
         big: WaveShare::new(4, 3),
         wide: WaveShare::new(1, 2),
         m64: None,
+        m64_on_slab: false,
         km: WaveShare::new(2, 3),
         km_below: Some(WaveShare::new(1, 1)),
         km_max_pieces: 24,
         km_any_pieces_rows: None,
+        km_wide_pieces: None,
         km_beside_slim: KmBesideSlim::WhileOutputsReachRows,
     },
     partials: ExactChunkPartials {
@@ -9801,7 +9869,9 @@ const EXACT_SM120: ExactRules = ExactRules {
         slim_rows: 65,
         slim_padding: None,
         narrow_below: WaveShare::new(3, 4),
+        narrow_below_unpadded: None,
         narrow_rows: 16,
+        narrow_rows_below: None,
         fused: false,
     },
     uncut: ExactUncutTiles {
@@ -9857,10 +9927,12 @@ const EXACT_SM80: ExactRules = ExactRules {
         big: WaveShare::new(16, 1),
         wide: WaveShare::new(3, 2),
         m64: Some(WaveShare::new(6, 1)),
+        m64_on_slab: false,
         km: WaveShare::new(4, 3),
         km_below: None,
         km_max_pieces: 16,
         km_any_pieces_rows: None,
+        km_wide_pieces: None,
         km_beside_slim: KmBesideSlim::Always,
     },
     input_gradient: ExactCutTiles {
@@ -9873,10 +9945,12 @@ const EXACT_SM80: ExactRules = ExactRules {
         big: WaveShare::new(16, 1),
         wide: WaveShare::new(3, 2),
         m64: None,
+        m64_on_slab: false,
         km: WaveShare::new(3, 4),
         km_below: Some(WaveShare::new(6, 1)),
         km_max_pieces: 24,
         km_any_pieces_rows: None,
+        km_wide_pieces: None,
         km_beside_slim: KmBesideSlim::WhileItsGridCovers(WaveShare::new(3, 2)),
     },
     partials: ExactChunkPartials {
@@ -9884,7 +9958,9 @@ const EXACT_SM80: ExactRules = ExactRules {
         slim_rows: 97,
         slim_padding: None,
         narrow_below: WaveShare::new(3, 2),
+        narrow_below_unpadded: None,
         narrow_rows: 16,
+        narrow_rows_below: None,
         fused: true,
     },
     uncut: ExactUncutTiles {
@@ -9958,11 +10034,15 @@ pub(super) fn exact_cut_forward_register_tile(
     let small = m.div_ceil(64).saturating_mul(n.div_ceil(64));
     if m >= EXACT_PIECES_M64_MIN_ROWS && tiles.m64.is_some_and(|share| share.covered(small, waves))
     {
-        return Some(ScalarDispatchPlan::NnExactPiecesM64);
+        return Some(if tiles.m64_on_slab {
+            ScalarDispatchPlan::NnExactPiecesM64N64Bk32
+        } else {
+            ScalarDispatchPlan::NnExactPiecesM64
+        });
     }
     let km = m.div_ceil(32).saturating_mul(n.div_ceil(64));
     if n >= 32
-        && tiles.km_takes_pieces(m, chunks)
+        && tiles.km_takes_pieces(cut)
         && tiles.km.covered(km, waves)
         && tiles.km_beside_slim.allows(cut)
     {
@@ -10015,7 +10095,7 @@ pub(super) fn exact_cut_input_gradient_register_tile(
     }
     let km = m.div_ceil(32).saturating_mul(n_in.div_ceil(64));
     if n_in >= 32
-        && tiles.km_takes_pieces(m, chunks)
+        && tiles.km_takes_pieces(cut)
         && tiles.km.covered(km, waves)
         && tiles.km_below.is_none_or(|top| !top.covered(km, waves))
         && tiles.km_beside_slim.allows(cut)
@@ -20613,18 +20693,29 @@ mod exact_batch_invariant_tests {
                         // A layer of up to the architecture's most pieces takes
                         // the 32 x 64 tile, whose 32-row tiles its census
                         // measured ahead of the chunk partials.
-                        let km = exact_rules(compute_capability)
-                            .forward
-                            .km_takes_pieces(m, k.div_ceil(exact_chunk(k, 32_000)));
+                        let chunks = k.div_ceil(exact_chunk(k, 32_000));
+                        let waves = multiprocessors as usize;
+                        let km = exact_rules(compute_capability).forward.km_takes_pieces(
+                            ExactCutLayer {
+                                m,
+                                outputs: 32_000,
+                                chunks,
+                                waves,
+                                slim: exact_rules(compute_capability)
+                                    .partials
+                                    .slim(m, 32_000, chunks, waves),
+                            },
+                        );
                         assert!(
                             matches!(plan, ScalarDispatchPlan::NnExactChunk { .. })
                                 || (km && plan == ScalarDispatchPlan::NnExactKmPieces),
                             "{m}x{k}x32000 on {multiprocessors} SMs: {plan:?}"
                         );
                     }
-                    // At 64 rows the 64 x 64 tile takes the layer where its
-                    // grid covers the architecture's share of a wave (one wave
-                    // on SM89 and SM120); SM80 wants six waves of it and folds
+                    // At 64 rows the 64 x 64 rung takes the layer where its
+                    // grid covers the architecture's share of a wave: three
+                    // quarters on SM89, which runs it on the slab tile, and
+                    // one wave on SM120; SM80 wants six waves of it and folds
                     // on the 32 x 64 tile below that.
                     let plan = exact_batch_invariant_nn_plan(
                         nn(64, k, 32_000),
@@ -20632,10 +20723,10 @@ mod exact_batch_invariant_tests {
                         compute_capability,
                     )
                     .unwrap();
-                    let expected = if compute_capability == (8, 0) {
-                        ScalarDispatchPlan::NnExactKmPieces
-                    } else {
-                        ScalarDispatchPlan::NnExactPiecesM64
+                    let expected = match compute_capability {
+                        (8, 0) => ScalarDispatchPlan::NnExactKmPieces,
+                        (8, 9) => ScalarDispatchPlan::NnExactPiecesM64N64Bk32,
+                        _ => ScalarDispatchPlan::NnExactPiecesM64,
                     };
                     assert_eq!(plan, expected, "64x{k}x32000 on {multiprocessors} SMs");
                 }
@@ -21088,19 +21179,31 @@ mod exact_batch_invariant_tests {
             exact_batch_invariant_nn_plan(nn(4096, 1536, 768), 142, ada).unwrap(),
             ScalarDispatchPlan::NnExactPiecesBig
         );
-        // Under one wave the 32 x 64 tile folds six pieces.
+        // From three quarters of a wave the 64 x 64 rung runs the slab tile:
+        // 2048 rows into 256 outputs, 128 tiles.
         assert_eq!(
             exact_batch_invariant_nn_plan(nn(2048, 768, 256), 142, ada).unwrap(),
+            ScalarDispatchPlan::NnExactPiecesM64N64Bk32
+        );
+        // 1024 rows make 64 tiles, under three quarters of a wave, and the
+        // 32 x 64 tile's 128 CTAs fold the six pieces.
+        assert_eq!(
+            exact_batch_invariant_nn_plan(nn(1024, 768, 256), 142, ada).unwrap(),
             ScalarDispatchPlan::NnExactKmPieces
         );
     }
     #[test]
     fn sm89_32x64_tile_folds_many_pieces_over_a_few_rows_only() {
         let ada = (8, 9);
-        // 64 rows into 8192 outputs over 2048 inputs, sixteen pieces.
+        // 32 rows into 8192 outputs over 2048 inputs, sixteen pieces; at 64
+        // rows the 64 x 64 rung takes the layer on the slab tile.
+        assert_eq!(
+            exact_batch_invariant_nn_plan(nn(32, 2048, 8192), 142, ada).unwrap(),
+            ScalarDispatchPlan::NnExactKmPieces
+        );
         assert_eq!(
             exact_batch_invariant_nn_plan(nn(64, 2048, 8192), 142, ada).unwrap(),
-            ScalarDispatchPlan::NnExactKmPieces
+            ScalarDispatchPlan::NnExactPiecesM64N64Bk32
         );
         // 16 rows of the same layer stay on the chunk partials.
         assert!(matches!(
@@ -21137,5 +21240,91 @@ mod exact_batch_invariant_tests {
                 ..
             }
         ));
+    }
+
+    fn nt(m: usize, n_in: usize, n_out: usize) -> F32TriadRequest {
+        F32TriadRequest {
+            op: ResolvedGemmOp::Nt,
+            shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, (m, n_in, n_out)),
+        }
+    }
+
+    #[test]
+    fn sm89_input_gradient_takes_the_slab_tile_from_two_thirds_of_a_wave_to_one() {
+        let ada = (8, 9);
+        let slab = ScalarDispatchPlan::NtExactPiecesViaTranspose {
+            tile: ExactPiecesTile::M64N64Bk32,
+        };
+        // 255 rows into 2112 outputs over 768: 132 slab tiles of six pieces
+        // over the transposed weight.
+        assert_eq!(
+            exact_batch_invariant_nt_plan(nt(255, 2112, 768), 142, ada, true).unwrap(),
+            slab
+        );
+        // 1024 rows into 768 outputs make 192 tiles, past one wave.
+        assert_ne!(
+            exact_batch_invariant_nt_plan(nt(1024, 768, 768), 142, ada, true).unwrap(),
+            slab
+        );
+        // 255 rows into 1928 outputs over 2112 inputs fold seventeen pieces.
+        assert_ne!(
+            exact_batch_invariant_nt_plan(nt(255, 1928, 2112), 142, ada, true).unwrap(),
+            slab
+        );
+    }
+
+    #[test]
+    fn sm89_input_gradient_folds_a_wide_layer_of_up_to_16_pieces_on_the_32x64_tile() {
+        let ada = (8, 9);
+        // 129 rows into 1536 outputs over 1536 inputs: twelve pieces, 120
+        // CTAs of the 32 x 64 tile.
+        assert_eq!(
+            exact_batch_invariant_nt_plan(nt(129, 1536, 1536), 142, ada, true).unwrap(),
+            ScalarDispatchPlan::NtExactKmPieces
+        );
+        // Over 2112 inputs the layer has seventeen pieces.
+        assert_ne!(
+            exact_batch_invariant_nt_plan(nt(128, 1928, 2112), 142, ada, true).unwrap(),
+            ScalarDispatchPlan::NtExactKmPieces
+        );
+        // 1024 rows into 256 outputs make 128 CTAs too, on a batch taller than
+        // the layer is wide.
+        assert_ne!(
+            exact_batch_invariant_nt_plan(nt(1024, 256, 1536), 142, ada, true).unwrap(),
+            ScalarDispatchPlan::NtExactKmPieces
+        );
+    }
+
+    #[test]
+    fn sm89_narrow_partial_takes_the_rows_its_16_row_tiles_pad_less() {
+        let ada = (8, 9);
+        let partial = |plan: ScalarDispatchPlan| match plan {
+            ScalarDispatchPlan::NtExactChunk { partial, .. }
+            | ScalarDispatchPlan::NnExactChunk { partial, .. } => partial,
+            other => panic!("{other:?} is no chunk fold"),
+        };
+        // 16 rows into 768 outputs over 2112 inputs: the 32 x 64 partial's
+        // 204 CTAs stay under one and a half waves and its 32-row tiles would
+        // be half empty.
+        assert_eq!(
+            partial(exact_batch_invariant_nt_plan(nt(16, 768, 2112), 142, ada, true).unwrap()),
+            ExactChunkPartial::Narrow16Fused
+        );
+        // 17 rows pad to 32 either way, and past four thirds of a wave the
+        // 32 x 64 partial keeps them.
+        assert_eq!(
+            partial(exact_batch_invariant_nt_plan(nt(17, 768, 2112), 142, ada, true).unwrap()),
+            ExactChunkPartial::Small
+        );
+        // One row takes the 16 x 16 partial while its own grid stays under
+        // sixteen waves: 288 CTAs into 768 outputs, 8192 into 8192.
+        assert_eq!(
+            partial(exact_batch_invariant_nn_plan(nn(1, 768, 768), 142, ada).unwrap()),
+            ExactChunkPartial::Narrow16Fused
+        );
+        assert_eq!(
+            partial(exact_batch_invariant_nn_plan(nn(1, 2048, 8192), 142, ada).unwrap()),
+            ExactChunkPartial::Small
+        );
     }
 }
