@@ -2978,12 +2978,12 @@ const TF32_CUT_SM80: Tf32CutRules = Tf32CutRules {
 
 /// The TF32 cut rules of the card's architecture: SM80, SM89 and SM120 by
 /// their own censuses; an architecture not yet measured on its own card
-/// runs SM89's, as its exact rules do.
+/// runs SM80's, the base its kernels share, as its exact rules do.
 fn tf32_cut_rules(compute_capability: Option<(u32, u32)>) -> Tf32CutRules {
     match compute_capability {
-        Some((8, 0)) => TF32_CUT_SM80,
+        Some((8, 9)) => TF32_CUT_SM89,
         Some((12, _)) => TF32_CUT_SM120,
-        _ => TF32_CUT_SM89,
+        _ => TF32_CUT_SM80,
     }
 }
 
@@ -9977,12 +9977,12 @@ const EXACT_SM80: ExactRules = ExactRules {
 
 /// The exact rules of the card's architecture: SM80, SM89 and SM120 by their
 /// own censuses; an architecture not yet measured on its own card runs
-/// SM89's.
+/// SM80's, the base its kernels share. Every table writes the same bits.
 pub(super) fn exact_rules(compute_capability: (u32, u32)) -> ExactRules {
     match compute_capability {
-        (8, 0) => EXACT_SM80,
+        (8, 9) => EXACT_SM89,
         (12, _) => EXACT_SM120,
-        _ => EXACT_SM89,
+        _ => EXACT_SM80,
     }
 }
 
@@ -21158,6 +21158,27 @@ mod exact_batch_invariant_tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn architectures_not_yet_measured_run_the_sm80_base_tables() {
+        for compute_capability in [(8, 6), (8, 7), (9, 0), (10, 0), (10, 3), (11, 0)] {
+            assert_eq!(exact_rules(compute_capability), exact_rules((8, 0)));
+            assert_eq!(
+                super::tf32_cut_rules(Some(compute_capability)),
+                super::tf32_cut_rules(Some((8, 0)))
+            );
+        }
+        assert_eq!(
+            super::tf32_cut_rules(None),
+            super::tf32_cut_rules(Some((8, 0)))
+        );
+        assert_ne!(exact_rules((8, 9)), exact_rules((8, 0)));
+        assert_ne!(exact_rules((12, 0)), exact_rules((8, 0)));
+        assert_ne!(
+            super::tf32_cut_rules(Some((8, 9))),
+            super::tf32_cut_rules(Some((8, 0)))
+        );
     }
 
     #[test]

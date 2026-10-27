@@ -4,13 +4,16 @@
 
 ### Changed
 
-- GEMM kernels are chosen per architecture and never per card. Every card
-  of one architecture runs the same kernels and writes the same bits
-  whatever its number of multiprocessors: an RTX 4090, an RTX 6000 Ada and
-  an L40S, an RTX 5090 and an RTX PRO 6000, an H100 and an H200. The number
-  of multiprocessors only decides how many pieces run at once. A CUDA
-  toolkit that no table was measured on follows the nearest older measured
-  one.
+- GEMM kernels are chosen per architecture and never per card. Every card of
+  one architecture runs the same kernels and writes the same bits whatever
+  its number of multiprocessors: an RTX 4090, an RTX 6000 Ada and an L40S,
+  an RTX 5090 and an RTX PRO 6000, an H100 and an H200. The number of
+  multiprocessors only decides how many pieces run at once. A CUDA toolkit
+  that no table was measured on follows the nearest older measured one. The
+  exact f32 and TF32 cut rules were measured on an A100 (SM80), RTX 6000 Ada
+  cards (SM89) and an RTX 5090 (SM120); an architecture no table was
+  measured on, such as an H100 or H200, a B200, an A10 or an RTX 3090, runs
+  the SM80 rules, whose kernels every architecture shares.
 - Exact f32 products write the same bits on every architecture. A sum is cut
   into pieces by the shape of the product alone, the RTX 5090 and RTX PRO
   6000 cut it where every other architecture does, and a weight gradient
@@ -98,7 +101,7 @@
   product back to back, which on this card ranks some routes wrongly; the
   SM89 entry below refits the rules from routes timed alone. SM80 and CC
   12.x boards have tables of their own, and an architecture not yet measured
-  on its own card runs SM89's. Every route writes the same bits.
+  on its own card runs SM80's. Every route writes the same bits.
 - On SM89 the strict TF32 policy picks its tiles by rules measured on an
   RTX 6000 Ada: a cut forward on the multistage 128 x 64 tile from half a
   wave of its grid and on the 64 x 64 tile from eight waves of work or half
