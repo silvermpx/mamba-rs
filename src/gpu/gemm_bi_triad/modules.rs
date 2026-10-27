@@ -244,12 +244,28 @@ fn merge_optional_finalist_driver_abi(
     }
 }
 
-struct DriverModule {
-    raw: Option<cudarc::driver::sys::CUmodule>,
+/// The module a Driver ABI census reads its kernels' parameters from: the
+/// module the kernels run in when a [`with_census_module`] covers the text,
+/// a copy of the text loaded for the census alone otherwise.
+enum DriverModule {
+    Temporary(Option<cudarc::driver::sys::CUmodule>),
+    Shared(std::sync::Arc<cudarc::driver::CudaModule>),
 }
 
 impl DriverModule {
     fn load(ctx: &CudaContext, ptx: &str) -> Result<Self, String> {
+        let key = (ptx.as_ptr() as usize, ptx.len());
+        let shared = CENSUS_MODULE_SCOPE.with(|scope| {
+            scope
+                .borrow()
+                .iter()
+                .rev()
+                .find(|(at, len, _)| (*at, *len) == key)
+                .map(|(_, _, module)| module.clone())
+        });
+        if let Some(module) = shared {
+            return Ok(Self::Shared(module));
+        }
         ctx.bind_to_thread()
             .map_err(|error| format!("bind CUDA context for Driver ABI census: {error:?}"))?;
         // The census reads the machine code a GEMM module runs, so it loads
@@ -260,23 +276,85 @@ impl DriverModule {
             cudarc::driver::result::module::load_data(image.as_ptr().cast::<c_void>())
         }
         .map_err(|error| format!("load temporary module for Driver ABI census: {error:?}"))?;
-        Ok(Self { raw: Some(raw) })
+        Ok(Self::Temporary(Some(raw)))
     }
 
-    fn raw(&self) -> cudarc::driver::sys::CUmodule {
-        self.raw.expect("live DriverModule")
+    /// The function `name` of the module.
+    fn function(
+        &self,
+        name: CString,
+    ) -> Result<cudarc::driver::sys::CUfunction, cudarc::driver::result::DriverError> {
+        match self {
+            Self::Temporary(raw) => {
+                let raw = raw.expect("live DriverModule");
+                unsafe { cudarc::driver::result::module::get_function(raw, name) }
+            }
+            Self::Shared(module) => {
+                let Ok(symbol) = name.to_str() else {
+                    return Err(cudarc::driver::result::DriverError(
+                        cudarc::driver::sys::CUresult::CUDA_ERROR_INVALID_VALUE,
+                    ));
+                };
+                module
+                    .load_function(symbol)
+                    .map(|function| function.cu_function())
+            }
+        }
     }
 
     fn unload(mut self) -> Result<(), String> {
-        let raw = self.raw.take().expect("live DriverModule");
-        unsafe { cudarc::driver::result::module::unload(raw) }
-            .map_err(|error| format!("unload temporary Driver ABI module: {error:?}"))
+        match &mut self {
+            Self::Temporary(raw) => {
+                let raw = raw.take().expect("live DriverModule");
+                unsafe { cudarc::driver::result::module::unload(raw) }
+                    .map_err(|error| format!("unload temporary Driver ABI module: {error:?}"))
+            }
+            // The scope's module runs the kernels; it stays loaded.
+            Self::Shared(_) => Ok(()),
+        }
     }
+}
+
+thread_local! {
+    /// The loaded modules a census of the same text reads from, inside a
+    /// [`with_census_module`] of that text.
+    static CENSUS_MODULE_SCOPE: std::cell::RefCell<
+        Vec<(usize, usize, std::sync::Arc<cudarc::driver::CudaModule>)>,
+    > = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Runs `f` with `module`, loaded from `ptx`, standing in for every Driver
+/// ABI census of that text inside it: each census reads its kernels'
+/// parameters from the module they run in, where it loaded a copy of the
+/// whole text once per census. A start that finds its modules in the cache
+/// loads each of them once.
+fn with_census_module<R>(
+    ptx: &str,
+    module: &std::sync::Arc<cudarc::driver::CudaModule>,
+    f: impl FnOnce() -> R,
+) -> R {
+    struct Pop;
+    impl Drop for Pop {
+        fn drop(&mut self) {
+            CENSUS_MODULE_SCOPE.with(|scope| {
+                scope.borrow_mut().pop();
+            });
+        }
+    }
+    CENSUS_MODULE_SCOPE.with(|scope| {
+        scope
+            .borrow_mut()
+            .push((ptx.as_ptr() as usize, ptx.len(), module.clone()));
+    });
+    let _pop = Pop;
+    f()
 }
 
 impl Drop for DriverModule {
     fn drop(&mut self) {
-        if let Some(raw) = self.raw.take() {
+        if let Self::Temporary(raw) = self
+            && let Some(raw) = raw.take()
+        {
             let _ = unsafe { cudarc::driver::result::module::unload(raw) };
         }
     }
@@ -408,7 +486,8 @@ fn census_tf32_driver_abi(
     let mut census = BTreeMap::new();
     for symbol in symbols {
         let name = CString::new(symbol).expect("static TF32 symbol");
-        let function = unsafe { cudarc::driver::result::module::get_function(module.raw(), name) }
+        let function = module
+            .function(name)
             .map_err(|error| format!("load {module_kind:?}/{symbol} for Driver ABI: {error:?}"))?;
         let label = format!("{module_kind:?}/{symbol}");
         let abi = query_tf32_driver_parameter_abi(
@@ -449,7 +528,8 @@ fn census_tf32_splitk_driver_abi(
     for spec in super::contract::tf32_splitk_specs_for(extensions) {
         let symbol = spec.symbol;
         let name = CString::new(symbol).expect("static TF32 split-K symbol");
-        let function = unsafe { cudarc::driver::result::module::get_function(module.raw(), name) }
+        let function = module
+            .function(name)
             .map_err(|error| format!("load {module_kind:?}/{symbol} for Driver ABI: {error:?}"))?;
         let label = format!("{module_kind:?}/{symbol}");
         let abi = query_driver_parameter_abi(&label, 7, |index, offset, size| unsafe {
@@ -885,131 +965,144 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             .as_deref()
             .is_some_and(crate::gpu::kernel_identity::nvrtc_library_domain_is_current)
     {
-        // One parse of the module text serves every census below.
-        with_ptx_parse_scope(&src, || {
-            let extensions = module_composes_extensions(request.module_kind, request.arch);
-            let census =
-                census_all_tf32_driver_abi(request.ctx, request.module_kind, extensions, &src);
-            let sm89_half_abi =
-                census_sm89_half_driver_abi(request.ctx, request.module_kind, request.arch, &src);
-            let sm89_exact_f32_abi = census_sm89_exact_f32_driver_abi(
-                request.ctx,
-                request.module_kind,
-                request.arch,
-                &src,
-            );
-            let sm89_exact_f32_d128_abi = census_sm89_exact_f32_d128_driver_abi(
-                request.ctx,
-                request.module_kind,
-                request.arch,
-                &src,
-            );
-            let sm89_tf32_joint_abi = census_sm89_tf32_joint_driver_abi(
-                request.ctx,
-                request.module_kind,
-                request.arch,
-                &src,
-            );
-            let tf32_rna_abi =
-                census_tf32_rna_driver_abi(request.ctx, request.module_kind, request.arch, &src);
-            let inference_half_abi = census_inference_sm89_half_driver_abi(
-                request.ctx,
-                request.module_kind,
-                request.arch,
-                &src,
-            );
-            let inference_half_swizzle_abi = census_inference_sm89_half_swizzle_driver_abi(
-                request.ctx,
-                request.module_kind,
-                request.arch,
-                &src,
-            );
-            let inference_half_s3_abi = census_inference_sm89_half_s3_driver_abi(
-                request.ctx,
-                request.module_kind,
-                request.arch,
-                &src,
-            );
-            let inference_rna_wide_abi = census_inference_sm89_rna_wide_driver_abi(
-                request.ctx,
-                request.module_kind,
-                request.arch,
-                &src,
-            );
-            let inference_finalist_abi = census_inference_sm89_finalist_driver_abi(
-                request.ctx,
-                request.module_kind,
-                request.arch,
-                &src,
-            );
-            let inference_exact_n64_abi = census_inference_sm89_exact_n64_driver_abi(
-                request.ctx,
-                request.module_kind,
-                request.arch,
-                &src,
-            );
-            let inference_cells_abi = census_inference_sm89_cells_driver_abi(
-                request.ctx,
-                request.module_kind,
-                request.arch,
-                &src,
-            );
-            let inference_sm120_exact_n64_abi = census_inference_sm120_exact_n64_driver_abi(
-                request.ctx,
-                request.module_kind,
-                request.arch,
-                &src,
-            );
-            let inference_sm120_sliced_abi = census_inference_sm120_sliced_driver_abi(
-                request.ctx,
-                request.module_kind,
-                request.arch,
-                &src,
-            );
-            let inference_sm120_postbias_abi = census_inference_sm120_postbias_driver_abi(
-                request.ctx,
-                request.module_kind,
-                request.arch,
-                &src,
-            );
-            let inference_sm89_driver_abi = inference_bundle::census_inference_sm89_driver_abi(
-                request.ctx,
-                request.module_kind,
-                request.arch,
-                &src,
-            );
-            let validation = validate_tf32_specialization(request.module_kind, request.arch, &src);
-            let (tf32_driver_abi, tf32_qualification_error) =
-                tf32_qualification_verdict(request.module_kind, extensions, census, validation);
-            if trace {
-                eprintln!(
-                    "mamba-rs cache trace: {:?} hit artifact={}",
+        // One parse of the module text, and the module loaded from it, serve
+        // every census below.
+        let census_module = module.clone();
+        with_census_module(&src, &census_module, || {
+            with_ptx_parse_scope(&src, || {
+                let extensions = module_composes_extensions(request.module_kind, request.arch);
+                let census =
+                    census_all_tf32_driver_abi(request.ctx, request.module_kind, extensions, &src);
+                let sm89_half_abi = census_sm89_half_driver_abi(
+                    request.ctx,
                     request.module_kind,
-                    crate::gpu::kernel_identity::digest_hex(&hit.artifact_digest)
+                    request.arch,
+                    &src,
                 );
-            }
-            loaded = Some((
-                module,
-                hit.artifact_digest,
-                tf32_qualification_error,
-                tf32_driver_abi,
-                sm89_half_abi,
-                sm89_exact_f32_abi,
-                sm89_exact_f32_d128_abi,
-                sm89_tf32_joint_abi,
-                tf32_rna_abi,
-                inference_half_abi,
-                inference_half_swizzle_abi,
-                inference_half_s3_abi,
-                inference_rna_wide_abi,
-                inference_finalist_abi,
-                inference_exact_n64_abi,
-                inference_cells_abi,
-                inference_sm120_exact_n64_abi,
-                inference_sm120_sliced_abi,
-                inference_sm120_postbias_abi,
-                inference_sm89_driver_abi,
-            ));
+                let sm89_exact_f32_abi = census_sm89_exact_f32_driver_abi(
+                    request.ctx,
+                    request.module_kind,
+                    request.arch,
+                    &src,
+                );
+                let sm89_exact_f32_d128_abi = census_sm89_exact_f32_d128_driver_abi(
+                    request.ctx,
+                    request.module_kind,
+                    request.arch,
+                    &src,
+                );
+                let sm89_tf32_joint_abi = census_sm89_tf32_joint_driver_abi(
+                    request.ctx,
+                    request.module_kind,
+                    request.arch,
+                    &src,
+                );
+                let tf32_rna_abi = census_tf32_rna_driver_abi(
+                    request.ctx,
+                    request.module_kind,
+                    request.arch,
+                    &src,
+                );
+                let inference_half_abi = census_inference_sm89_half_driver_abi(
+                    request.ctx,
+                    request.module_kind,
+                    request.arch,
+                    &src,
+                );
+                let inference_half_swizzle_abi = census_inference_sm89_half_swizzle_driver_abi(
+                    request.ctx,
+                    request.module_kind,
+                    request.arch,
+                    &src,
+                );
+                let inference_half_s3_abi = census_inference_sm89_half_s3_driver_abi(
+                    request.ctx,
+                    request.module_kind,
+                    request.arch,
+                    &src,
+                );
+                let inference_rna_wide_abi = census_inference_sm89_rna_wide_driver_abi(
+                    request.ctx,
+                    request.module_kind,
+                    request.arch,
+                    &src,
+                );
+                let inference_finalist_abi = census_inference_sm89_finalist_driver_abi(
+                    request.ctx,
+                    request.module_kind,
+                    request.arch,
+                    &src,
+                );
+                let inference_exact_n64_abi = census_inference_sm89_exact_n64_driver_abi(
+                    request.ctx,
+                    request.module_kind,
+                    request.arch,
+                    &src,
+                );
+                let inference_cells_abi = census_inference_sm89_cells_driver_abi(
+                    request.ctx,
+                    request.module_kind,
+                    request.arch,
+                    &src,
+                );
+                let inference_sm120_exact_n64_abi = census_inference_sm120_exact_n64_driver_abi(
+                    request.ctx,
+                    request.module_kind,
+                    request.arch,
+                    &src,
+                );
+                let inference_sm120_sliced_abi = census_inference_sm120_sliced_driver_abi(
+                    request.ctx,
+                    request.module_kind,
+                    request.arch,
+                    &src,
+                );
+                let inference_sm120_postbias_abi = census_inference_sm120_postbias_driver_abi(
+                    request.ctx,
+                    request.module_kind,
+                    request.arch,
+                    &src,
+                );
+                let inference_sm89_driver_abi = inference_bundle::census_inference_sm89_driver_abi(
+                    request.ctx,
+                    request.module_kind,
+                    request.arch,
+                    &src,
+                );
+                let validation =
+                    validate_tf32_specialization(request.module_kind, request.arch, &src);
+                let (tf32_driver_abi, tf32_qualification_error) =
+                    tf32_qualification_verdict(request.module_kind, extensions, census, validation);
+                if trace {
+                    eprintln!(
+                        "mamba-rs cache trace: {:?} hit artifact={}",
+                        request.module_kind,
+                        crate::gpu::kernel_identity::digest_hex(&hit.artifact_digest)
+                    );
+                }
+                loaded = Some((
+                    module,
+                    hit.artifact_digest,
+                    tf32_qualification_error,
+                    tf32_driver_abi,
+                    sm89_half_abi,
+                    sm89_exact_f32_abi,
+                    sm89_exact_f32_d128_abi,
+                    sm89_tf32_joint_abi,
+                    tf32_rna_abi,
+                    inference_half_abi,
+                    inference_half_swizzle_abi,
+                    inference_half_s3_abi,
+                    inference_rna_wide_abi,
+                    inference_finalist_abi,
+                    inference_exact_n64_abi,
+                    inference_cells_abi,
+                    inference_sm120_exact_n64_abi,
+                    inference_sm120_sliced_abi,
+                    inference_sm120_postbias_abi,
+                    inference_sm89_driver_abi,
+                ));
+            })
         });
     }
 
@@ -3449,18 +3542,14 @@ fn census_sm89_half_driver_abi(
     let mut census = BTreeMap::new();
     for spec in super::sm89_half_source::runtime_kernel_specs() {
         let abi = (|| {
-            let function = unsafe {
-                cudarc::driver::result::module::get_function(
-                    module.raw(),
-                    CString::new(spec.symbol).unwrap(),
-                )
-            }
-            .map_err(|error| {
-                format!(
-                    "load TriadSm89Half/{} for Driver ABI: {error:?}",
-                    spec.symbol
-                )
-            })?;
+            let function = module
+                .function(CString::new(spec.symbol).unwrap())
+                .map_err(|error| {
+                    format!(
+                        "load TriadSm89Half/{} for Driver ABI: {error:?}",
+                        spec.symbol
+                    )
+                })?;
             let count = if spec.schedule == super::sm89_half_source::Sm89HalfSchedule::Relay {
                 9
             } else {
@@ -3546,18 +3635,14 @@ fn census_sm89_exact_f32_driver_abi(
     let mut census = BTreeMap::new();
     for spec in &super::sm89_exact_f32_source::SM89_EXACT_F32_KERNEL_SPECS {
         let abi = (|| {
-            let function = unsafe {
-                cudarc::driver::result::module::get_function(
-                    module.raw(),
-                    CString::new(spec.symbol).unwrap(),
-                )
-            }
-            .map_err(|error| {
-                format!(
-                    "load TriadSm89ExactF32/{} for Driver ABI: {error:?}",
-                    spec.symbol
-                )
-            })?;
+            let function = module
+                .function(CString::new(spec.symbol).unwrap())
+                .map_err(|error| {
+                    format!(
+                        "load TriadSm89ExactF32/{} for Driver ABI: {error:?}",
+                        spec.symbol
+                    )
+                })?;
             let count = spec.abi_parameter_count as usize;
             let abi =
                 query_driver_parameter_abi(spec.symbol, count, |index, offset, size| unsafe {
@@ -3628,18 +3713,14 @@ fn census_sm89_exact_f32_d128_driver_abi(
     let mut census = BTreeMap::new();
     for spec in &super::sm89_exact_f32_d128_source::SM89_EXACT_F32_D128_KERNEL_SPECS {
         let abi = (|| {
-            let function = unsafe {
-                cudarc::driver::result::module::get_function(
-                    module.raw(),
-                    CString::new(spec.symbol).unwrap(),
-                )
-            }
-            .map_err(|error| {
-                format!(
-                    "load TriadSm89ExactF32D128/{} for Driver ABI: {error:?}",
-                    spec.symbol
-                )
-            })?;
+            let function = module
+                .function(CString::new(spec.symbol).unwrap())
+                .map_err(|error| {
+                    format!(
+                        "load TriadSm89ExactF32D128/{} for Driver ABI: {error:?}",
+                        spec.symbol
+                    )
+                })?;
             let abi = query_driver_parameter_abi(
                 spec.symbol,
                 spec.abi_parameter_count as usize,
@@ -3708,14 +3789,12 @@ fn census_tf32_rna_driver_abi(
         let abi = (|| {
             let symbol = CString::new(spec.symbol)
                 .map_err(|_| format!("{} is not a C symbol", spec.symbol))?;
-            let function =
-                unsafe { cudarc::driver::result::module::get_function(module.raw(), symbol) }
-                    .map_err(|error| {
-                        format!(
-                            "load TriadTf32Rna/{} for Driver ABI: {error:?}",
-                            spec.symbol
-                        )
-                    })?;
+            let function = module.function(symbol).map_err(|error| {
+                format!(
+                    "load TriadTf32Rna/{} for Driver ABI: {error:?}",
+                    spec.symbol
+                )
+            })?;
             let abi = query_driver_parameter_abi(
                 spec.symbol,
                 spec.kind.driver_abi().len(),
@@ -3785,18 +3864,14 @@ fn census_sm89_tf32_joint_driver_abi(
     let mut census = BTreeMap::new();
     for spec in &super::sm89_tf32_joint_source::SM89_TF32_JOINT_KERNEL_SPECS {
         let abi = (|| {
-            let function = unsafe {
-                cudarc::driver::result::module::get_function(
-                    module.raw(),
-                    CString::new(spec.symbol).unwrap(),
-                )
-            }
-            .map_err(|error| {
-                format!(
-                    "load TriadSm89Tf32Joint/{} for Driver ABI: {error:?}",
-                    spec.symbol
-                )
-            })?;
+            let function = module
+                .function(CString::new(spec.symbol).unwrap())
+                .map_err(|error| {
+                    format!(
+                        "load TriadSm89Tf32Joint/{} for Driver ABI: {error:?}",
+                        spec.symbol
+                    )
+                })?;
             let abi = query_driver_parameter_abi(
                 spec.symbol,
                 spec.abi_parameters.len(),
@@ -3836,13 +3911,9 @@ fn census_inference_sm89_half_driver_abi(
         unsafe { std::mem::transmute(driver_proc_address("cuFuncGetParamInfo", 12_040)?) };
     let mut census = BTreeMap::new();
     for symbol in INFERENCE_SM89_HALF_SYMBOLS {
-        let function = unsafe {
-            cudarc::driver::result::module::get_function(
-                module.raw(),
-                CString::new(symbol).unwrap(),
-            )
-        }
-        .map_err(|error| format!("load Inference/{symbol} for Driver ABI: {error:?}"))?;
+        let function = module
+            .function(CString::new(symbol).unwrap())
+            .map_err(|error| format!("load Inference/{symbol} for Driver ABI: {error:?}"))?;
         let abi = query_driver_parameter_abi(symbol, 5, |index, offset, size| unsafe {
             get(function, index, offset, size)
         })?;
@@ -3895,13 +3966,9 @@ fn census_inference_sm89_cells_driver_abi(
         unsafe { std::mem::transmute(driver_proc_address("cuFuncGetParamInfo", 12_040)?) };
     let mut census = BTreeMap::new();
     for symbol in super::super::gemm_bi_inference::sm89_cells::SM89_CELL_SYMBOLS {
-        let function = unsafe {
-            cudarc::driver::result::module::get_function(
-                module.raw(),
-                CString::new(symbol).unwrap(),
-            )
-        }
-        .map_err(|error| format!("load Inference/{symbol} for Driver ABI: {error:?}"))?;
+        let function = module
+            .function(CString::new(symbol).unwrap())
+            .map_err(|error| format!("load Inference/{symbol} for Driver ABI: {error:?}"))?;
         let abi = query_driver_parameter_abi(symbol, 5, |index, offset, size| unsafe {
             get(function, index, offset, size)
         })?;
@@ -4058,13 +4125,9 @@ fn census_inference_sm89_half_swizzle_driver_abi(
         unsafe { std::mem::transmute(driver_proc_address("cuFuncGetParamInfo", 12_040)?) };
     let mut census = BTreeMap::new();
     for symbol in INFERENCE_SM89_HALF_SWIZZLE_SYMBOLS {
-        let function = unsafe {
-            cudarc::driver::result::module::get_function(
-                module.raw(),
-                CString::new(symbol).unwrap(),
-            )
-        }
-        .map_err(|error| format!("load Inference/{symbol} for Driver ABI: {error:?}"))?;
+        let function = module
+            .function(CString::new(symbol).unwrap())
+            .map_err(|error| format!("load Inference/{symbol} for Driver ABI: {error:?}"))?;
         let abi = query_driver_parameter_abi(symbol, 5, |index, offset, size| unsafe {
             get(function, index, offset, size)
         })?;
@@ -4117,13 +4180,9 @@ fn census_inference_sm89_half_s3_driver_abi(
         unsafe { std::mem::transmute(driver_proc_address("cuFuncGetParamInfo", 12_040)?) };
     let mut census = BTreeMap::new();
     for symbol in INFERENCE_SM89_HALF_S3_SYMBOLS {
-        let function = unsafe {
-            cudarc::driver::result::module::get_function(
-                module.raw(),
-                CString::new(symbol).unwrap(),
-            )
-        }
-        .map_err(|error| format!("load Inference/{symbol} for Driver ABI: {error:?}"))?;
+        let function = module
+            .function(CString::new(symbol).unwrap())
+            .map_err(|error| format!("load Inference/{symbol} for Driver ABI: {error:?}"))?;
         let abi = query_driver_parameter_abi(symbol, 5, |index, offset, size| unsafe {
             get(function, index, offset, size)
         })?;
@@ -4171,15 +4230,11 @@ fn census_inference_sm89_rna_wide_driver_abi(
     let module = DriverModule::load(ctx, ptx)?;
     let get: GetParamInfo =
         unsafe { std::mem::transmute(driver_proc_address("cuFuncGetParamInfo", 12_040)?) };
-    let function = unsafe {
-        cudarc::driver::result::module::get_function(
-            module.raw(),
-            CString::new(INFERENCE_SM89_RNA_WIDE_SYMBOL).unwrap(),
-        )
-    }
-    .map_err(|error| {
-        format!("load Inference/{INFERENCE_SM89_RNA_WIDE_SYMBOL} for Driver ABI: {error:?}")
-    })?;
+    let function = module
+        .function(CString::new(INFERENCE_SM89_RNA_WIDE_SYMBOL).unwrap())
+        .map_err(|error| {
+            format!("load Inference/{INFERENCE_SM89_RNA_WIDE_SYMBOL} for Driver ABI: {error:?}")
+        })?;
     let abi = query_driver_parameter_abi(
         INFERENCE_SM89_RNA_WIDE_SYMBOL,
         5,
@@ -4227,13 +4282,9 @@ fn census_inference_sm89_finalist_driver_abi(
     };
     let query = |symbol: &'static str| -> Result<Tf32DriverAbi, String> {
         validate_inference_sm89_finalist_entry_ptx(&parsed, symbol)?;
-        let function = unsafe {
-            cudarc::driver::result::module::get_function(
-                module.raw(),
-                CString::new(symbol).unwrap(),
-            )
-        }
-        .map_err(|error| format!("load Inference/{symbol} for Driver ABI: {error:?}"))?;
+        let function = module
+            .function(CString::new(symbol).unwrap())
+            .map_err(|error| format!("load Inference/{symbol} for Driver ABI: {error:?}"))?;
         let abi = query_driver_parameter_abi(symbol, 5, |index, offset, size| unsafe {
             get(function, index, offset, size)
         })?;
@@ -5532,10 +5583,9 @@ fn census_inference_sm89_exact_n64_driver_abi(
     let get: GetParamInfo =
         unsafe { std::mem::transmute(driver_proc_address("cuFuncGetParamInfo", 12_040)?) };
     let symbol = INFERENCE_SM89_EXACT_N64_SYMBOL;
-    let function = unsafe {
-        cudarc::driver::result::module::get_function(module.raw(), CString::new(symbol).unwrap())
-    }
-    .map_err(|error| format!("load Inference/{symbol} for Driver ABI: {error:?}"))?;
+    let function = module
+        .function(CString::new(symbol).unwrap())
+        .map_err(|error| format!("load Inference/{symbol} for Driver ABI: {error:?}"))?;
     let abi = query_driver_parameter_abi(symbol, 5, |index, offset, size| unsafe {
         get(function, index, offset, size)
     })?;
@@ -5568,13 +5618,9 @@ fn census_inference_sm120_exact_n64_driver_abi(
         INFERENCE_SM120_COPYPLAN_T256_SYMBOL,
         INFERENCE_SM120_COPYPLAN_M128_T256_SYMBOL,
     ] {
-        let function = unsafe {
-            cudarc::driver::result::module::get_function(
-                module.raw(),
-                CString::new(symbol).unwrap(),
-            )
-        }
-        .map_err(|error| format!("load Inference/{symbol} for Driver ABI: {error:?}"))?;
+        let function = module
+            .function(CString::new(symbol).unwrap())
+            .map_err(|error| format!("load Inference/{symbol} for Driver ABI: {error:?}"))?;
         let abi = query_driver_parameter_abi(symbol, 5, |index, offset, size| unsafe {
             get(function, index, offset, size)
         })?;
@@ -5604,10 +5650,9 @@ fn census_inference_sm120_sliced_driver_abi(
     let get: GetParamInfo =
         unsafe { std::mem::transmute(driver_proc_address("cuFuncGetParamInfo", 12_040)?) };
     let symbol = INFERENCE_SM120_SLICED_SYMBOL;
-    let function = unsafe {
-        cudarc::driver::result::module::get_function(module.raw(), CString::new(symbol).unwrap())
-    }
-    .map_err(|error| format!("load Inference/{symbol} for Driver ABI: {error:?}"))?;
+    let function = module
+        .function(CString::new(symbol).unwrap())
+        .map_err(|error| format!("load Inference/{symbol} for Driver ABI: {error:?}"))?;
     let abi = query_driver_parameter_abi(symbol, 5, |index, offset, size| unsafe {
         get(function, index, offset, size)
     })?;
@@ -5685,13 +5730,9 @@ fn census_inference_sm120_postbias_driver_abi(
         unsafe { std::mem::transmute(driver_proc_address("cuFuncGetParamInfo", 12_040)?) };
     let mut census = BTreeMap::new();
     for symbol in INFERENCE_SM120_POSTBIAS_SYMBOLS {
-        let function = unsafe {
-            cudarc::driver::result::module::get_function(
-                module.raw(),
-                CString::new(symbol).unwrap(),
-            )
-        }
-        .map_err(|error| format!("load Inference/{symbol} for Driver ABI: {error:?}"))?;
+        let function = module
+            .function(CString::new(symbol).unwrap())
+            .map_err(|error| format!("load Inference/{symbol} for Driver ABI: {error:?}"))?;
         let abi = query_driver_parameter_abi(symbol, 7, |index, offset, size| unsafe {
             get(function, index, offset, size)
         })?;

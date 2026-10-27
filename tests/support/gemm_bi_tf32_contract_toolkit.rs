@@ -1648,7 +1648,8 @@ pub(crate) fn validate_cuda12_driver_abi_lookup_contract(source: &str) -> Result
             let mut census = BTreeMap::new();
             for symbol in symbols {
                 let name = CString::new(symbol).expect("static TF32 symbol");
-                let function = unsafe { cudarc::driver::result::module::get_function(module.raw(), name) }
+                let function = module
+                    .function(name)
                     .map_err(|error| format!("load {module_kind:?}/{symbol} for Driver ABI: {error:?}"))?;
                 let label = format!("{module_kind:?}/{symbol}");
                 let abi = query_tf32_driver_parameter_abi(
@@ -1718,7 +1719,8 @@ pub(crate) fn validate_cuda12_driver_abi_lookup_contract(source: &str) -> Result
     let expected_symbol_loop = r#"
             for symbol in symbols {
                 let name = CString::new(symbol).expect("static TF32 symbol");
-                let function = unsafe { cudarc::driver::result::module::get_function(module.raw(), name) }
+                let function = module
+                    .function(name)
                     .map_err(|error| format!("load {module_kind:?}/{symbol} for Driver ABI: {error:?}"))?;
                 let label = format!("{module_kind:?}/{symbol}");
                 let abi = query_tf32_driver_parameter_abi(

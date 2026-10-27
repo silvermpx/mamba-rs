@@ -413,7 +413,8 @@ pub(super) fn census_inference_sm89_driver_abi(
         ptx_admission?;
         let name = std::ffi::CString::new(symbol)
             .map_err(|_| format!("retained Inference symbol {symbol} contains NUL"))?;
-        let function = unsafe { cudarc::driver::result::module::get_function(module.raw(), name) }
+        let function = module
+            .function(name)
             .map_err(|error| format!("load Inference/{symbol} for Driver ABI: {error:?}"))?;
         let abi = super::query_driver_parameter_abi(symbol, 5, |index, offset, size| unsafe {
             get(function, index, offset, size)
