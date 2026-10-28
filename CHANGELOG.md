@@ -210,6 +210,16 @@
   over 2112 inputs: 0.39; 64 rows into 32000 outputs over 768 inputs: 0.77),
   and none runs slower. Other architectures keep the 32 x 64 partial until a
   census of their own. The bits do not change.
+- On SM89 a weight gradient whose batch the shape cuts into row chunks of
+  fewer than 512 rows takes a direct 64 x 64 partial, four times the CTAs of
+  the portable 128 x 128 one, which leaves the short chunks of a small
+  layer's few tiles mostly overhead: on an RTX 6000 Ada such gradients run
+  in 0.28 to 0.86 of the portable partial's time (256 x 256 over 1024 rows:
+  15 against 54 microseconds; 128 x 796 over 4096 rows: 39 against 75).
+  Chunks of 512 rows or more, as in an f32 training step over 4096 rows or
+  more, keep the portable partial: there the direct partial's twice the L2
+  bytes per multiply-add lowered the clock of the power-capped card for the
+  whole step. The bits do not change.
 - The f32 training step of the four families at batch 4 by 512 tokens, 0.8.2
   against 0.8.1: on an A100 Mamba 3 percent faster and the others within 1.5
   percent either way; on an RTX 5090 Mamba 6 percent faster and Mamba-2,

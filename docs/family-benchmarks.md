@@ -264,13 +264,17 @@ can tell apart.
 
 Under f32 training this card runs at its 300 W limit, where the clock sets
 the pace and a kernel that moves more bytes per multiply-add slows the whole
-step. SM89 keeps a weight gradient that the shape cuts into row chunks on
-the portable 128 x 128 partial, as 0.8.1 did: a direct 64 x 64 partial of
-the same partition writes the same planes in about half the time alone on
-the card, but moves twice the L2 bytes and one and a half times the shared
-words per multiply-add, and in the step the card then clocked lower at the
-same power. With it the step ran 3 to 4 percent slower at batch 8 and 16
-(Mamba and Mamba-2) and no faster at batch 4.
+step. SM89 keeps a weight gradient whose batch the shape cuts into row
+chunks of 512 rows or more on the portable 128 x 128 partial, as 0.8.1 did:
+a direct 64 x 64 partial of the same partition writes the same planes in
+about half the time alone on the card, but moves twice the L2 bytes and one
+and a half times the shared words per multiply-add, and in the step the card
+then clocked lower at the same power. With it on every chunk the step ran 3
+to 4 percent slower at batch 8 and 16 (Mamba and Mamba-2) and no faster at
+batch 4. Shorter chunks, the weight gradients of small layers, take the
+direct partial: there the portable partial's few tiles leave its CTAs mostly
+overhead and the direct one runs in 0.28 to 0.86 of its time, while the
+training step stays within 0.7 percent either way.
 
 On October 27, on the tree before the final SM89 refits, the Mamba-2 chunked
 prompt of the probe (the minimum of four runs) took 0.995 to 1.005 of
