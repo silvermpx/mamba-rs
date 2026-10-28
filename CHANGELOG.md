@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.8.2 (2026-10-24)
+## 0.8.2 (2026-10-28)
 
 ### Breaking
 
@@ -34,8 +34,8 @@
 ### Performance
 
 - Compared with 0.8.1 on A100, RTX 6000 Ada and RTX 5090: f32 decode 1.4 to
-  5 times faster, Mamba f32 training step 3 to 6 percent faster, other f32
-  training steps within 1.6 percent, bf16 unchanged. See the
+  5 times faster, Mamba f32 training step 2 to 6 percent faster, other f32
+  training steps within 3.1 percent, bf16 unchanged. See the
   [family benchmarks](docs/family-benchmarks.md) and the
   [GEMM benchmarks](docs/determinism-benchmarks.md).
 

@@ -25,7 +25,7 @@ three cards.
 |---|---:|---:|---:|---:|---:|
 | RTX 6000 Ada (SM89) | 1.44x-4.32x | 1.059x | 1.013x | 1.015x | 0.999x |
 | RTX 5090 (SM120) | 1.92x-5.15x | 1.063x | 0.984x | 0.994x | 0.994x |
-| A100 SXM4 40 GB (SM80) | 1.74x-3.81x | 1.034x | 1.006x | 0.986x | 0.999x |
+| A100 SXM4 40 GB (SM80) | 1.66x-4.41x | 1.024x | 0.969x | 0.973x | 0.989x |
 
 ## 0.8.2 against 0.8.1, RTX 6000 Ada
 
@@ -183,62 +183,61 @@ tokens at batch 1, 0.97x.
 
 ## 0.8.2 against 0.8.1, A100 SXM4 40 GB
 
-Measured on October 27, 2026 on a rented A100 SXM4 40 GB (108 SMs, ECC on,
-driver 595.91.07, CUDA 13.2.78 / NVRTC 13.2.78, Rust 1.99.1, release
-build, AMD EPYC 7K62 host shared with other tenants at a load average of 25
-to 35). The two trees ran in turn, six runs each, and each cell is the
-median of its six runs. The 0.8.2 tree measured here predates the last SM80
-rule of the release, which moved 143 of 333 cut products to faster routes
-(see the [GEMM benchmarks](determinism-benchmarks.md)).
+Measured on October 28, 2026 on a rented A100 SXM4 40 GB (108 SMs, 350 W
+power limit, driver 595.99.02, CUDA 13.2 / NVRTC 13.2, Rust 1.99.1, release
+build, Intel Xeon E5-2680 v4 host), on the release tree with nothing else on
+the card. The two trees ran in turn, four runs each, and each cell is the
+median of its four runs.
 
 bf16 storage, 0.8.1 -> 0.8.2 (speedup):
 
 | family | decode, batch 1 | decode, batch 16 | prompt of 4096 |
 |---|---:|---:|---:|
-| Mamba | 343 -> 344 us (1.00x) | 388 -> 389 us (1.00x) | 0.66 -> 0.66 M tokens/s (1.00x) |
-| Mamba-2 | 367 -> 369 us (0.99x) | 465 -> 466 us (1.00x) | 0.45 -> 0.45 M tokens/s (1.00x) |
-| Mamba-3 SISO | 342 -> 343 us (1.00x) | 755 -> 755 us (1.00x) | 0.37 -> 0.37 M tokens/s (1.00x) |
-| Mamba-3 MIMO | 351 -> 352 us (1.00x) | 652 -> 653 us (1.00x) | 0.13 -> 0.12 M tokens/s (0.91x) |
+| Mamba | 341 -> 341 us (1.00x) | 393 -> 392 us (1.00x) | 0.62 -> 0.62 M tokens/s (1.00x) |
+| Mamba-2 | 364 -> 365 us (1.00x) | 466 -> 467 us (1.00x) | 0.43 -> 0.43 M tokens/s (1.00x) |
+| Mamba-3 SISO | 340 -> 340 us (1.00x) | 753 -> 752 us (1.00x) | 0.35 -> 0.35 M tokens/s (1.00x) |
+| Mamba-3 MIMO | 348 -> 348 us (1.00x) | 655 -> 655 us (1.00x) | 0.14 -> 0.14 M tokens/s (0.99x) |
 
 f32 storage, 0.8.1 -> 0.8.2 (speedup):
 
 | family | decode, batch 1 | decode, batch 16 | prompt of 4096 |
 |---|---:|---:|---:|
-| Mamba | 1281 -> 336 us (3.81x) | 1337 -> 387 us (3.46x) | 0.26 -> 0.26 M tokens/s (1.01x) |
-| Mamba-2 | 1101 -> 338 us (3.26x) | 1199 -> 444 us (2.70x) | 0.24 -> 0.23 M tokens/s (0.99x) |
-| Mamba-3 SISO | 1132 -> 370 us (3.06x) | 1387 -> 795 us (1.74x) | 0.20 -> 0.23 M tokens/s (1.17x) |
-| Mamba-3 MIMO | 1075 -> 327 us (3.28x) | 1383 -> 644 us (2.15x) | 0.11 -> 0.11 M tokens/s (1.00x) |
+| Mamba | 1457 -> 331 us (4.41x) | 1359 -> 384 us (3.54x) | 0.25 -> 0.28 M tokens/s (1.11x) |
+| Mamba-2 | 984 -> 333 us (2.95x) | 1199 -> 445 us (2.69x) | 0.25 -> 0.23 M tokens/s (0.93x) |
+| Mamba-3 SISO | 1069 -> 364 us (2.93x) | 1236 -> 742 us (1.66x) | 0.19 -> 0.19 M tokens/s (1.00x) |
+| Mamba-3 MIMO | 1072 -> 323 us (3.31x) | 1242 -> 646 us (1.92x) | 0.11 -> 0.11 M tokens/s (1.00x) |
 
-The MIMO bf16 prompt ran either near 115 or near 141 thousand tokens a
-second on both trees, run by run, and the median caught more slow runs of
-0.8.2; the fastest runs of the two trees are 141.8 and 140.5 thousand. The
-training step of this bench varied by up to a quarter between runs of the
-same tree on this host, so it comes from the probe instead, in rotated
-order, six runs of 20 steps each:
+The f32 training step of this bench moved by up to a fifth between runs of
+one tree on this host, so it comes from the probe over the public trainer
+instead: the mean of 240 steps at batch 4 by 512 tokens (80 for MIMO), in
+rotated order, four runs each, `old/new` above 1 meaning 0.8.2 is faster:
 
-| family | 0.8.1, minimum | 0.8.2, minimum | old/new | old/new, medians |
+| family | 0.8.1, minimum | 0.8.2, minimum | old/new, minima | old/new, medians |
 |---|---:|---:|---:|---:|
-| Mamba | 24.78 ms | 23.96 ms | 1.034x | 1.011x |
-| Mamba-2 | 26.87 ms | 26.72 ms | 1.006x | 1.003x |
-| Mamba-3 SISO | 28.48 ms | 28.88 ms | 0.986x | 1.009x |
-| Mamba-3 MIMO | 82.95 ms | 83.04 ms | 0.999x | 0.999x |
+| Mamba | 24.99 ms | 24.41 ms | 1.024x | 1.031x |
+| Mamba-2 | 27.24 ms | 28.11 ms | 0.969x | 0.969x |
+| Mamba-3 SISO | 29.02 ms | 29.84 ms | 0.973x | 0.976x |
+| Mamba-3 MIMO | 83.28 ms | 84.20 ms | 0.989x | 0.990x |
 
-The GEMMs of a training step alone (`gemm_bi_trainer_step_bench`, exact
-f32) take 3.62 ms instead of 4.17 on the 128-wide shape, 6.37 instead of
-8.78 on the 256-wide one, 23.87 instead of 24.10 on the 768-wide one and
-20.15 instead of 23.43 on the 1536-wide one. Over the run's other benches,
-geometric mean of every value: the Mamba GPU benchmark 1.42x, the Mamba
-mixer 1.80x, Mamba-3 1.42x, Mamba-2 and MIMO 1.15x, the Mamba-3 scan
-kernels 1.02x. The Mamba-2 chunked prompt of `m2_mimo_gpu_bench` at batch 1
-ran 3 to 6 percent slower than 0.8.1 in bf16 and f32. Profiled kernel by
-kernel, a 1024-token bf16 window runs the same kernels in the same time on
-both trees (2.383 and 2.382 ms), so the bf16 difference is this host's
-noise. In f32 0.8.1 ran the window's products on its one-chain f32 kernel,
-where 0.8.2 folds them in pieces of 128 inputs, the same at every batch
-size and on every route. With the SM80 slab tile taken by the last wave
-of its grid the products of that window take 2.87 ms (2.99 before it), and
-the window 4.56 ms of kernel time; 0.8.1's profile, at clocks under which
-the same scan kernels also ran about 7 percent faster, took 4.25.
+Mamba-2 and Mamba-3 SISO ran slower than 0.8.1 in every one of the four
+pairs. On October 27, on an A100 SXM4 with a 400 W limit and a tree without
+the last SM80 rule (the slab tile taken by the last wave of its grid), the
+same probe gave 1.006x and 0.986x. That rule runs each product of the cut
+census faster alone; the step under this card's 350 W limit has not yet
+been profiled to say which of the two moved it.
+
+The f32 Mamba-2 prompt of 4096 tokens runs at 0.23 M tokens/s on 0.8.2 in
+every run, where 0.8.1 ran between 0.23 and 0.26. 0.8.1 ran the window's
+products on its one-chain f32 kernel; 0.8.2 folds them in pieces of 128
+inputs, the same at every batch size. On October 27 a 1024-token window's
+products took 2.87 ms of kernel time with the slab tile (2.99 before it),
+and the window 4.56 ms, where 0.8.1 took 4.25.
+
+The other GPU benches were measured on October 27, on the tree before the
+last SM80 rule, two runs a side, geometric mean of every value each bench
+prints: the Mamba GPU benchmark 1.42x, the Mamba mixer 1.80x, Mamba-3 1.42x,
+Mamba-2 and MIMO 1.15x, the GEMMs of a training step alone 1.06x, the
+Mamba-3 scan kernels 1.02x.
 
 ## 0.8.1, RTX PRO 6000 Blackwell
 
