@@ -8856,6 +8856,7 @@ pub(super) const SCALAR_SYMBOLS: &[&str] = &[
     "nn_exact_km_m32n64_bk16_s4",
     "nn_exact_km_pieces_m32n64_bk16_s4",
     "exact_chunk_partial_m32n64",
+    "exact_chunk_partial_m16n64",
     "exact_chunk_partial_m16n16_bk16_s4",
     "exact_chunk_fused_m16n16_bk16_s4",
     "nt_exact_thin_r1_m16n32_bk64_s6",
@@ -8863,6 +8864,7 @@ pub(super) const SCALAR_SYMBOLS: &[&str] = &[
     "nt_exact_km_m32n64_bk16_s4",
     "nt_exact_km_pieces_m32n64_bk16_s4",
     "nt_exact_chunk_partial_m32n64",
+    "nt_exact_chunk_partial_m16n64",
     "nt_exact_chunk_partial_m16n16_bk16_s4",
     "nt_exact_chunk_fused_m16n16_bk16_s4",
 ];
@@ -10212,6 +10214,8 @@ pub struct GemmBiKernels {
     pub gemm_bi_nn_exact_km_pieces: CudaFunction,
     /// Its 64-input chunk partials on a 32 x 64 tile.
     pub gemm_bi_exact_chunk_partial_m32n64: CudaFunction,
+    /// The same partials on a 16 x 64 tile, for a batch of at most 16 rows.
+    pub gemm_bi_exact_chunk_partial_m16n64: CudaFunction,
     /// Its 64-input chunk partials on the pipelined 16 x 16 tile.
     pub gemm_bi_exact_chunk_partial_m16n16: CudaFunction,
     /// The same partials with the planes folded by each tile's last CTA.
@@ -10227,6 +10231,8 @@ pub struct GemmBiKernels {
     pub gemm_bi_nt_exact_km_pieces: CudaFunction,
     /// The input gradient's chunk partials on a 32 x 64 tile.
     pub gemm_bi_nt_exact_chunk_partial_m32n64: CudaFunction,
+    /// The input gradient's chunk partials on a 16 x 64 tile.
+    pub gemm_bi_nt_exact_chunk_partial_m16n64: CudaFunction,
     /// The input gradient's chunk partials on the pipelined 16 x 16 tile.
     pub gemm_bi_nt_exact_chunk_partial_m16n16: CudaFunction,
     /// The input gradient's fused 16 x 16 chunk partials.
@@ -10827,6 +10833,7 @@ impl GemmBiKernels {
             gemm_bi_nn_exact_km: load("nn_exact_km_m32n64_bk16_s4")?,
             gemm_bi_nn_exact_km_pieces: load("nn_exact_km_pieces_m32n64_bk16_s4")?,
             gemm_bi_exact_chunk_partial_m32n64: load("exact_chunk_partial_m32n64")?,
+            gemm_bi_exact_chunk_partial_m16n64: load("exact_chunk_partial_m16n64")?,
             gemm_bi_exact_chunk_partial_m16n16: load("exact_chunk_partial_m16n16_bk16_s4")?,
             gemm_bi_exact_chunk_fused_m16n16: load("exact_chunk_fused_m16n16_bk16_s4")?,
             gemm_bi_nt_exact_thin_r1,
@@ -10834,6 +10841,7 @@ impl GemmBiKernels {
             gemm_bi_nt_exact_km: load("nt_exact_km_m32n64_bk16_s4")?,
             gemm_bi_nt_exact_km_pieces: load("nt_exact_km_pieces_m32n64_bk16_s4")?,
             gemm_bi_nt_exact_chunk_partial_m32n64: load("nt_exact_chunk_partial_m32n64")?,
+            gemm_bi_nt_exact_chunk_partial_m16n64: load("nt_exact_chunk_partial_m16n64")?,
             gemm_bi_nt_exact_chunk_partial_m16n16: load("nt_exact_chunk_partial_m16n16_bk16_s4")?,
             gemm_bi_nt_exact_chunk_fused_m16n16: load("nt_exact_chunk_fused_m16n16_bk16_s4")?,
             gemm_bi_transpose_f32_2d: load("transpose_f32_2d")?,
@@ -14908,7 +14916,7 @@ mod tests {
         const D768_TRANSPOSE_SYMBOL: &str = "transpose_f32_32x16_d768";
         const TN_M16N16_SYMBOL: &str = "tn_m16n16_bk16_s2_splitm16";
         let valid = synthetic_scalar_splitm_module_ptx();
-        assert_eq!(super::SCALAR_SYMBOLS.len(), 74);
+        assert_eq!(super::SCALAR_SYMBOLS.len(), 76);
         validate_module_ptx(ModuleKind::TriadScalar, "sm_80", &valid)
             .expect("complete TriadScalar export inventory");
 
@@ -16318,6 +16326,7 @@ mod tests {
         "nn_exact_km_m32n64_bk16_s4",
         "nn_exact_km_pieces_m32n64_bk16_s4",
         "exact_chunk_partial_m32n64",
+        "exact_chunk_partial_m16n64",
         "exact_chunk_partial_m16n16_bk16_s4",
         "exact_chunk_fused_m16n16_bk16_s4",
         "nt_exact_thin_r1_m16n32_bk64_s6",
@@ -16325,6 +16334,7 @@ mod tests {
         "nt_exact_km_m32n64_bk16_s4",
         "nt_exact_km_pieces_m32n64_bk16_s4",
         "nt_exact_chunk_partial_m32n64",
+        "nt_exact_chunk_partial_m16n64",
         "nt_exact_chunk_partial_m16n16_bk16_s4",
         "nt_exact_chunk_fused_m16n16_bk16_s4",
     ];
@@ -16721,7 +16731,7 @@ mod tests {
 
         let scalar: BTreeSet<_> = SCALAR_SYMBOLS.iter().copied().collect();
         let sm80: BTreeSet<_> = SM80_SYMBOLS.iter().copied().collect();
-        assert_eq!(scalar.len(), 74);
+        assert_eq!(scalar.len(), 76);
         assert_eq!(sm80.len(), 16);
         let sm80_streamk: BTreeSet<_> = super::SM80_STREAMK_SYMBOLS.iter().copied().collect();
         assert_eq!(sm80_streamk.len(), 2);
@@ -16766,7 +16776,7 @@ mod tests {
         assert!(sm80.is_disjoint(&sm90a));
         assert!(sm80.is_disjoint(&sm100));
         assert!(sm90a.is_disjoint(&sm100));
-        assert_eq!(scalar.union(&sm80).count(), 90);
+        assert_eq!(scalar.union(&sm80).count(), 92);
         assert!(
             scalar
                 .union(&sm80)

@@ -539,6 +539,185 @@ void nt_exact_chunk_partial_m32n64(
     exact_chunk_partial_m32n64_tile<true>(partial, A, B, params);
 }
 
+// The chunk partial on a 16-row tile: 16 rows x 64 columns per CTA on 128
+// threads, two rows by four columns a thread, the 32 x 64 tile's slabs and
+// fold for a batch of at most 16 rows, whose 32-row tiles would leave half
+// their arithmetic on padding rows. It writes the same planes bit for bit:
+// each output folds its chunk from +0.0 in ascending k over the same
+// zero-filled 32-deep slabs.
+#define EXACT_CHUNK16_BM 16
+#define EXACT_CHUNK16_A_ROW (EXACT_CHUNK16_BM + 4)
+
+template <bool B_T>
+__device__ __forceinline__ void exact_chunk_partial_m16n64_tile(
+    float* __restrict__ partial,
+    const float* __restrict__ A,
+    const float* __restrict__ B,
+    const ExactChunkParams& params
+) {
+    const int M = params.m;
+    const int N = params.n;
+    const int K = params.k;
+    const int lda = params.lda;
+    const int ldb = params.ldb;
+    const int chunk = params.chunk;
+    __shared__ __align__(16) float As[2][EXACT_CHUNK_BK * EXACT_CHUNK16_A_ROW];
+    __shared__ __align__(16) float Bs[2][EXACT_CHUNK_BK * EXACT_CHUNK_B_ROW];
+
+    const int z = blockIdx.z;
+    const int k_begin = z * chunk;
+    if (k_begin >= K) {
+        return;
+    }
+    const int k_end = min(K, k_begin + chunk);
+    const int num_pid_n = (N + EXACT_CHUNK_BN - 1) / EXACT_CHUNK_BN;
+    const int pid_m = blockIdx.x / num_pid_n;
+    const int pid_n = blockIdx.x % num_pid_n;
+    const int row_tile = pid_m * EXACT_CHUNK16_BM;
+    const int column_tile = pid_n * EXACT_CHUNK_BN;
+
+    const int warp = threadIdx.x >> 5;
+    const int lane = threadIdx.x & 31;
+    // Each warp owns 16 columns of the tile; a lane owns 2 x 4 outputs.
+    const int row0 = (lane >> 2) * 2;
+    const int col0 = warp * 16 + (lane & 3) * EXACT_CHUNK_TN;
+
+    const bool b_rows_vector = ((ldb & 3) == 0) && is_aligned_16(B);
+
+    auto issue = [&](int stage, int k0) {
+        // A [16 rows x 32 k]: 512 words, four per thread, row fastest.
+        unsigned a_base = (unsigned)__cvta_generic_to_shared(&As[stage][0]);
+        #pragma unroll
+        for (int i = 0; i < (EXACT_CHUNK16_BM * EXACT_CHUNK_BK) / 128; ++i) {
+            int e = threadIdx.x + i * 128;
+            int r = e % EXACT_CHUNK16_BM;
+            int kk = e / EXACT_CHUNK16_BM;
+            int g_row = row_tile + r;
+            int g_k = k0 + kk;
+            bool valid = g_row < M && g_k < k_end;
+            const float* src = valid ? A + (long long)g_row * lda + g_k : A;
+            unsigned dst = a_base + (unsigned)((kk * EXACT_CHUNK16_A_ROW + r) * 4);
+            asm volatile("cp.async.ca.shared.global [%0], [%1], 4, %2;\n"
+                         :: "r"(dst), "l"(src), "r"(valid ? 4 : 0));
+        }
+        unsigned b_base = (unsigned)__cvta_generic_to_shared(&Bs[stage][0]);
+        if (B_T) {
+            #pragma unroll
+            for (int i = 0; i < (EXACT_CHUNK_BK * EXACT_CHUNK_BN) / 128; ++i) {
+                int e = threadIdx.x + i * 128;
+                int kk = e % EXACT_CHUNK_BK;
+                int c = e / EXACT_CHUNK_BK;
+                unsigned dst = b_base + (unsigned)((kk * EXACT_CHUNK_B_ROW + c) * 4);
+                exact_copy_bt(dst, B, ldb, k0 + kk, k_end, column_tile + c, N);
+            }
+            return;
+        }
+        #pragma unroll
+        for (int i = 0; i < (EXACT_CHUNK_BK * EXACT_CHUNK_BN) / (4 * 128); ++i) {
+            int e = threadIdx.x + i * 128;
+            int kk = e / (EXACT_CHUNK_BN / 4);
+            int c4 = (e % (EXACT_CHUNK_BN / 4)) * 4;
+            int g_k = k0 + kk;
+            int g_column = column_tile + c4;
+            unsigned dst = b_base + (unsigned)((kk * EXACT_CHUNK_B_ROW + c4) * 4);
+            if (b_rows_vector && g_k < k_end && g_column + 3 < N) {
+                const float* src = B + (long long)g_k * ldb + g_column;
+                asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n"
+                             :: "r"(dst), "l"(src));
+            } else {
+                #pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    bool valid = g_k < k_end && g_column + j < N;
+                    const float* src = valid ? B + (long long)g_k * ldb + g_column + j : B;
+                    asm volatile("cp.async.ca.shared.global [%0], [%1], 4, %2;\n"
+                                 :: "r"(dst + (unsigned)(j * 4)), "l"(src),
+                                    "r"(valid ? 4 : 0));
+                }
+            }
+        }
+    };
+
+    float acc[2][EXACT_CHUNK_TN];
+    #pragma unroll
+    for (int i = 0; i < 2; ++i) {
+        #pragma unroll
+        for (int j = 0; j < EXACT_CHUNK_TN; ++j) {
+            acc[i][j] = 0.0f;
+        }
+    }
+
+    const int tiles = (k_end - k_begin + EXACT_CHUNK_BK - 1) / EXACT_CHUNK_BK;
+    issue(0, k_begin);
+    asm volatile("cp.async.commit_group;\n");
+    for (int t = 0; t < tiles; ++t) {
+        if (t + 1 < tiles) {
+            issue((t + 1) & 1, k_begin + (t + 1) * EXACT_CHUNK_BK);
+            asm volatile("cp.async.commit_group;\n");
+            asm volatile("cp.async.wait_group 1;\n");
+        } else {
+            asm volatile("cp.async.wait_group 0;\n");
+        }
+        __syncthreads();
+        const float* a_stage = &As[t & 1][row0];
+        const float* b_stage = &Bs[t & 1][col0];
+        #pragma unroll
+        for (int kk = 0; kk < EXACT_CHUNK_BK; ++kk) {
+            const float2 a = *reinterpret_cast<const float2*>(a_stage + kk * EXACT_CHUNK16_A_ROW);
+            const float4 b = *reinterpret_cast<const float4*>(b_stage + kk * EXACT_CHUNK_B_ROW);
+            const float av[2] = {a.x, a.y};
+            const float bv[4] = {b.x, b.y, b.z, b.w};
+            #pragma unroll
+            for (int i = 0; i < 2; ++i) {
+                #pragma unroll
+                for (int j = 0; j < EXACT_CHUNK_TN; ++j) {
+                    acc[i][j] = __fmaf_rn(av[i], bv[j], acc[i][j]);
+                }
+            }
+        }
+        __syncthreads();
+    }
+
+    const long long plane_stride = (long long)M * N;
+    float* plane = partial + (long long)z * plane_stride;
+    #pragma unroll
+    for (int i = 0; i < 2; ++i) {
+        const int g_row = row_tile + row0 + i;
+        if (g_row >= M) {
+            continue;
+        }
+        #pragma unroll
+        for (int j = 0; j < EXACT_CHUNK_TN; ++j) {
+            const int g_column = column_tile + col0 + j;
+            if (g_column < N) {
+                __stcg(plane + (long long)g_row * N + g_column, acc[i][j]);
+            }
+        }
+    }
+}
+
+extern "C" __global__ __launch_bounds__(128, 4)
+void exact_chunk_partial_m16n64(
+    float* __restrict__ partial,
+    const float* __restrict__ A,
+    const float* __restrict__ B,
+    ExactChunkParams params
+) {
+    exact_chunk_partial_m16n64_tile<false>(partial, A, B, params);
+}
+
+// The 16-row chunk partial of an input gradient, B the weight [n][k].
+extern "C" __global__ __launch_bounds__(128, 4)
+void nt_exact_chunk_partial_m16n64(
+    float* __restrict__ partial,
+    const float* __restrict__ A,
+    const float* __restrict__ B,
+    ExactChunkParams params
+) {
+    exact_chunk_partial_m16n64_tile<true>(partial, A, B, params);
+}
+
+#undef EXACT_CHUNK16_A_ROW
+#undef EXACT_CHUNK16_BM
 #undef EXACT_CHUNK_B_ROW
 #undef EXACT_CHUNK_A_ROW
 #undef EXACT_CHUNK_TN

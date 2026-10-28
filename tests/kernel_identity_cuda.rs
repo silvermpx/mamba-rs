@@ -88,6 +88,7 @@ const SCALAR_ENTRIES: &[&str] = &[
     "nn_exact_km_m32n64_bk16_s4",
     "nn_exact_km_pieces_m32n64_bk16_s4",
     "exact_chunk_partial_m32n64",
+    "exact_chunk_partial_m16n64",
     "exact_chunk_partial_m16n16_bk16_s4",
     "exact_chunk_fused_m16n16_bk16_s4",
     "nt_exact_thin_r1_m16n32_bk64_s6",
@@ -95,6 +96,7 @@ const SCALAR_ENTRIES: &[&str] = &[
     "nt_exact_km_m32n64_bk16_s4",
     "nt_exact_km_pieces_m32n64_bk16_s4",
     "nt_exact_chunk_partial_m32n64",
+    "nt_exact_chunk_partial_m16n64",
     "nt_exact_chunk_partial_m16n16_bk16_s4",
     "nt_exact_chunk_fused_m16n16_bk16_s4",
 ];

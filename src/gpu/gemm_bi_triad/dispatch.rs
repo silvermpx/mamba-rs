@@ -2892,8 +2892,13 @@ fn rna_one_chain_selection(
 }
 
 /// One architecture's tiles for a TF32 product its layer cuts into four
-/// pieces. Where the operands stage, a forward takes the multistage 128 x 64
+/// pieces. Where the operands stage, a forward of at most `forward_thin_rows`
+/// rows over at least four waves of 32-column strips takes the portable
+/// 16 x 32 tile; otherwise it takes the multistage 128 x 64
 /// tile from `forward_wide` of a wave of its grid (at 128 rows or more), the
+/// 32 x 32 four-byte tile ahead of the 64 x 64 tiles while their grid stays
+/// under `forward_quarter_first` (at 32 rows or more, its own grid covering
+/// `forward_quarter`), the
 /// 64 x 64 tile from `forward_work` of a wave of work (rows times 64-column
 /// strips) or `forward_small` of its own grid, the 32 x 32 tile that stages
 /// four bytes at a time from `forward_quarter` of its grid (at 32 rows or
@@ -2903,10 +2908,15 @@ fn rna_one_chain_selection(
 /// tile from `gradient_wide` of its grid, the portable 64 x 64 tile from
 /// `gradient_work` of a wave of work, and the split members below. Where the
 /// operands do not stage, a forward takes the four-byte 64 x 64 and 32 x 32
-/// tiles from the `unaligned` shares of their grids. Every tile walks the
-/// same pieces in the same order, so the choice moves time only.
+/// tiles from the `unaligned` shares of their grids. The input gradient's
+/// 64 x 64 tile takes layers of `gradient_small_rows` rows or more. Every
+/// tile walks the same pieces in the same order, so the choice moves time
+/// only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Tf32CutRules {
+    forward_thin_rows: usize,
+    forward_quarter_first: Option<WaveShare>,
+    gradient_small_rows: usize,
     forward_wide: Option<WaveShare>,
     forward_work: Option<WaveShare>,
     forward_small: Option<WaveShare>,
@@ -2918,23 +2928,34 @@ pub(super) struct Tf32CutRules {
     unaligned: Option<(WaveShare, WaveShare)>,
 }
 
-/// SM89, measured on an RTX 6000 Ada over the census's cut cells, each as
-/// the time of the chosen tile against the fastest same-bit route of the
-/// cell: within 0.23% of the best per cell in geometric mean over 674
-/// forwards (worst 1.19) and 0.3% over 828 input gradients (worst 1.33).
-/// The persistent tile, whose pieces still fold through its output tile,
-/// lost to the 128 x 64 tile by up to 1.32x once the multistage tiles walked
-/// their pieces in an outer loop. The 64 x 64 input-gradient tile ran 1024
-/// rows over 256 and 384 inputs in 0.62 and 0.69 of the 128 x 64 tile's
-/// time. The four-byte 64 x 64 tile ran unaligned forwards of a thousand to
-/// four thousand rows in 0.58 of the portable tiles' time.
+/// SM89, from a census on an RTX 6000 Ada that timed each forced route of
+/// the 788 cut cells in a run of its own (this card holds its 300 W limit,
+/// and routes timed back to back ranked them wrongly), each change kept only
+/// where the old and new plans, each timed alone over all 788 cells, agreed.
+/// A thin forward takes the multistage 64 x 64 tile rather than the portable
+/// 16 x 32 one (the 32000-word head over 1 to 16 rows in 0.85 to 0.99 of its
+/// time); a forward whose 64 x 64 grid stays under a third of a wave takes
+/// the four-byte 32 x 32 tile from half a wave of its own grid (33 rows into
+/// 2112 outputs over 768 inputs in 0.78 of the split members' time); an
+/// input gradient takes the multistage 64 x 64 tile from 64 rows and a fifth
+/// of a wave of its grid (127 rows into 2112 outputs over 1536 inputs in
+/// 0.45 of the split members' time). The 71 cells that changed route ran in
+/// 0.85 of their former time on forwards and 0.69 on input gradients in
+/// geometric mean, and none slower. The persistent tile, whose pieces still
+/// fold through its output tile, lost to the 128 x 64 tile by up to 1.32x
+/// once the multistage tiles walked their pieces in an outer loop. The
+/// four-byte 64 x 64 tile ran unaligned forwards of a thousand to four
+/// thousand rows in 0.58 of the portable tiles' time.
 const TF32_CUT_SM89: Tf32CutRules = Tf32CutRules {
+    forward_thin_rows: 0,
+    forward_quarter_first: Some(WaveShare::new(1, 3)),
+    gradient_small_rows: 64,
     forward_wide: Some(WaveShare::new(1, 2)),
     forward_work: Some(WaveShare::new(8, 1)),
     forward_small: Some(WaveShare::new(1, 2)),
-    forward_quarter: None,
+    forward_quarter: Some(WaveShare::new(1, 2)),
     gradient_small_below: WaveShare::new(1, 2),
-    gradient_small: Some(WaveShare::new(1, 4)),
+    gradient_small: Some(WaveShare::new(1, 5)),
     gradient_wide: Some(WaveShare::new(1, 5)),
     gradient_work: None,
     unaligned: Some((WaveShare::new(1, 2), WaveShare::new(1, 4))),
@@ -2947,6 +2968,9 @@ const TF32_CUT_SM89: Tf32CutRules = Tf32CutRules {
 /// nested walk took 6.9%; over 240 unaligned forwards the four-byte tiles
 /// from half a wave each came within 1.0%, where the table alone took 9.4%.
 const TF32_CUT_SM120: Tf32CutRules = Tf32CutRules {
+    forward_thin_rows: 16,
+    forward_quarter_first: None,
+    gradient_small_rows: 128,
     forward_wide: Some(WaveShare::new(3, 2)),
     forward_work: Some(WaveShare::new(16, 1)),
     forward_small: Some(WaveShare::new(1, 1)),
@@ -2965,6 +2989,9 @@ const TF32_CUT_SM120: Tf32CutRules = Tf32CutRules {
 /// fastest route's time); over 240 unaligned forwards the four-byte tiles
 /// from half a wave each came within 1.6%, where the table alone took 25%.
 const TF32_CUT_SM80: Tf32CutRules = Tf32CutRules {
+    forward_thin_rows: 16,
+    forward_quarter_first: None,
+    gradient_small_rows: 128,
     forward_wide: Some(WaveShare::new(3, 2)),
     forward_work: Some(WaveShare::new(16, 1)),
     forward_small: Some(WaveShare::new(1, 3)),
@@ -3243,13 +3270,27 @@ fn rna_layer_pieces_selection(
     let covers =
         |share: Option<WaveShare>, grid: usize| share.is_some_and(|s| s.covered(grid, sms));
     // The tiles the work fills, best first, by the architecture's table.
-    let filled = if forward && rows <= 16 && columns.div_ceil(32) >= sms.saturating_mul(4) {
+    let filled = if forward
+        && rows <= rules.forward_thin_rows
+        && columns.div_ceil(32) >= sms.saturating_mul(4)
+    {
         [Some(tile_16), None, None]
     } else if forward {
         if rows >= 128 && covers(rules.forward_wide, wide_tiles) {
             [
                 Some(multistage(Tf32RnaWideTile::MsM128N64S3)),
                 Some(multistage(Tf32RnaWideTile::MsM64N64S3)),
+                None,
+            ]
+        } else if rows >= 32
+            && rules
+                .forward_quarter_first
+                .is_some_and(|first| !first.covered(small_tiles, sms))
+            && covers(rules.forward_quarter, quarter_tiles)
+        {
+            [
+                Some(multistage(Tf32RnaWideTile::MsM32N32S4AnyAlignment)),
+                None,
                 None,
             ]
         } else if covers(rules.forward_work, work) || covers(rules.forward_small, small_tiles) {
@@ -3267,7 +3308,7 @@ fn rna_layer_pieces_selection(
         } else {
             [None, None, None]
         }
-    } else if rows >= 128
+    } else if rows >= rules.gradient_small_rows
         && !rules.gradient_small_below.covered(wide_tiles, sms)
         && covers(rules.gradient_small, small_tiles)
     {
@@ -8859,6 +8900,9 @@ pub(super) enum ExactChunkPartial {
     Slim,
     /// A 32 x 64 tile, four times the CTAs of the slim one for a thin batch.
     Small,
+    /// A 16 x 64 tile, the 32 x 64 tile's slabs for a batch of at most 16
+    /// rows, whose 32-row tiles would spend half their arithmetic on padding.
+    Small16,
     /// The pipelined 16 x 16 tile, for a single row.
     Narrow16,
     /// The pipelined 16 x 16 tile whose last arriving CTA of an output tile
@@ -9373,7 +9417,7 @@ pub(super) fn exact_batch_invariant_nn_plan(
         } else if rules.partials.narrow(m, n, chunks, waves) {
             rules.partials.narrow16(piece_rows, n)
         } else {
-            ExactChunkPartial::Small
+            rules.partials.small(m)
         };
         return Ok(ScalarDispatchPlan::NnExactChunk {
             partial,
@@ -9620,6 +9664,8 @@ pub(super) struct ExactChunkPartials {
     /// The share of a wave the 16 x 16 partial's own grid stays under to
     /// take a layer of up to `narrow_rows` rows.
     narrow_rows_below: Option<WaveShare>,
+    /// The most rows the 16 x 64 partial takes in place of the 32 x 64 one.
+    small16_rows: usize,
     fused: bool,
 }
 
@@ -9643,6 +9689,16 @@ impl ExactChunkPartials {
                         <= m.div_ceil(32).saturating_mul(32).saturating_mul(num)
             })
             && self.slim_from.covered(grid, waves)
+    }
+
+    /// The 32 x 64 partial, or its 16-row twin on a batch of at most
+    /// `small16_rows` rows.
+    pub(super) fn small(self, m: usize) -> ExactChunkPartial {
+        if m <= self.small16_rows {
+            ExactChunkPartial::Small16
+        } else {
+            ExactChunkPartial::Small
+        }
     }
 
     /// Whether a cut layer of `m` rows into `outputs` columns, cut into
@@ -9734,26 +9790,28 @@ pub(super) struct ExactRules {
 /// outputs over 1536 inputs in 0.76 of the slim partial's time; over
 /// seventeen pieces, 128 rows into 1928 outputs ran 1.07 times it). The
 /// 32 x 64 partial takes the layers the slim partial's tiles would pad more
-/// than its own while its grid stays under three and a half waves. The
-/// 16 x 16 partial takes a single row while its own grid stays under sixteen
-/// waves (one row into 8192 outputs over 2048 inputs ran on the 32 x 64
-/// partial in 0.84 of its time), and on rows its 16-row tiles pad no less
-/// than the 32-row ones it takes a layer only below four thirds of a wave of
-/// the 32 x 64 partial's grid (17 rows into 2112 outputs over 768 inputs ran
-/// on the 32 x 64 partial in 0.83 of its time). The two refits from these
-/// censuses moved 64 cells, each change to 0.65 to 0.99 of the time before
-/// it, and none to a slower route. Over 112 cut cells of 16 to 128 rows the
-/// 16 x 16 partial below one and a half waves of the 32 x 64 partial's grid
-/// came within 1.3% of the fastest partial (one wave took 3.2%), and folding
-/// it in the same launch ran ahead of the reducer. Over the uncut forwards
-/// and input gradients the 32 x 64 chain tile's windows came within 0.45% of
-/// the fastest tile per cell (the older tiles alone took 6.5%); over 164
-/// shapes of 64 to 384 inputs the 128 x 128 tile from three quarters of a
-/// wave came within 0.6% (0.53 to 0.94 of the 64 x 64 tile's time); over 252
-/// input gradients into fewer than 128 outputs the narrow tile's window came
-/// within 1.7% (the chain tiles alone took 5.7%); and over 427 uncut input
-/// gradients the native slim tile and the transposed chain tile from half a
-/// wave came within 0.4%.
+/// than its own while its grid stays under three and a half waves. A batch
+/// of at most 16 rows folds on the 16 x 64 partial, the 32 x 64 partial's
+/// slabs on 16-row tiles, from three halves of a wave of the 32 x 64 grid
+/// and on the 16 x 16 partial below (16 rows into 1928 outputs over 2112
+/// inputs, an input gradient, ran in 0.39 of the 32 x 64 partial's time);
+/// rows the 16-row tiles pad no less than the 32-row ones leave the 16 x 16
+/// partial from four thirds of a wave of the 32 x 64 grid, where 17 rows
+/// into 2112 outputs over 768 inputs ran on the 32 x 64 partial in 0.83 of
+/// its time. The three refits from these censuses moved 143 cells, each
+/// change to 0.39 to 0.99 of the time before it, and none to a slower route.
+/// Over 112 cut cells of 16 to 128 rows the 16 x 16 partial below one and a
+/// half waves of the 32 x 64 partial's grid came within 1.3% of the fastest
+/// partial (one wave took 3.2%), and folding it in the same launch ran ahead
+/// of the reducer. Over the uncut forwards and input gradients the 32 x 64
+/// chain tile's windows came within 0.45% of the fastest tile per cell (the
+/// older tiles alone took 6.5%); over 164 shapes of 64 to 384 inputs the
+/// 128 x 128 tile from three quarters of a wave came within 0.6% (0.53 to
+/// 0.94 of the 64 x 64 tile's time); over 252 input gradients into fewer
+/// than 128 outputs the narrow tile's window came within 1.7% (the chain
+/// tiles alone took 5.7%); and over 427 uncut input gradients the native
+/// slim tile and the transposed chain tile from half a wave came within
+/// 0.4%.
 const EXACT_SM89: ExactRules = ExactRules {
     forward: ExactCutTiles {
         slab: Some(SlabGate {
@@ -9797,8 +9855,9 @@ const EXACT_SM89: ExactRules = ExactRules {
         slim_padding: Some(((1, 1), WaveShare::new(7, 2))),
         narrow_below: WaveShare::new(3, 2),
         narrow_below_unpadded: Some(WaveShare::new(4, 3)),
-        narrow_rows: 1,
-        narrow_rows_below: Some(WaveShare::new(16, 1)),
+        narrow_rows: 0,
+        narrow_rows_below: None,
+        small16_rows: 16,
         fused: true,
     },
     uncut: ExactUncutTiles {
@@ -9872,6 +9931,7 @@ const EXACT_SM120: ExactRules = ExactRules {
         narrow_below_unpadded: None,
         narrow_rows: 16,
         narrow_rows_below: None,
+        small16_rows: 0,
         fused: false,
     },
     uncut: ExactUncutTiles {
@@ -9961,6 +10021,7 @@ const EXACT_SM80: ExactRules = ExactRules {
         narrow_below_unpadded: None,
         narrow_rows: 16,
         narrow_rows_below: None,
+        small16_rows: 0,
         fused: true,
     },
     uncut: ExactUncutTiles {
@@ -10190,7 +10251,7 @@ pub(super) fn exact_batch_invariant_nt_plan(
         } else if rules.partials.narrow(m, n_in, chunks, waves) {
             rules.partials.narrow16(piece_rows, n_in)
         } else {
-            ExactChunkPartial::Small
+            rules.partials.small(m)
         };
         return Ok(ScalarDispatchPlan::NtExactChunk {
             partial,
@@ -19446,12 +19507,6 @@ mod tf32_tests {
             101_376,
         ));
         let wide = |tile| F32TriadSelection::Tf32(Tf32PhysicalRoute::MmaTf32RnaWidePieces4(tile));
-        let portable = |tile, stages| {
-            F32TriadSelection::Tf32(Tf32PhysicalRoute::MmaTf32RnaPieces4(Tf32PortableRoute {
-                tile,
-                stages,
-            }))
-        };
         let split =
             F32TriadSelection::Tf32(Tf32PhysicalRoute::MmaTf32RnaSplitK4(Tf32PortableRoute {
                 tile: Tf32PortableTile::M16N32,
@@ -19459,12 +19514,14 @@ mod tf32_tests {
             }));
         // On the 142 multiprocessors of this Ada board: a forward with half
         // a wave of 128 x 64 tiles folds in the multistage 128 x 64 tile
-        // (whole tiles or not), a 64-row batch over a vocabulary-wide layer in
-        // the multistage 64 x 64 tile, a thin batch in the 16 x 32 tile, and a
-        // small output splits; an input gradient of 128 rows or more folds in
-        // the 64 x 64 tile below half a wave of 128 x 64 tiles and in the
-        // 128 x 64 tile from there, or from a fifth of a wave of them where
-        // the 64 x 64 grid stays under half a wave.
+        // (whole tiles or not), a batch of 64 rows or a thin one over a
+        // vocabulary-wide layer in the multistage 64 x 64 tile, a batch whose
+        // 64 x 64 grid stays under a third of a wave in the four-byte 32 x 32
+        // tile from half a wave of its own grid, and a small output splits;
+        // an input gradient of 64 rows or more folds in the 64 x 64 tile below
+        // half a wave of 128 x 64 tiles and in the 128 x 64 tile from there,
+        // or from a fifth of a wave of them where the 64 x 64 grid stays
+        // under half a wave.
         for (op, rows, columns, reduction, expected) in [
             (ResolvedGemmOp::Nn, 8192, 256, 512, wide(Wide::MsM128N64S3)),
             (
@@ -19476,12 +19533,13 @@ mod tf32_tests {
             ),
             (ResolvedGemmOp::Nn, 1000, 768, 1536, wide(Wide::MsM128N64S3)),
             (ResolvedGemmOp::Nn, 64, 32_000, 768, wide(Wide::MsM64N64S3)),
+            (ResolvedGemmOp::Nn, 8, 32_000, 768, wide(Wide::MsM64N64S3)),
             (
                 ResolvedGemmOp::Nn,
-                8,
-                32_000,
+                33,
+                2112,
                 768,
-                portable(Tf32PortableTile::M16N32, Tf32PortableStages::S4),
+                wide(Wide::MsM32N32S4AnyAlignment),
             ),
             (ResolvedGemmOp::Nn, 64, 256, 1536, split),
             (
@@ -19499,6 +19557,13 @@ mod tf32_tests {
                 wide(Wide::NtMsM128N64S3),
             ),
             (ResolvedGemmOp::Nt, 255, 1536, 768, wide(Wide::NtMsM64N64S3)),
+            (
+                ResolvedGemmOp::Nt,
+                127,
+                2112,
+                1536,
+                wide(Wide::NtMsM64N64S3),
+            ),
             (
                 ResolvedGemmOp::Nt,
                 64,
@@ -20783,7 +20848,7 @@ mod exact_batch_invariant_tests {
                                 } else if narrow {
                                     rules.narrow16(piece_rows as usize, n_in)
                                 } else {
-                                    ExactChunkPartial::Small
+                                    rules.small(m)
                                 };
                                 assert_eq!(partial, expected, "{what}");
                                 assert_eq!(
@@ -21337,15 +21402,22 @@ mod exact_batch_invariant_tests {
             partial(exact_batch_invariant_nt_plan(nt(17, 768, 2112), 142, ada, true).unwrap()),
             ExactChunkPartial::Small
         );
-        // One row takes the 16 x 16 partial while its own grid stays under
-        // sixteen waves: 288 CTAs into 768 outputs, 8192 into 8192.
+        // One row follows the same three halves of a wave, so the 72 CTAs of
+        // the 32 x 64 partial into 768 outputs stay on the 16 x 16 partial and
+        // the 2048 into 8192 outputs take the 16 x 64 one.
         assert_eq!(
             partial(exact_batch_invariant_nn_plan(nn(1, 768, 768), 142, ada).unwrap()),
             ExactChunkPartial::Narrow16Fused
         );
         assert_eq!(
             partial(exact_batch_invariant_nn_plan(nn(1, 2048, 8192), 142, ada).unwrap()),
-            ExactChunkPartial::Small
+            ExactChunkPartial::Small16
+        );
+        // Sixteen rows past the window take the 16 x 64 partial, 17 rows the
+        // 32 x 64 one.
+        assert_eq!(
+            partial(exact_batch_invariant_nt_plan(nt(16, 1928, 2112), 142, ada, true).unwrap()),
+            ExactChunkPartial::Small16
         );
     }
 }

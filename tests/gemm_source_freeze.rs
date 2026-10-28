@@ -239,8 +239,8 @@ const GEMM_SOURCES: &[(&str, u64, usize)] = &[
     ),
     (
         "kernels/gemm_bi_triad/sm80/exact_thin.cu",
-        0xcdf81f9086388624,
-        48054,
+        0xec254e47da14edce,
+        55151,
     ),
     (
         "kernels/gemm_bi_triad/sm80/half.cu",

@@ -2463,6 +2463,7 @@ fn scalar_plan_fields(plan: ScalarDispatchPlan) -> (u8, u64, u64) {
         } => (
             match partial {
                 ExactChunkPartial::Small => 56,
+                ExactChunkPartial::Small16 => 75,
                 ExactChunkPartial::Narrow16 => 57,
                 ExactChunkPartial::Slim => 58,
                 ExactChunkPartial::Narrow16Fused => 67,
@@ -2479,6 +2480,7 @@ fn scalar_plan_fields(plan: ScalarDispatchPlan) -> (u8, u64, u64) {
             match partial {
                 ExactChunkPartial::Slim => 47,
                 ExactChunkPartial::Small => 48,
+                ExactChunkPartial::Small16 => 76,
                 ExactChunkPartial::Narrow16 => 49,
                 ExactChunkPartial::Narrow16Fused => 68,
             },
@@ -3110,6 +3112,17 @@ fn scalar_physical_nodes(
                         ),
                         128,
                     ),
+                    ExactChunkPartial::Small16 => (
+                        "exact_chunk_partial_m16n64",
+                        (16, 64),
+                        (32, 2),
+                        (
+                            checked_grid_product(rows.div_ceil(16), n.div_ceil(64), 1)?,
+                            1,
+                            chunks,
+                        ),
+                        128,
+                    ),
                     ExactChunkPartial::Narrow16 | ExactChunkPartial::Narrow16Fused => (
                         "exact_chunk_partial_m16n16_bk16_s4",
                         (16, 16),
@@ -3209,6 +3222,17 @@ fn scalar_physical_nodes(
                         (32, 2),
                         (
                             checked_grid_product(rows.div_ceil(32), k.div_ceil(64), 1)?,
+                            1,
+                            chunks,
+                        ),
+                        128,
+                    ),
+                    ExactChunkPartial::Small16 => (
+                        "nt_exact_chunk_partial_m16n64",
+                        (16, 64),
+                        (32, 2),
+                        (
+                            checked_grid_product(rows.div_ceil(16), k.div_ceil(64), 1)?,
                             1,
                             chunks,
                         ),
@@ -10978,6 +11002,16 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
                     ),
                     128,
                 ),
+                ExactChunkPartial::Small16 => (
+                    &kernels.gemm_bi_exact_chunk_partial_m16n64,
+                    "exact_chunk_partial_m16n64",
+                    (
+                        checked_tile_grid(rows, 16, checked_dims.n_u32, 64)?,
+                        1,
+                        chunks,
+                    ),
+                    128,
+                ),
                 ExactChunkPartial::Narrow16 | ExactChunkPartial::Narrow16Fused => (
                     &kernels.gemm_bi_exact_chunk_partial_m16n16,
                     "exact_chunk_partial_m16n16_bk16_s4",
@@ -11003,7 +11037,7 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController, Output: ScalarOut
                     pb.arg(&n_i);
                     pb.arg(&k_chunk_i);
                 }
-                ExactChunkPartial::Small => {
+                ExactChunkPartial::Small | ExactChunkPartial::Small16 => {
                     pb.arg(&chunk_params);
                 }
                 ExactChunkPartial::Narrow16 | ExactChunkPartial::Narrow16Fused => {
@@ -12421,6 +12455,16 @@ fn gemm_bi_backward_dx_with_control<
                     ),
                     128,
                 ),
+                ExactChunkPartial::Small16 => (
+                    &kernels.gemm_bi_nt_exact_chunk_partial_m16n64,
+                    "nt_exact_chunk_partial_m16n64",
+                    (
+                        checked_tile_grid(rows, 16, checked_dims.k_u32, 64)?,
+                        1,
+                        chunks,
+                    ),
+                    128,
+                ),
                 ExactChunkPartial::Narrow16 | ExactChunkPartial::Narrow16Fused => (
                     &kernels.gemm_bi_nt_exact_chunk_partial_m16n16,
                     "nt_exact_chunk_partial_m16n16_bk16_s4",
@@ -12464,7 +12508,7 @@ fn gemm_bi_backward_dx_with_control<
                     pb.arg(&null_bias);
                     pb.arg(&slab_params);
                 }
-                ExactChunkPartial::Small => {
+                ExactChunkPartial::Small | ExactChunkPartial::Small16 => {
                     pb.arg(&w_ptr);
                     pb.arg(&chunk_params);
                 }
