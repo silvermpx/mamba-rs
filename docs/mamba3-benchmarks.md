@@ -12,6 +12,31 @@ model. They measure the implementation at the stated shapes, not model
 quality. For inference measurements using trained Mamba-1 checkpoints,
 see [mamba1-benchmarks.md](mamba1-benchmarks.md).
 
+## 0.8.1 to 0.8.2 (RTX 6000 Ada, RTX 5090, A100)
+
+`benches/m3_gpu_benchmark.rs`, 0.8.1 against 0.8.2, two runs a side in turn,
+the best of each side, in microseconds; `old/new` above 1 means 0.8.2 is
+faster. RTX 6000 Ada: the release tree, October 28. RTX 5090 and A100:
+October 27, on trees with the release's kernels for those architectures (the
+A100 tree predates the last SM80 rule). The model is the bench's default:
+d_model 128, 4 layers, 16 heads of 16, d_state 16.
+
+| step | value | RTX 6000 Ada | RTX 5090 | A100 |
+|---|---|---:|---:|---:|
+| GPU decode, eager | batch 1 | 142 -> 100 (1.41x) | 116 -> 90 (1.28x) | 294 -> 195 (1.51x) |
+|  | batch 4 | 145 -> 104 (1.39x) | 119 -> 91 (1.31x) | 303 -> 211 (1.44x) |
+|  | batch 16 | 150 -> 108 (1.39x) | 120 -> 92 (1.30x) | 316 -> 231 (1.37x) |
+|  | batch 64 | 165 -> 129 (1.28x) | 131 -> 97 (1.35x) | 351 -> 258 (1.36x) |
+| GPU decode, graph | batch 1 | 114 -> 73 (1.55x) | 107 -> 65 (1.65x) | 240 -> 139 (1.73x) |
+|  | batch 4 | 119 -> 79 (1.51x) | 109 -> 68 (1.61x) | 244 -> 158 (1.54x) |
+|  | batch 16 | 124 -> 83 (1.50x) | 113 -> 71 (1.60x) | 255 -> 167 (1.53x) |
+|  | batch 64 | 143 -> 102 (1.41x) | 125 -> 82 (1.53x) | 284 -> 196 (1.45x) |
+| GPU training, B=1 T=32 | forward | 705 -> 596 (1.18x) | 604 -> 526 (1.15x) | 1296 -> 1113 (1.16x) |
+|  | backward | 603 -> 382 (1.58x) | 450 -> 349 (1.29x) | 962 -> 716 (1.34x) |
+|  | forward and backward | 1308 -> 978 (1.34x) | 1058 -> 875 (1.21x) | 2259 -> 1830 (1.23x) |
+
+Every row is faster on all three cards.
+
 ## Whole steps, 0.7.5 to 0.8.0 (RTX 5090, CUDA 13.2)
 
 Measured on October 18 and 19, 2026 on a rented RTX 5090 (170 SMs, driver

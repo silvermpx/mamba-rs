@@ -9,10 +9,14 @@ and matches float64 references of the papers' models. The CUDA kernels
 are the crate's own, compiled at run time through NVRTC, and give the same
 bits on every run by default. There is no Python, no C++ build step and no
 framework underneath: the GPU path links only the CUDA driver API and
-cuBLAS.
+NVRTC, and cuBLAS only with the `cublas` feature.
 
 ## What's new in 0.8
 
+- **0.8.2: the same bits at any batch size.** Forward and input-gradient
+  GEMMs give each row the same bits whatever the batch, exact f32 gives the
+  same bits on every GPU architecture, and f32 decode runs 1.4 to 5 times
+  as fast as in 0.8.1. See the [changelog](CHANGELOG.md).
 - **Mamba-2 and Mamba-3 MIMO** join Mamba and Mamba-3 SISO. Both run on
   the CPU and the GPU, for inference and training, and load the official
   checkpoints. `state-spaces/mamba2-130m` and the Mamba-3 SISO and MIMO
@@ -362,24 +366,35 @@ not, and the architecture coverage are in
 
 ## Performance
 
-The four families side by side on an RTX 5090 (CUDA 13.2), 0.8.0: 4
+The four families side by side on an RTX 5090 (CUDA 13.2), 0.8.2: 4
 layers of d_model 768, heads of 64 x 128 for Mamba-2 and both forms of
-Mamba-3 (MIMO at rank 4), d_state 16 for Mamba, bf16 storage and the
-default `Deterministic` GEMM mode. A decode step runs through a captured
-graph, the prompt is one pass of 4096 tokens, and a training step is the
-forward, the backward and the AdamW update at batch 4 by 512 tokens.
+Mamba-3 (MIMO at rank 4), d_state 16 for Mamba, the default
+`Deterministic` GEMM mode. A decode step runs through a captured graph, the
+prompt is one pass of 4096 tokens, and a training step is the forward, the
+backward and the AdamW update at batch 4 by 512 tokens.
+
+bf16 storage:
 
 | family | decode, batch 1 | decode, batch 16 | prompt of 4096 | training step |
 |---|---:|---:|---:|---:|
-| Mamba | 134 us | 150 us | 1.47 M tokens/s | 6.4 ms |
-| Mamba-2 | 146 us | 180 us | 1.18 M tokens/s | 7.8 ms |
-| Mamba-3 SISO | 142 us | 268 us | 0.81 M tokens/s | 7.5 ms |
-| Mamba-3 MIMO | 136 us | 191 us | 0.33 M tokens/s | 26.5 ms |
+| Mamba | 137 us | 152 us | 1.69 M tokens/s | 5.88 ms |
+| Mamba-2 | 151 us | 183 us | 1.28 M tokens/s | 7.69 ms |
+| Mamba-3 SISO | 146 us | 276 us | 0.85 M tokens/s | 7.34 ms |
+| Mamba-3 MIMO | 139 us | 195 us | 0.32 M tokens/s | 26.98 ms |
 
-The f32 rows, the MIMO chunk lengths, the MIMO pair terms on the tensor
-cores and the protocol are on the [family page](docs/family-benchmarks.md).
-Against 0.7.5 on the same card, whole training and decode steps are in the
-[changelog](CHANGELOG.md) and on the [Mamba](docs/mamba1-benchmarks.md) and
+f32 storage:
+
+| family | decode, batch 1 | decode, batch 16 | prompt of 4096 | training step |
+|---|---:|---:|---:|---:|
+| Mamba | 114 us | 131 us | 0.93 M tokens/s | 8.55 ms |
+| Mamba-2 | 116 us | 206 us | 0.84 M tokens/s | 10.21 ms |
+| Mamba-3 SISO | 133 us | 291 us | 0.56 M tokens/s | 10.80 ms |
+| Mamba-3 MIMO | 108 us | 227 us | 0.28 M tokens/s | 32.59 ms |
+
+The comparison with 0.8.1 on an RTX 6000 Ada, an RTX 5090 and an A100, the
+MIMO chunk lengths, the MIMO pair terms on the tensor cores and the protocol
+are on the [family page](docs/family-benchmarks.md). The Mamba and Mamba-3
+benches of the same cards are on the [Mamba](docs/mamba1-benchmarks.md) and
 [Mamba-3 SISO](docs/mamba3-benchmarks.md) pages.
 
 ### GEMM kernels

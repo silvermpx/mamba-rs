@@ -176,8 +176,12 @@ No selection compares an SM count to a card's number any more (the
   until they have a first-use proof.
 - The Mamba scans and the shared kernels still let the driver's assembler
   fuse their plain arithmetic.
-- The SM90a and SM100 TF32 cohorts are empty: Hopper and datacenter
-  Blackwell run the portable ladder until a tournament on one of their cards.
+- SM90a and SM100 have no measured f32 and TF32 tables yet: Hopper and
+  datacenter Blackwell run the SM80 tables until a census on one of their
+  cards.
+- The cut tables of SM80, SM89 and SM120 were each measured on one card (an
+  A100, an RTX 6000 Ada and an RTX 5090) and still need a second card of
+  their architecture, preferably one with a different power limit.
 - The SM120 table comes from the tournament on an RTX PRO 6000. It has not
   yet been timed against the RTX 5090's own former winners (rule 6); three
   shapes the 5090 had cells for are now served below the table.

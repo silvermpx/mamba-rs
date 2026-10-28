@@ -13,6 +13,40 @@ current kernel comparisons against cuBLAS are in
 [determinism-benchmarks.md](determinism-benchmarks.md) and the modes in
 [gemm-modes.md](gemm-modes.md).
 
+## 0.8.1 to 0.8.2 (RTX 6000 Ada, RTX 5090, A100)
+
+`benches/m1_gpu_benchmark.rs`, 0.8.1 against 0.8.2, two runs a side in turn,
+the best of each side, in microseconds; `old/new` above 1 means 0.8.2 is
+faster. RTX 6000 Ada: the release tree, October 28. RTX 5090 and A100:
+October 27, on trees with the release's kernels for those architectures (the
+A100 tree predates the last SM80 rule). The model is the bench's default:
+d_model 128, 3 layers, d_inner 256, d_state 16.
+
+| step | value | RTX 6000 Ada | RTX 5090 | A100 |
+|---|---|---:|---:|---:|
+| GPU decode, eager | batch 1 | 139 -> 88 (1.58x) | 119 -> 81 (1.48x) | 299 -> 162 (1.85x) |
+|  | batch 4 | 142 -> 94 (1.50x) | 126 -> 81 (1.57x) | 313 -> 186 (1.68x) |
+|  | batch 16 | 148 -> 90 (1.65x) | 130 -> 84 (1.55x) | 323 -> 195 (1.66x) |
+|  | batch 64 | 155 -> 106 (1.46x) | 134 -> 85 (1.58x) | 331 -> 219 (1.51x) |
+|  | batch 128 | 173 -> 125 (1.39x) | 144 -> 90 (1.60x) | 373 -> 255 (1.46x) |
+| GPU decode, graph | batch 1 | 119 -> 69 (1.74x) | 113 -> 61 (1.86x) | 259 -> 126 (2.05x) |
+|  | batch 4 | 123 -> 72 (1.71x) | 120 -> 66 (1.80x) | 267 -> 147 (1.82x) |
+|  | batch 16 | 128 -> 75 (1.72x) | 123 -> 68 (1.80x) | 280 -> 154 (1.82x) |
+|  | batch 64 | 138 -> 87 (1.59x) | 128 -> 73 (1.75x) | 290 -> 170 (1.70x) |
+|  | batch 128 | 160 -> 108 (1.49x) | 140 -> 85 (1.64x) | 319 -> 206 (1.55x) |
+| GPU training, B=1 T=32 | forward | 511 -> 518 (0.99x) | 389 -> 373 (1.04x) | 990 -> 980 (1.01x) |
+|  | forward and backward | 1276 -> 1240 (1.03x) | 956 -> 910 (1.05x) | 2428 -> 2366 (1.03x) |
+| CPU decode | batch 1 | 92.4 -> 104.4 (0.89x) | 50.2 -> 54.2 (0.93x) | 97.6 -> 108.3 (0.90x) |
+| CPU training, B=1 T=32 | forward | 2772 -> 2895 (0.96x) | 1498 -> 1470 (1.02x) | 3192 -> 3243 (0.98x) |
+|  | forward and backward | 8155 -> 8531 (0.96x) | 4483 -> 4410 (1.02x) | 10208 -> 10322 (0.99x) |
+
+The CPU rows run the CPU code of 0.8.1, which this release does not change.
+The CPU decode step still came out 0.89x to 0.93x in this bench on all three
+cards. Timed alone in a process without a GPU model, both releases take the
+same time (95.0 and 96.5 us on the RTX 6000 Ada, four runs each); in a
+process that also runs a GPU model, 0.8.2 took about 5 percent longer, which
+the CPU code does not explain.
+
 ## Whole steps, 0.7.5 to 0.8.0 (RTX 5090, CUDA 13.2)
 
 Measured on October 18 and 19, 2026 on a rented RTX 5090 (170 SMs, driver

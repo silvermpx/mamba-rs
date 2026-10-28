@@ -1,5 +1,59 @@
 # GEMM benchmarks
 
+## 0.8.2
+
+Measured effects of the 0.8.2 GEMM changes. Each row gives the change, the
+card it was measured on, and the time after the change relative to the
+time before it (below 1 is faster). The bits do not change unless the row
+says so. Whole-model timings are in the
+[family benchmarks](family-benchmarks.md).
+
+Exact f32:
+
+| Change | Measured on | Effect |
+|---|---|---|
+| A split weight gradient adds its pieces in f32 instead of double (bits change) | RTX 5090 | 13-17 us to 4-7 us per call |
+| A forward of 512 inputs or more is cut into 128-input pieces | RTX 6000 Ada, 779 cut products | 0.94 of four pieces per layer (64-input pieces 0.97, 256-input 0.98) |
+| A cut input gradient runs as the forward of its transposed weight, pieces folded in registers | RTX 6000 Ada, cut input gradients of the census | 0.62-0.65 |
+| The 16 x 16 partial spreads the pieces over 8 times the blocks on small grids | RTX 6000 Ada, 510 cut products of 2-255 rows | 0.84; 32 rows of a 256 x 2112 layer, input gradient: 0.27 |
+| New 32 x 64 tile that stages both operands in 16-byte words | RTX 6000 Ada | 0.50-0.86 of the 16 x 16 tile |
+| A thin cut layer folds its partial planes in the same launch | RTX 6000 Ada, 64-row layers | 0.90 |
+| Large exact forwards take the 128 x 128 tile | RTX 6000 Ada | 4096 x 256 x 2112: 200 to 110 us |
+| SM89 tables refit from routes timed alone, new 16 x 64 partial | RTX 6000 Ada, 788 cut products | 143 changed route, each 0.39-0.99, none slower |
+| SM89 weight gradients with row chunks under 512 rows take the direct 64 x 64 partial | RTX 6000 Ada | 0.28-0.86; 256 x 256 over 1024 rows: 54 to 15 us |
+| SM120 exact kernels serve more products, short pieces added in one block | RTX PRO 6000, about 400 products | 0.90-0.93; thin products down to 0.5 |
+| SM120 fold kernels keep the running sum in a second register set | RTX 5090, large cut products | within 2.5 percent of one uncut chain (was 7.4 percent slower) |
+| SM120 deals a cut layer's pieces two to a block | RTX 5090, 156 cut layers | 0.77-0.98; out_proj of a 768-wide model over 2048 rows: forward 127 to 120 us, input gradient 131 to 119, weight gradient 107 to 99 |
+| SM120 weight gradients fold their batch chunks in one block | RTX 5090 | 0.82-0.98 |
+| A thin uncut input gradient (16-112 outputs) runs on the 32 x 64 tile | RTX 5090 | 2048 x 1536 over 80 outputs: 41.8 to 19.9 us |
+| SM80 64 x 64 slab tile with the pieces' sum in registers | A100, training forwards of a 768-wide model over 2048-4096 rows | 0.83-0.99 |
+| SM80 tables refit by the last wave of each grid | A100, 333 cut products | 143 changed route: forwards 0.94, input gradients 0.88 |
+| Narrow weight gradients (2-127 outputs) split their batch | RTX 5090 | 384 x 101 over 1024 rows: 33 to 10 us |
+| A slim input gradient | RTX 5090, RTX 6000 Ada | about 0.5 |
+| An input gradient's last 1-31 columns run in one launch | RTX 5090 | 833 x 384 over 64 rows: 20.0 to 11.8 us; over 1024 rows: 54 to 22.6 us |
+| An input gradient over 1024-1535 outputs takes fewer, longer pieces (bits change) | RTX 6000 Ada, 72 shapes; RTX 5090 | Ada: 59 shapes about 0.5, none slower; 5090: 0.73, two narrow shapes 1.04 and 1.08 |
+
+TF32:
+
+| Change | Measured on | Effect |
+|---|---|---|
+| Pieces in an outer loop, a piece's slabs in an inner one | RTX 6000 Ada, cut layers | within 6 percent of the one-chain tile (was 8-25 percent slower) |
+| SM89 multistage, two-warp and four-byte tiles | RTX 6000 Ada | 0.55-0.77 of the former routes |
+| SM89 tables refit from routes timed alone | RTX 6000 Ada, 788 cut products | 71 changed route: forwards 0.85, input gradients 0.69, none slower |
+| SM120 one-chain tables | RTX 5090 and RTX PRO 6000, 552 products | none slower than the plain table; the persistent forward tile up to 13 percent faster on tall layers (RTX 5090) |
+
+Half precision and TF32 weight gradients:
+
+| Change | Measured on | Effect |
+|---|---|---|
+| Stream-K parts added after the whole grid has published them, on fixed workers (bits change) | RTX 5090 and RTX PRO 6000 | 0.55-0.79; 128 x 128 bf16 over 8192 rows: 127 to 15 us |
+
+The GEMMs of a training step alone (`gemm_bi_trainer_step_bench`, 56 values,
+geometric mean of 0.8.1 time over 0.8.2 time): RTX 6000 Ada 1.07x, RTX 5090
+1.07x, A100 1.06x.
+
+## Earlier releases
+
 The [0.7.1 Ada measurements](gemm-benchmarks-0.7.1-ada.md) compare the
 assembled Inference and Triad dispatchers with the released 0.7.0 source,
 including eager execution, CUDA Graph replay and cuBLAS controls. The
