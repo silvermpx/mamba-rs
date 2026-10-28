@@ -219,48 +219,59 @@ the same scan kernels also ran about 7 percent faster, took 4.25.
 
 Measured on October 28, 2026 on an RTX 6000 Ada Generation (142 SMs, 300 W
 power limit, driver 615.71.10, CUDA 13.2 / NVRTC 13.2, Rust 1.99.1, release
-build, Intel Xeon Gold 5412U host), on the release tree. The two trees ran
-in turn, four runs each, and each cell is the median of its four runs.
+build, Intel Xeon Gold 5412U host), on the release tree with nothing else on
+the card. The two trees ran in turn, four runs each, and each cell is the
+median of its four runs.
 
 bf16 storage, 0.8.1 -> 0.8.2 (speedup):
 
 | family | decode, batch 1 | decode, batch 16 | prompt of 4096 | training step |
 |---|---:|---:|---:|---:|
-| Mamba | 160 -> 160 us (1.00x) | 200 -> 199 us (1.00x) | 0.94 -> 0.96 M tokens/s (1.03x) | 8.67 -> 7.80 ms (1.11x) |
-| Mamba-2 | 153 -> 156 us (0.99x) | 209 -> 208 us (1.01x) | 0.79 -> 0.86 M tokens/s (1.09x) | 10.70 -> 10.29 ms (1.04x) |
-| Mamba-3 SISO | 159 -> 160 us (1.00x) | 446 -> 450 us (0.99x) | 0.55 -> 0.52 M tokens/s (0.95x) | 10.62 -> 10.66 ms (1.00x) |
-| Mamba-3 MIMO | 145 -> 145 us (1.00x) | 233 -> 230 us (1.02x) | 0.24 -> 0.24 M tokens/s (0.99x) | 38.80 -> 39.28 ms (0.99x) |
+| Mamba | 146 -> 155 us (0.94x) | 191 -> 192 us (0.99x) | 1.25 -> 1.25 M tokens/s (1.00x) | 8.27 -> 7.80 ms (1.06x) |
+| Mamba-2 | 142 -> 151 us (0.94x) | 197 -> 198 us (1.00x) | 0.94 -> 0.93 M tokens/s (0.99x) | 9.64 -> 9.60 ms (1.00x) |
+| Mamba-3 SISO | 154 -> 155 us (1.00x) | 431 -> 434 us (0.99x) | 0.61 -> 0.60 M tokens/s (0.99x) | 10.08 -> 10.11 ms (1.00x) |
+| Mamba-3 MIMO | 144 -> 144 us (1.00x) | 223 -> 222 us (1.01x) | 0.25 -> 0.25 M tokens/s (1.00x) | 38.36 -> 38.38 ms (1.00x) |
 
 f32 storage, 0.8.1 -> 0.8.2 (speedup):
 
 | family | decode, batch 1 | decode, batch 16 | prompt of 4096 | training step |
 |---|---:|---:|---:|---:|
-| Mamba | 610 -> 142 us (4.30x) | 658 -> 192 us (3.43x) | 0.52 -> 0.57 M tokens/s (1.11x) | 15.30 -> 13.82 ms (1.11x) |
-| Mamba-2 | 412 -> 140 us (2.96x) | 532 -> 316 us (1.68x) | 0.48 -> 0.51 M tokens/s (1.08x) | 14.78 -> 15.07 ms (0.98x) |
-| Mamba-3 SISO | 436 -> 164 us (2.66x) | 745 -> 516 us (1.44x) | 0.32 -> 0.33 M tokens/s (1.04x) | 17.70 -> 17.20 ms (1.03x) |
-| Mamba-3 MIMO | 407 -> 134 us (3.05x) | 567 -> 360 us (1.58x) | 0.19 -> 0.19 M tokens/s (1.01x) | 49.48 -> 49.73 ms (0.99x) |
+| Mamba | 604 -> 140 us (4.32x) | 609 -> 179 us (3.40x) | 0.57 -> 0.62 M tokens/s (1.09x) | 14.79 -> 13.86 ms (1.07x) |
+| Mamba-2 | 406 -> 137 us (2.97x) | 524 -> 310 us (1.69x) | 0.48 -> 0.54 M tokens/s (1.11x) | 14.25 -> 14.37 ms (0.99x) |
+| Mamba-3 SISO | 431 -> 160 us (2.70x) | 726 -> 505 us (1.44x) | 0.35 -> 0.35 M tokens/s (1.02x) | 16.67 -> 16.73 ms (1.00x) |
+| Mamba-3 MIMO | 379 -> 131 us (2.90x) | 558 -> 348 us (1.60x) | 0.20 -> 0.20 M tokens/s (1.04x) | 48.84 -> 48.86 ms (1.00x) |
 
-The prompt of 4096 tokens moves by up to 15 percent between runs of one
-tree in this bench. Run again with the tree of October 27 between the two,
-three runs each, Mamba-3 SISO's bf16 prompt took 0.54 M tokens/s on 0.8.1,
-0.52 on that tree and 0.53 on the release, so its 0.95x above is the
-bench's spread, not a slower kernel. The batch-1 decode lands on two levels
-about 10 microseconds apart from run to run, on both trees. The f32 training
-step varies by about 2 percent between runs of one tree in this bench; the
-probe over the public trainer, in rotated order, four runs each, the
-minimum of each, `old/new` above 1 meaning 0.8.2 is faster:
+The batch-1 decode lands on two levels about 10 microseconds apart from run
+to run, on both trees. In bf16 the fastest runs of the two trees agree within
+0.3 microseconds (Mamba 145.5 and 145.6, Mamba-2 140.7 and 140.8, Mamba-3
+SISO 144.5 and 144.8), and the 0.94x of Mamba and Mamba-2 above counts the
+runs that landed on the upper level, three of 0.8.2's four against none and
+one of 0.8.1's, not a slower step; Mamba-3 SISO's runs split one to three on
+both trees. The prompt of 4096 tokens moves by up to 20 percent between runs
+of one tree (Mamba-2 in f32 on 0.8.1: 0.48 to 0.57 M tokens/s).
+
+The bench's training step is the median of seven steps right after the
+model is built. The probe over the public trainer takes the mean of 240
+steps at batch 4 by 512 tokens, 120 at 8 and 60 at 16 (a third as many for
+MIMO), in rotated order, four runs each, the minimum of each, `old/new`
+above 1 meaning 0.8.2 is faster:
 
 | family | batch 4 by 512 | batch 8 by 512 | batch 16 by 512 |
 |---|---:|---:|---:|
-| Mamba | 1.101x | 1.082x | 1.035x |
-| Mamba-2 | 0.982x | 0.988x | 1.022x |
-| Mamba-3 SISO | 1.015x | 0.978x | 1.008x |
-| Mamba-3 MIMO | 1.001x | 0.997x | 1.004x |
+| Mamba | 1.059x | 1.018x | 1.019x |
+| Mamba-2 | 1.013x | 1.009x | 1.016x |
+| Mamba-3 SISO | 1.015x | 1.001x | 1.011x |
+| Mamba-3 MIMO | 0.999x | 1.001x | 1.004x |
 
-The medians of the same runs agree within 3.8 percent (Mamba at batch 8:
-1.044x). Two 0.8.2 trees whose steps run the same kernels differed by up to
-2 percent in this probe (Mamba-2 at batch 4), which bounds what the table
-can tell apart.
+At batch 4 the runs of one tree spread by up to 5.6 percent, at 8 and 16 by
+at most 1 percent, and the medians of the same runs agree with the minima
+within 1.1 percent. Mamba-2's f32 step is where the two disagree: 0.8
+percent slower over the bench's seven steps, 1.3 percent faster over the
+probe's 240. Profiled inside the bench, its kernels take 13.23 ms a step on
+0.8.1 and 13.24 on 0.8.2; the difference is the copy of the step's 12.6 MB
+of inputs from pageable host memory, which ran at 20 and 16 GB/s in those
+two profiles and anywhere from 8 to 25 GB/s across the bench's eight
+trainers on either tree.
 
 Under f32 training this card runs at its 300 W limit, where the clock sets
 the pace and a kernel that moves more bytes per multiply-add slows the whole
