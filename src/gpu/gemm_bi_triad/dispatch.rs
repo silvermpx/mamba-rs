@@ -3131,17 +3131,22 @@ const TF32_CHAIN_SM120: Tf32ChainRules = Tf32ChainRules {
 /// time in geometric mean (up to 4.4 and 2.3 times): the persistent 128 x 64
 /// tile ran forwards of 2048 to 8192 rows in up to 0.87 of the multistage
 /// tiles' time, and the 64 x 128 tile ran 61440 rows into 128 outputs in 0.71
-/// of the 64 x 64 tile's.
+/// of the 64 x 64 tile's. A census of every one-chain tile timed alone over
+/// the 723 uncut cells on an A100 PCIe (250 W) moved two shares: the
+/// multistage 128 x 64 forward from six waves of its grid (3136 to 4621 rows
+/// into 1536 to 2112 outputs over 256 to 384 inputs in 0.94 to 0.97 of the
+/// 64 x 64 tile's time) and the 128 x 128 input gradient from two thirds of a
+/// wave, none slower.
 const TF32_CHAIN_SM80: Tf32ChainRules = Tf32ChainRules {
     forward_narrow_columns: 0,
     forward_wide: Some(WaveShare::new(12, 1)),
     forward_narrow_wide: Some(WaveShare::new(8, 1)),
     forward_persist: Some(WaveShare::new(4, 3)),
     forward_persist_reduction: 384,
-    forward_ms128: Some(WaveShare::new(16, 1)),
+    forward_ms128: Some(WaveShare::new(6, 1)),
     forward_ms64: Some(WaveShare::new(1, 3)),
     forward_ms64_work: None,
-    gradient_ms128x128: Some(WaveShare::new(3, 4)),
+    gradient_ms128x128: Some(WaveShare::new(2, 3)),
     gradient_ms64x128: Some(WaveShare::new(2, 1)),
     gradient_ms64: Some(WaveShare::new(1, 2)),
     gradient_thin_rows: 0,
