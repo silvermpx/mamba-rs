@@ -189,8 +189,8 @@ const GEMM_SOURCES: &[(&str, u64, usize)] = &[
     ),
     (
         "kernels/gemm_bi_triad/scalar_nn_m64n64_bk32.cu",
-        0x28904483a9bd1f01,
-        11405,
+        0x4f7c6140d7f93da2,
+        19090,
     ),
     (
         "kernels/gemm_bi_triad/scalar_nn_splitk_m32n64.cu",

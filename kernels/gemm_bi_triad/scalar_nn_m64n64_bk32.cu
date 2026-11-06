@@ -51,6 +51,36 @@
         asm volatile("cp.async.commit_group;\n");                                           \
     } while (0)
 
+// The same slab by a copy plan each thread fixes once, for a reduction of whole
+// 32-deep slabs: its four copies of A and four of B land where the copies above
+// put them, so the slab holds the same values, and only two source addresses
+// advance from slab to slab. A row or column past the edge copies nothing and
+// fills zeros, reading the operand's base address.
+#define EXACT_NN_M64N64_BK32_STAGE_PLANNED(BUFFER)                                           \
+    do {                                                                                     \
+        unsigned _stage = (unsigned)(BUFFER)                                                 \
+                        * (EXACT_NN_M64N64_BK32_BM * EXACT_NN_M64N64_BK32_BK * 4);           \
+        _Pragma("unroll")                                                                    \
+        for (int _i = 0; _i < 4; ++_i) {                                                     \
+            unsigned _dst = a_destination + _stage + (unsigned)(_i * 2048);                  \
+            unsigned long long _source = a_bytes[_i] > 0                                     \
+                ? a_next + (unsigned long long)_i * a_vector_stride                          \
+                : reinterpret_cast<unsigned long long>(A);                                   \
+            asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n"                  \
+                         :: "r"(_dst), "l"(_source), "r"(a_bytes[_i]));                      \
+        }                                                                                    \
+        _Pragma("unroll")                                                                    \
+        for (int _i = 0; _i < 4; ++_i) {                                                     \
+            unsigned _dst = b_destination + _stage + (unsigned)(_i * 2048);                  \
+            unsigned long long _source = b_bytes > 0                                         \
+                ? b_next + (unsigned long long)_i * b_vector_stride                          \
+                : reinterpret_cast<unsigned long long>(B);                                   \
+            asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n"                  \
+                         :: "r"(_dst), "l"(_source), "r"(b_bytes));                          \
+        }                                                                                    \
+        asm volatile("cp.async.commit_group;\n");                                           \
+    } while (0)
+
 // The same slab by plain loads, for operands the 16-byte copies cannot read.
 #define EXACT_NN_M64N64_BK32_STAGE_SCALAR(BUFFER, K_TILE)                                    \
     do {                                                                                     \
@@ -70,6 +100,44 @@
             int _gc = col0 + _c;                                                             \
             smem_b[(BUFFER)][_i] = (_gr < K && _gc < N) ? B[(long long)_gr * ldb + _gc] : 0.0f; \
         }                                                                                    \
+    } while (0)
+
+// One staged slab into the accumulators, then, where the slab closes a piece,
+// the piece's chain added in order to the kept sum and restarted from +0.0.
+#define EXACT_NN_M64N64_BK32_SLAB_AND_FOLD()                                                 \
+    do {                                                                                     \
+        _Pragma("unroll")                                                                    \
+        for (int kk = 0; kk < EXACT_NN_M64N64_BK32_BK; kk++) {                               \
+            float a_reg[8];                                                                  \
+            float b_reg[4];                                                                  \
+            _Pragma("unroll")                                                                \
+            for (int i = 0; i < 8; i++) {                                                    \
+                a_reg[i] = smem_a[read_buf][(ty * 8 + i) * EXACT_NN_M64N64_BK32_BK + kk];    \
+            }                                                                                \
+            _Pragma("unroll")                                                                \
+            for (int j = 0; j < 4; j++) {                                                    \
+                b_reg[j] = smem_b[read_buf][kk * EXACT_NN_M64N64_BK32_BN + tx * 4 + j];      \
+            }                                                                                \
+            _Pragma("unroll")                                                                \
+            for (int i = 0; i < 8; i++) {                                                    \
+                _Pragma("unroll")                                                            \
+                for (int j = 0; j < 4; j++) {                                                \
+                    acc[i][j] = __fmaf_rn(a_reg[i], b_reg[j], acc[i][j]);                    \
+                }                                                                            \
+            }                                                                                \
+        }                                                                                    \
+        if (kt + 1 == fold_slab && fold_slab < num_k_tiles) {                                \
+            _Pragma("unroll")                                                                \
+            for (int i = 0; i < 8; i++) {                                                    \
+                _Pragma("unroll")                                                            \
+                for (int j = 0; j < 4; j++) {                                                \
+                    kept[i][j] = __fadd_rn(kept[i][j], acc[i][j]);                           \
+                    acc[i][j] = 0.0f;                                                        \
+                }                                                                            \
+            }                                                                                \
+            fold_slab += piece_slabs;                                                        \
+        }                                                                                    \
+        read_buf ^= 1;                                                                       \
     } while (0)
 
 // The bias follows the pieces unscaled, so a bias comes with alpha 1.
@@ -121,63 +189,78 @@ void nn_m64n64_bk32_pieces_keep(
     int piece_slabs = piece_tiles / 2;
     int fold_slab = piece_slabs;
     bool async_stage = is_aligned_16(A) && is_aligned_16(B) && (lda & 3) == 0 && (ldb & 3) == 0;
-    if (num_k_tiles > 0) {
-        if (async_stage) {
-            EXACT_NN_M64N64_BK32_STAGE_ASYNC(0, 0);
-        } else {
-            EXACT_NN_M64N64_BK32_STAGE_SCALAR(0, 0);
-        }
-    }
     int read_buf = 0;
-    for (int kt = 0; kt < num_k_tiles; kt++) {
-        if (async_stage) {
+    if (num_k_tiles > 0 && async_stage && (K & (EXACT_NN_M64N64_BK32_BK - 1)) == 0) {
+        // Each thread copies the A rows tid / 8 + 16 i at the columns
+        // (tid % 8) * 4 of a slab and the B rows tid / 16 + 8 i at the columns
+        // (tid % 16) * 4: the 16-byte vectors the generic copies give it.
+        const int tid = (int)threadIdx.x;
+        const int copy_a_row = row0 + tid / (EXACT_NN_M64N64_BK32_BK / 4);
+        const int copy_a_col = (tid % (EXACT_NN_M64N64_BK32_BK / 4)) * 4;
+        const int copy_b_row = tid / (EXACT_NN_M64N64_BK32_BN / 4);
+        const int copy_b_col = col0 + (tid % (EXACT_NN_M64N64_BK32_BN / 4)) * 4;
+        int a_bytes[4];
+#pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            a_bytes[i] = copy_a_row + i * 16 < M ? 16 : 0;
+        }
+        const int b_left = N - copy_b_col;
+        const int b_bytes = b_left >= 4 ? 16 : (b_left > 0 ? b_left * 4 : 0);
+        const unsigned a_destination =
+            (unsigned)__cvta_generic_to_shared(&smem_a[0][0]) + (unsigned)(tid * 16);
+        const unsigned b_destination =
+            (unsigned)__cvta_generic_to_shared(&smem_b[0][0]) + (unsigned)(tid * 16);
+        const unsigned long long a_vector_stride = (unsigned long long)lda * 64ULL;
+        const unsigned long long b_vector_stride = (unsigned long long)ldb * 32ULL;
+        const unsigned long long b_slab_stride = b_vector_stride * 4ULL;
+        // Integer addresses, so no pointer is formed for a masked row or
+        // column; the copies of those read the operand's base instead.
+        unsigned long long a_next = reinterpret_cast<unsigned long long>(A)
+            + ((unsigned long long)copy_a_row * (unsigned long long)lda
+               + (unsigned long long)copy_a_col) * 4ULL;
+        unsigned long long b_next = reinterpret_cast<unsigned long long>(B)
+            + ((unsigned long long)copy_b_row * (unsigned long long)ldb
+               + (unsigned long long)copy_b_col) * 4ULL;
+        EXACT_NN_M64N64_BK32_STAGE_PLANNED(0);
+        a_next += EXACT_NN_M64N64_BK32_BK * 4ULL;
+        b_next += b_slab_stride;
+        for (int kt = 0; kt < num_k_tiles; kt++) {
             asm volatile("cp.async.wait_group 0;\n");
+            // Both the copies' visibility across warps and the previous
+            // slab's consumption finish before a buffer is read or refilled.
+            __syncthreads();
+            if (kt + 1 < num_k_tiles) {
+                EXACT_NN_M64N64_BK32_STAGE_PLANNED(read_buf ^ 1);
+                a_next += EXACT_NN_M64N64_BK32_BK * 4ULL;
+                b_next += b_slab_stride;
+            }
+            EXACT_NN_M64N64_BK32_SLAB_AND_FOLD();
         }
-        // Both the copies' visibility across warps and the previous slab's
-        // consumption finish before a buffer is read or refilled.
-        __syncthreads();
-        if (kt + 1 < num_k_tiles) {
-            int next_k = (kt + 1) * EXACT_NN_M64N64_BK32_BK;
+    } else {
+        if (num_k_tiles > 0) {
             if (async_stage) {
-                EXACT_NN_M64N64_BK32_STAGE_ASYNC(read_buf ^ 1, next_k);
+                EXACT_NN_M64N64_BK32_STAGE_ASYNC(0, 0);
             } else {
-                EXACT_NN_M64N64_BK32_STAGE_SCALAR(read_buf ^ 1, next_k);
+                EXACT_NN_M64N64_BK32_STAGE_SCALAR(0, 0);
             }
         }
-#pragma unroll
-        for (int kk = 0; kk < EXACT_NN_M64N64_BK32_BK; kk++) {
-            float a_reg[8];
-            float b_reg[4];
-#pragma unroll
-            for (int i = 0; i < 8; i++) {
-                a_reg[i] = smem_a[read_buf][(ty * 8 + i) * EXACT_NN_M64N64_BK32_BK + kk];
+        for (int kt = 0; kt < num_k_tiles; kt++) {
+            if (async_stage) {
+                asm volatile("cp.async.wait_group 0;\n");
             }
-#pragma unroll
-            for (int j = 0; j < 4; j++) {
-                b_reg[j] = smem_b[read_buf][kk * EXACT_NN_M64N64_BK32_BN + tx * 4 + j];
-            }
-#pragma unroll
-            for (int i = 0; i < 8; i++) {
-#pragma unroll
-                for (int j = 0; j < 4; j++) {
-                    acc[i][j] = __fmaf_rn(a_reg[i], b_reg[j], acc[i][j]);
+            // Both the copies' visibility across warps and the previous
+            // slab's consumption finish before a buffer is read or refilled.
+            __syncthreads();
+            if (kt + 1 < num_k_tiles) {
+                int next_k = (kt + 1) * EXACT_NN_M64N64_BK32_BK;
+                if (async_stage) {
+                    EXACT_NN_M64N64_BK32_STAGE_ASYNC(read_buf ^ 1, next_k);
+                } else {
+                    EXACT_NN_M64N64_BK32_STAGE_SCALAR(read_buf ^ 1, next_k);
                 }
             }
+            EXACT_NN_M64N64_BK32_SLAB_AND_FOLD();
         }
-        if (kt + 1 == fold_slab && fold_slab < num_k_tiles) {
-            // The piece's chain is added to the kept sum in order, and the
-            // chain restarts from +0.0.
-#pragma unroll
-            for (int i = 0; i < 8; i++) {
-#pragma unroll
-                for (int j = 0; j < 4; j++) {
-                    kept[i][j] = __fadd_rn(kept[i][j], acc[i][j]);
-                    acc[i][j] = 0.0f;
-                }
-            }
-            fold_slab += piece_slabs;
-        }
-        read_buf ^= 1;
     }
 
     // The last piece meets the earlier pieces' sum, then the bias: the order
@@ -208,7 +291,9 @@ void nn_m64n64_bk32_pieces_keep(
     }
 }
 
+#undef EXACT_NN_M64N64_BK32_SLAB_AND_FOLD
 #undef EXACT_NN_M64N64_BK32_STAGE_SCALAR
+#undef EXACT_NN_M64N64_BK32_STAGE_PLANNED
 #undef EXACT_NN_M64N64_BK32_STAGE_ASYNC
 #undef EXACT_NN_M64N64_BK32_GROUP_M
 #undef EXACT_NN_M64N64_BK32_THREADS
