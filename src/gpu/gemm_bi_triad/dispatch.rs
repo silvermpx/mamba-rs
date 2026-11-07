@@ -3108,7 +3108,14 @@ struct Tf32ChainRules {
 /// to Ada there, was the fastest route of 200 of the forwards, and the
 /// 144 x 96 tile ran 512 to 768 rows over 768 inputs up to 2.9 times slower
 /// than the multistage 64 x 64 one, which also ran 0.7 to 0.9 of the SM120
-/// TMA 64 x 64 tile's time wherever the table had named that tile).
+/// TMA 64 x 64 tile's time wherever the table had named that tile). A census
+/// of every one-chain tile timed alone over the 723 uncut cells on an RTX
+/// 5090 at its stock 575 W kept the forwards and moved the input gradients
+/// off the 128 x 128 and 64 x 128 tiles (8192 rows into 1536 to 2112 inputs
+/// over 128 to 384 outputs in 0.86 to 0.99 of their time on the 64 x 64 tile)
+/// and the thin ones off the portable 16 x 16 tile (16 and 32 rows over 384
+/// outputs in 0.67 of its time on the multistage 16 x 32 tile): 18 cells by
+/// more than 3%, none slower.
 const TF32_CHAIN_SM120: Tf32ChainRules = Tf32ChainRules {
     forward_narrow_columns: 16,
     forward_wide: Some(WaveShare::new(8, 1)),
@@ -3118,10 +3125,10 @@ const TF32_CHAIN_SM120: Tf32ChainRules = Tf32ChainRules {
     forward_ms128: Some(WaveShare::new(4, 3)),
     forward_ms64: Some(WaveShare::new(1, 2)),
     forward_ms64_work: Some(WaveShare::new(16, 1)),
-    gradient_ms128x128: Some(WaveShare::new(4, 1)),
-    gradient_ms64x128: Some(WaveShare::new(8, 1)),
+    gradient_ms128x128: None,
+    gradient_ms64x128: None,
     gradient_ms64: Some(WaveShare::new(1, 3)),
-    gradient_thin_rows: 48,
+    gradient_thin_rows: 0,
 };
 
 /// SM80, from the same census on an A100 (SXM4, 108 SMs) over the census's
@@ -3825,13 +3832,26 @@ fn rna_blackwell_backward_table(
         if small_layer || columns < 128 {
             return portable(Tf32PortableTile::M16N32, Tf32PortableStages::S4);
         }
+        // The pre-rounded tiles copy their input once before the chain; a
+        // grid of them under a third of a wave leaves most of the card idle,
+        // where the portable 16 x 32 tile's eight to twelve times the CTAs
+        // fill it: over the 208 such weight gradients of an RTX 5090 census
+        // it ran in 0.65 of their time in geometric mean, none slower.
         if rna_pre_tn_admits(request, operands, availability) {
-            return if reduction >= 256
-                && rna_pre_tn_wide_pays(rows, columns, availability.multiprocessors as usize)
-            {
-                Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2
+            let sms = availability.multiprocessors as usize;
+            let (route, tile_columns) =
+                if reduction >= 256 && rna_pre_tn_wide_pays(rows, columns, sms) {
+                    (Tf32PhysicalRoute::Sm89TnPreRnaM64N96S2, 96)
+                } else {
+                    (Tf32PhysicalRoute::Sm89TnPreRnaM64N64, 64)
+                };
+            let tiles = rows
+                .div_ceil(64)
+                .saturating_mul(columns.div_ceil(tile_columns));
+            return if WaveShare::new(1, 3).covered(tiles, sms) {
+                route
             } else {
-                Tf32PhysicalRoute::Sm89TnPreRnaM64N64
+                portable(Tf32PortableTile::M16N32, Tf32PortableStages::S4)
             };
         }
         return if rows < RNA_NT_NARROW_ROWS {
@@ -5347,13 +5367,18 @@ fn sm120_layer_takes_cut((rows, columns): (usize, usize), multiprocessors: u32) 
     )
 }
 
-/// The tile a cut forward folds on in the SM120 layer kernels: the 64 x 128
-/// tile while its layer's 128 x 64 tiles stay under eight waves of the card,
-/// where the wider rows of the 128 x 64 tile lost to its shorter grid, and
-/// the 128 x 64 tile past them.
+/// The tile a cut forward folds on in the SM120 layer kernels: the 128 x 64
+/// tile wherever its 128-row tiles pad the rows no more than 64-row tiles
+/// do, and past eight waves of its grid; the 64 x 128 tile otherwise. On an
+/// RTX 5090 at its stock 575 W the 128 x 64 tile ran the layers whose rows
+/// are whole 128-row tiles in 0.94 to 0.99 of the 64 x 128 tile's time (2048
+/// rows into 768 outputs over 1536 inputs in 0.95) and none slower, where
+/// 129 and 4621 rows ran up to 1.31 times it.
 fn sm120_layer_forward_tile((rows, columns): (usize, usize), multiprocessors: u32) -> Sm120FmaTile {
     let tiles = rows.div_ceil(128).saturating_mul(columns.div_ceil(64));
-    if WaveShare::new(8, 1).covered(tiles, multiprocessors as usize) {
+    if rows.div_ceil(128) * 128 == rows.div_ceil(64) * 64
+        || WaveShare::new(8, 1).covered(tiles, multiprocessors as usize)
+    {
         Sm120FmaTile::M128N64
     } else {
         Sm120FmaTile::M64N128
@@ -9705,9 +9730,6 @@ pub(super) enum KmBesideSlim {
     Always,
     /// Nowhere: the slim partial keeps every layer it covers.
     Never,
-    /// While the layer's outputs reach its rows; a batch taller than the
-    /// layer is wide stays on the slim partial.
-    WhileOutputsReachRows,
     /// While the 32 x 64 tile's own grid covers this share of a wave: below
     /// it the tile's few CTAs each fold every piece of their rows while the
     /// slim partial spreads the pieces over the card.
@@ -9722,7 +9744,6 @@ impl KmBesideSlim {
             || match self {
                 Self::Always => true,
                 Self::Never => false,
-                Self::WhileOutputsReachRows => cut.outputs >= cut.m,
                 Self::WhileItsGridCovers(share) => share.covered(
                     cut.m.div_ceil(32).saturating_mul(cut.outputs.div_ceil(64)),
                     cut.waves,
@@ -10019,15 +10040,26 @@ const EXACT_SM89: ExactRules = ExactRules {
 /// 140 input gradients of 16 to 112 inputs the chain tile won past three
 /// waves too, off a multiple of 32 (the 16 x 16 tile it replaced there ran
 /// up to 2.3 times its time); taking them came within 1.3% of the fastest
-/// tile (31% before) and left the 414 cells above as they were.
+/// tile (31% before) and left the 414 cells above as they were. A census of
+/// every route timed alone over the 788 cut cells on an RTX 5090 at its
+/// stock 575 W moved 22 cells, 15 by more than 3% and none slower: the
+/// 64 x 64 rung runs the slab tile from two thirds of a wave (64 rows into
+/// 8192 to 32000 outputs over 768 to 2048 inputs in 0.73 to 0.83 of the
+/// 32 x 64 and 64 x 64 tiles' time), the 128 x 64 tile pays from a third of
+/// a wave, the 32 x 64 input-gradient tile folds beside the slim partial
+/// whatever the layer's width, and the slim partial leaves rows its 128-row
+/// tiles pad more than the 32-row tiles while the 32 x 64 partial's grid
+/// stays under four waves (65 and 129 rows: 0.70 to 0.94). The slab tile
+/// takes staged rows only: over 833 and 582 inputs it ran 2.7 and 3.0
+/// times the slim partial's time.
 const EXACT_SM120: ExactRules = ExactRules {
     forward: ExactCutTiles {
         slab: None,
-        slab_staged_only: false,
+        slab_staged_only: true,
         big: WaveShare::new(1, 4),
-        wide: WaveShare::new(1, 2),
-        m64: Some(WaveShare::new(1, 1)),
-        m64_on_slab: false,
+        wide: WaveShare::new(1, 3),
+        m64: Some(WaveShare::new(2, 3)),
+        m64_on_slab: true,
         km: WaveShare::new(1, 1),
         km_below: None,
         km_max_pieces: 16,
@@ -10037,7 +10069,7 @@ const EXACT_SM120: ExactRules = ExactRules {
     },
     input_gradient: ExactCutTiles {
         slab: None,
-        slab_staged_only: false,
+        slab_staged_only: true,
         big: WaveShare::new(4, 3),
         wide: WaveShare::new(1, 2),
         m64: None,
@@ -10047,12 +10079,12 @@ const EXACT_SM120: ExactRules = ExactRules {
         km_max_pieces: 24,
         km_any_pieces_rows: None,
         km_wide_pieces: None,
-        km_beside_slim: KmBesideSlim::WhileOutputsReachRows,
+        km_beside_slim: KmBesideSlim::Always,
     },
     partials: ExactChunkPartials {
         slim_from: WaveShare::new(3, 4),
         slim_rows: 65,
-        slim_padding: None,
+        slim_padding: Some(((1, 1), WaveShare::new(4, 1))),
         narrow_below: WaveShare::new(3, 4),
         narrow_below_unpadded: None,
         narrow_rows: 16,
@@ -16221,11 +16253,11 @@ mod tf32_tests {
         for (op, dims, expected) in [
             (
                 // The forward folds by its layer: twelve pieces of 128 inputs,
-                // on the 64 x 128 tile under eight waves of 128 x 64 tiles.
+                // on the 128 x 64 tile, whose 128-row tiles cover its rows.
                 ResolvedGemmOp::Nn,
                 (2_048, 1_536, 768),
                 Sm120FmaRoute {
-                    tile: Sm120FmaTile::M64N128,
+                    tile: Sm120FmaTile::M128N64,
                     kvec: false,
                     splits: 12,
                     in_cta: true,
@@ -20992,9 +21024,9 @@ mod exact_batch_invariant_tests {
                     }
                     // At 64 rows the 64 x 64 rung takes the layer where its
                     // grid covers the architecture's share of a wave: three
-                    // quarters on SM89, which runs it on the slab tile, and
-                    // one wave on SM120; SM80 wants six waves of it and folds
-                    // on the 32 x 64 tile below that.
+                    // quarters on SM89 and two thirds on SM120, which both
+                    // run it on the slab tile; SM80 wants six waves of it and
+                    // folds on the 32 x 64 tile below that.
                     let plan = exact_batch_invariant_nn_plan(
                         nn(64, k, 32_000),
                         multiprocessors,
@@ -21003,8 +21035,7 @@ mod exact_batch_invariant_tests {
                     .unwrap();
                     let expected = match compute_capability {
                         (8, 0) => ScalarDispatchPlan::NnExactKmPieces,
-                        (8, 9) => ScalarDispatchPlan::NnExactPiecesM64N64Bk32,
-                        _ => ScalarDispatchPlan::NnExactPiecesM64,
+                        _ => ScalarDispatchPlan::NnExactPiecesM64N64Bk32,
                     };
                     assert_eq!(plan, expected, "64x{k}x32000 on {multiprocessors} SMs");
                 }
@@ -21185,8 +21216,13 @@ mod exact_batch_invariant_tests {
             shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, (m, n_in, n_out)),
         };
         // A cut layer's gradient whose slim grid fills three quarters of the
-        // card: four pieces of the 1536-input fold over the transposed weight.
-        for (m, n_in, n_out) in [(1024, 384, 1536), (768, 384, 1536), (512, 1536, 2112)] {
+        // card folds over the transposed weight, where the 32 x 64 tile's grid
+        // passes a wave; under it that tile folds the pieces itself.
+        assert_eq!(
+            exact_batch_invariant_nt_plan(nt(768, 384, 1536), 170, (12, 0), false).unwrap(),
+            ScalarDispatchPlan::NtExactKmPieces
+        );
+        for (m, n_in, n_out) in [(1024, 384, 1536), (512, 1536, 2112)] {
             let plan =
                 exact_batch_invariant_nt_plan(nt(m, n_in, n_out), 170, (12, 0), false).unwrap();
             assert!(
@@ -21238,19 +21274,24 @@ mod exact_batch_invariant_tests {
         assert!(sm120_layer_takes_cut((8192, 6144), 170));
         // The share reads the card's own multiprocessors.
         assert!(sm120_layer_takes_cut((1024, 640), 120));
-        // A forward folds on the 64 x 128 tile under eight waves of 128 x 64
-        // tiles and on the 128 x 64 tile from there.
+        // A forward folds on the 128 x 64 tile where its rows are whole
+        // 128-row tiles, or past eight waves of them; rows that the 128-row
+        // tiles pad further than 64-row ones take the 64 x 128 tile below.
         assert_eq!(
             sm120_layer_forward_tile((2048, 3352), 170),
-            Sm120FmaTile::M64N128
-        );
-        assert_eq!(
-            sm120_layer_forward_tile((4096, 3072), 170),
             Sm120FmaTile::M128N64
         );
         assert_eq!(
-            sm120_layer_forward_tile((4096, 3072), 200),
+            sm120_layer_forward_tile((129, 2112), 170),
             Sm120FmaTile::M64N128
+        );
+        assert_eq!(
+            sm120_layer_forward_tile((4621, 384), 170),
+            Sm120FmaTile::M64N128
+        );
+        assert_eq!(
+            sm120_layer_forward_tile((4621, 6144), 170),
+            Sm120FmaTile::M128N64
         );
     }
 
@@ -21434,9 +21475,34 @@ mod exact_batch_invariant_tests {
                 tile: ExactPiecesTile::M64N64Bk32
             }
         );
-        // Ada's table keeps the slab tile wherever its gate takes the grid.
+        // Ada's table keeps the slab tile wherever its gate takes the grid;
+        // SM120's runs it on staged rows only, as SM80's does.
         assert!(!exact_rules((8, 9)).forward.slab_staged_only);
-        assert!(!exact_rules((12, 0)).forward.slab_staged_only);
+        assert!(exact_rules((12, 0)).forward.slab_staged_only);
+    }
+
+    #[test]
+    fn sm120_m64_rung_runs_the_slab_tile_on_staged_rows() {
+        // 64 rows into 8192 outputs over 2048 inputs: 128 tiles of 64 x 64,
+        // past two thirds of 170 multiprocessors, on the slab tile.
+        assert_eq!(
+            exact_batch_invariant_nn_plan(nn(64, 2048, 8192), 170, (12, 0)).unwrap(),
+            ScalarDispatchPlan::NnExactPiecesM64N64Bk32
+        );
+        // Over 2050 inputs the rows do not stage and the 64 x 64 chain
+        // tile serves the same rung.
+        assert_eq!(
+            exact_batch_invariant_nn_plan(nn(64, 2050, 8192), 170, (12, 0)).unwrap(),
+            ScalarDispatchPlan::NnExactPiecesM64
+        );
+        // 129 rows leave the slim partial for the 32 x 64 one.
+        assert!(matches!(
+            exact_batch_invariant_nn_plan(nn(129, 1536, 512), 170, (12, 0)).unwrap(),
+            ScalarDispatchPlan::NnExactChunk {
+                partial: ExactChunkPartial::Small,
+                ..
+            }
+        ));
     }
 
     #[test]
