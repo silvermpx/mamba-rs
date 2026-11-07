@@ -2569,13 +2569,7 @@ fn module_sources(arch: &str) -> [(&'static str, String); 10] {
 /// user's machine.
 #[test]
 fn family_modules_compile_for_every_target() {
-    let version = nvrtc_version();
-    let mut targets = vec![
-        "sm_80", "sm_86", "sm_87", "sm_89", "sm_90a", "sm_100a", "sm_120",
-    ];
-    if version >= (13, 2) {
-        targets.push("sm_110a");
-    }
+    let targets = family_targets();
     let modules = [
         ("Mamba2", mamba2_blob()),
         ("Mamba3", mamba3_blob()),
@@ -2604,6 +2598,174 @@ fn family_modules_compile_for_every_target() {
             job.join().expect("a family module failed to compile");
         }
     });
+}
+
+/// The targets the family gates compile for: every architecture the
+/// library binds, and CC 11.0 where the running NVRTC knows it.
+fn family_targets() -> Vec<&'static str> {
+    let mut targets = vec![
+        "sm_80", "sm_86", "sm_87", "sm_89", "sm_90a", "sm_100a", "sm_120",
+    ];
+    if nvrtc_version() >= (13, 2) {
+        targets.push("sm_110a");
+    }
+    targets
+}
+
+/// Every family module in every configuration a model can ask the library
+/// to compile, for every target the running NVRTC offers: Mamba-1 and the
+/// Mamba-3 SISO module at each state capacity `state_capacity` gives (16 to
+/// 256 in steps of 16), the MIMO module at each rank with the chunk length
+/// `chunk_len` gives it, and the MIMO module at every chunk length a run may
+/// force for the oldest and the newest target. A construct one toolkit
+/// refuses in one configuration only (an array a capacity sizes, a loop a
+/// rank unrolls) fails here, in the toolkit lane of every supported NVRTC,
+/// rather than in a user's build.
+#[test]
+fn family_modules_compile_in_every_configuration() {
+    use mamba_rs::mamba3_mimo::config::MAX_MIMO_RANK;
+    use mamba_rs::mamba3_mimo::gpu::kernels::{RELEASED_CHUNK, chunk_len};
+    let targets = family_targets();
+    let mut caps: Vec<usize> = (1..=256)
+        .map(|d_state| mamba_rs::gpu::kernels::state_capacity(d_state).expect("a supported state"))
+        .collect();
+    caps.dedup();
+    let mimo = |rank: usize, chunk: usize| {
+        vec![
+            format!("-DMIMO_RANK={rank}"),
+            format!("-DM3M_CHUNK={chunk}"),
+        ]
+    };
+    let mut jobs = Vec::new();
+    for &arch in &targets {
+        for &cap in &caps {
+            for kind in [FamilyModule::Mamba1, FamilyModule::Mamba3] {
+                jobs.push((kind, arch, vec![format!("-DMAMBA_RS_STATE_CAP={cap}")]));
+            }
+        }
+        for rank in 1..=MAX_MIMO_RANK {
+            jobs.push((FamilyModule::Mimo, arch, mimo(rank, chunk_len(rank))));
+        }
+    }
+    for arch in [targets[0], targets[targets.len() - 1]] {
+        for rank in 1..=MAX_MIMO_RANK {
+            let mut chunk = 4;
+            while chunk <= RELEASED_CHUNK {
+                if chunk != chunk_len(rank) {
+                    jobs.push((FamilyModule::Mimo, arch, mimo(rank, chunk)));
+                }
+                chunk *= 2;
+            }
+        }
+    }
+    // The largest MIMO configurations compile for minutes each; taken
+    // first, they run beside the short ones instead of alone at the end.
+    jobs.sort_by_key(|(kind, _, defines)| std::cmp::Reverse(family_job_weight(*kind, defines)));
+    let failures = compile_family_pool(&jobs);
+    assert!(
+        failures.is_empty(),
+        "{} of {} family configurations do not compile:\n{}",
+        failures.len(),
+        jobs.len(),
+        failures.join("\n")
+    );
+}
+
+#[derive(Clone, Copy, Debug)]
+enum FamilyModule {
+    Mamba1,
+    Mamba3,
+    Mimo,
+}
+
+impl FamilyModule {
+    fn source(self) -> String {
+        match self {
+            Self::Mamba1 => mamba1_blob(),
+            Self::Mamba3 => mamba3_blob(),
+            Self::Mimo => mamba3_mimo_blob(),
+        }
+    }
+
+    /// The seed the library's compile passes on toolkits that take one.
+    fn seed(self) -> &'static str {
+        match self {
+            Self::Mamba1 => "1295072049",
+            Self::Mamba3 => "1295203121",
+            Self::Mimo => "2603155690",
+        }
+    }
+}
+
+/// A family compile's rough cost, for ordering the pool: a MIMO module
+/// unrolls its rank and its chunk, the others grow with the state capacity.
+fn family_job_weight(kind: FamilyModule, defines: &[String]) -> usize {
+    let define = |name: &str| {
+        defines
+            .iter()
+            .find_map(|define| define.strip_prefix(name))
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(1)
+    };
+    match kind {
+        FamilyModule::Mimo => 1_000 * define("-DMIMO_RANK=") * define("-DM3M_CHUNK="),
+        FamilyModule::Mamba1 | FamilyModule::Mamba3 => define("-DMAMBA_RS_STATE_CAP="),
+    }
+}
+
+/// Compiles every job on a pool of the machine's width and returns the
+/// failures, each named by its module, target and defines.
+fn compile_family_pool(jobs: &[(FamilyModule, &'static str, Vec<String>)]) -> Vec<String> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    // A module compile holds a gigabyte or more; sixteen at once keep a
+    // build box's memory in reach. MAMBA_RS_COMPILE_GATE_THREADS sets fewer
+    // for a box whose power or memory cannot take a wide load.
+    let workers = std::env::var("MAMBA_RS_COMPILE_GATE_THREADS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&threads| threads > 0)
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get().min(16)));
+    let next = AtomicUsize::new(0);
+    let failures = std::sync::Mutex::new(Vec::new());
+    let version = nvrtc_version();
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                while let Some((kind, arch, defines)) =
+                    jobs.get(next.fetch_add(1, Ordering::Relaxed))
+                {
+                    let mut options = vec![
+                        "--fmad=true".to_string(),
+                        "--extra-device-vectorization".to_string(),
+                        "--generate-line-info".to_string(),
+                        "-DNDEBUG".to_string(),
+                    ];
+                    options.extend(defines.iter().cloned());
+                    if version >= (12, 9) {
+                        options.push(format!("--frandom-seed={}", kind.seed()));
+                    }
+                    let opts = cudarc::nvrtc::CompileOptions {
+                        arch: Some(arch),
+                        options,
+                        include_paths: mamba_rs::gpu::kernels::cuda_include_paths(),
+                        ..Default::default()
+                    };
+                    match cudarc::nvrtc::compile_ptx_with_opts(kind.source(), opts) {
+                        Ok(ptx) if ptx.to_src().contains(".entry") => {}
+                        Ok(_) => failures
+                            .lock()
+                            .unwrap()
+                            .push(format!("{kind:?} {arch} {defines:?}: no kernels")),
+                        Err(error) => failures
+                            .lock()
+                            .unwrap()
+                            .push(format!("{kind:?} {arch} {defines:?}: {error}")),
+                    }
+                }
+            });
+        }
+    });
+    failures.into_inner().unwrap()
 }
 
 fn compile_for(arch: &'static str) {

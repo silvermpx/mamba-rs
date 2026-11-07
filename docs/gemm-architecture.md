@@ -1301,9 +1301,9 @@ scarce, so V0 and V1 carry as much of the proof as they can on the CPU.
      are equal on every architecture; TF32 and half share one plan and
      differ only by the tensor-core generation; no board-dependent choice
      selects between kernels of different bits, except where the ledger
-     says the code still does. In `docs/release-qualification.md`: step 7
+     says the code still does. In `docs/release-qualification.md`: step 8
      becomes the cell-by-cell comparison of 5.4, which is never skipped;
-     step 2 takes the rule for unreached architectures (5.4); GEMM speed is
+     step 3 takes the rule for unreached architectures (5.4); GEMM speed is
      judged by V3 per GEMM, not by bench totals; the note on routes
      admitted by the first-use proof leaves with that admission (4.2).
 1. **Dispatcher only.**

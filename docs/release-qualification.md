@@ -20,7 +20,7 @@ test, bench and tool directories is reachable from the manifest.
 |---|---|---|
 | host | regressions that need no GPU and no CUDA feature | `cargo test --no-default-features` (CI, any machine) |
 | gate | CUDA regressions with no ignored arm | `qual/run.sh gate` (`cargo test --release --features cuda`) |
-| toolkit | compile gates, identity and source contracts: the CUDA toolkit (NVRTC), no device | `qual/run.sh toolkit`, once per toolkit build on the build box. `qual/run.sh board` is the gate lane without it, for a board that only has to run |
+| toolkit | compile gates, identity and source contracts: the CUDA toolkit (NVRTC), no device | `qual/run.sh toolkit` under one toolkit, `qual/run.sh toolkits` under every toolkit installed as `/usr/local/cuda-X.Y`, on the build box. `qual/run.sh board` is the gate lane without it, for a board that only has to run |
 | contract | CUDA regressions whose ignored arms need a specific board or a long run | `qual/run.sh contract` (each target with `-- --ignored`. Every target runs, the reds are named at the end) |
 | record | manual instruments that need model assets or foreign hardware, still under `tests/` | `qual/run.sh record` lists them. Run one at a time |
 | bench | timing instruments under `benches/`, no verdict | `cargo bench --features cuda --bench <name> [-- <instrument>]` |
@@ -66,30 +66,37 @@ may not present the two as the same claim.
    `cargo check --workspace --all-targets` with `cuda`, `cuda,hf`,
    `cuda,hf,gemm-blas,nccl` and each plus `qualification`, all without a
    rustc warning.
-2. `qual/run.sh gate` green on each qualification board, and a GPU context
+2. `qual/run.sh toolkits` green on a build box that holds every CUDA
+   toolkit the release supports (12.8, 13.0, 13.2 and the newest one).
+   NVRTC versions refuse different constructs: 0.8.0 to 0.8.2 shipped a
+   Mamba-3 MIMO kernel that NVRTC 12.8 and 13.0 refused while the lane ran
+   under 13.2 alone, and the family gates compile every configuration a
+   model can ask for (each state capacity, each MIMO rank and chunk length)
+   for every target since.
+3. `qual/run.sh gate` green on each qualification board, and a GPU context
    created on at least one board of every module family the release
    claims (a board without an architecture module, an SM120 board, and
    an SM90a or SM100 board when one is available). A claim for a family
    no board of which has booted the release is not made.
-3. `qual/run.sh contract` on each board, with the evidence capture on.
+4. `qual/run.sh contract` on each board, with the evidence capture on.
    The lane runs every target and names each red at its end. A target
    written for another board skips there, so no red is allowed.
    `acceptance_diff` against the previous
    release's capture clean, or every difference accounted for by an
    intentional, documented change.
-4. The qualification tools that back the published tables, one per board
+5. The qualification tools that back the published tables, one per board
    and toolkit (`qual/run.sh qualification` lists them), with raw logs kept.
-5. Package: `cargo package --allow-dirty --no-verify`, extract the `.crate`
+6. Package: `cargo package --allow-dirty --no-verify`, extract the `.crate`
    into a fresh directory and inspect it directly: no archive or local
    tooling material. Every declared target path and fixture
    present. `cargo test --lib --no-default-features --no-run` and
    `cargo test --no-default-features` pass offline inside the extracted
    tree. One qualification tool and one bench build from it.
-6. `cargo publish --locked --dry-run`: the dependency resolution CI tested
+7. `cargo publish --locked --dry-run`: the dependency resolution CI tested
    is the one that ships.
-7. The previous release has been measured against the release candidate
+8. The previous release has been measured against the release candidate
    on the same board with identical settings, kernel by kernel and as
    whole training and inference steps, and the result is in the changelog
    and on the benchmark page. If it has not run, the changelog says so.
-8. Tag only after the release commit's CI is green and a maintainer has
+9. Tag only after the release commit's CI is green and a maintainer has
    approved publication.

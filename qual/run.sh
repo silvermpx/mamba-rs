@@ -4,6 +4,8 @@
 #   qual/run.sh gate           every-run correctness (plain battery)
 #   qual/run.sh toolkit        compile gates and identity contracts: the
 #                              toolkit, no device; once per toolkit build
+#   qual/run.sh toolkits       the toolkit lane under every CUDA toolkit
+#                              installed as /usr/local/cuda-X.Y
 #   qual/run.sh board          the gate lane on a board: every gate target,
 #                              the toolkit lane left out
 #   qual/run.sh contract       pre-release / post-edit / post-merge bit gates
@@ -41,6 +43,42 @@ toolkit | board)
     fi
     echo "$(echo "$lane" | tr a-z A-Z) GREEN"
     ;;
+toolkits)
+    # The toolkit lane once under each installed toolkit, each build in a
+    # target directory of its own (two toolkits sharing one would leave the
+    # second build fresh on the first one's bindings). NVRTC versions refuse
+    # different constructs, so a kernel that compiles under one toolkit can
+    # fail under another: every toolkit a release supports runs this before
+    # it ships. cudarc names bindings up to CUDA 13.3; a newer toolkit
+    # builds with those and loads its own libraries at run time.
+    base="${CARGO_TARGET_DIR:-target}"
+    red=""
+    found=""
+    for cuda in /usr/local/cuda-[0-9]*.[0-9]*; do
+        [ -x "$cuda/bin/nvcc" ] || continue
+        version="${cuda##*/cuda-}"
+        found="$found $version"
+        binding=""
+        major="${version%%.*}"
+        minor="${version#*.}"
+        if [ "$major" -gt 13 ] || { [ "$major" -eq 13 ] && [ "$minor" -gt 3 ]; }; then
+            binding=13030
+        fi
+        echo "=== toolkits: CUDA $version"
+        env ${binding:+CUDARC_CUDA_VERSION=$binding} PATH="$cuda/bin:$PATH" \
+            LD_LIBRARY_PATH="$cuda/lib64" CUDA_PATH="$cuda" CUDA_HOME="$cuda" CUDA_ROOT="$cuda" \
+            CARGO_TARGET_DIR="$base/toolkit-$version" "$0" toolkit || red="$red $version"
+    done
+    if [ -z "$found" ]; then
+        echo "TOOLKITS RED: no toolkit under /usr/local/cuda-X.Y"
+        exit 1
+    fi
+    if [ -n "$red" ]; then
+        echo "TOOLKITS RED:$red (of$found)"
+        exit 1
+    fi
+    echo "TOOLKITS GREEN:$found"
+    ;;
 contract)
     # diag_-prefixed tests are manual position printers (record-grade
     # instruments living inside contract files); the lane skips them.
@@ -72,7 +110,7 @@ qualification)
     suites qualification | sed 's/^/  cargo test --release --features "cuda cublas hf qualification" --test /;s/$/ -- --ignored --nocapture/'
     ;;
 *)
-    echo "usage: qual/run.sh [gate|board|toolkit|contract|record|bench|qualification]" >&2
+    echo "usage: qual/run.sh [gate|board|toolkit|toolkits|contract|record|bench|qualification]" >&2
     exit 2
     ;;
 esac
