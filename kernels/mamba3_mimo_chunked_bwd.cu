@@ -1860,11 +1860,15 @@ __device__ __forceinline__ void m3mb_pairs_tc_body(
     // columns from oc. out[i][n] += sum_k A(i, k) opnd[k][n], A(i, k) =
     // w[i][k] (by rows) or w[k][i] (transposed), k over one sequence's rows
     // at a time in groups of eight from its first, into the global rows
-    // from `at_row(i)` + n0.
+    // from `at_row(i)` + n0, where row `a` of the tile is head `h`'s
+    // `a % rank` slot of time step `row0 + a / rank`, `stride` floats each.
     const int ob = (warp & 3) * 16, oc = (warp >> 2) * 16;
     const int nseg = nseg_s;
     auto out_slice = [&](const float* w, bool transposed, float* out, int width, int n0,
-                         auto at_row) {
+                         long long stride) {
+        auto at_row = [&](int a) {
+            return (((row0 + a / rank) * nh + h) * rank + a % rank) * stride;
+        };
         float acc[2][4];
 #pragma unroll
         for (int j = 0; j < 2; j++) {
@@ -1921,12 +1925,6 @@ __device__ __forceinline__ void m3mb_pairs_tc_body(
             }
         }
     };
-    auto qk_row = [&](int a) {
-        return (((row0 + a / rank) * nh + h) * rank + a % rank) * (long long)ds;
-    };
-    auto du_row = [&](int a) {
-        return (((row0 + a / rank) * nh + h) * rank + a % rank) * (long long)hd;
-    };
     // dq += (w M) K and dk += (w M)^T Q, a slice of 32 state indices.
     for (int n0 = 0; n0 < ds; n0 += M3MT_SLICE) {
         __syncthreads();
@@ -1935,14 +1933,14 @@ __device__ __forceinline__ void m3mb_pairs_tc_body(
             opnd[a * M3MT_OLD + n] = rot(bn, b_bias, a, n0 + n);
         }
         __syncthreads();
-        out_slice(mm, false, dq, ds, n0, qk_row);
+        out_slice(mm, false, dq, ds, n0, (long long)ds);
         __syncthreads();
         for (int e = tid; e < M3MT_ROWS * M3MT_SLICE; e += blockDim.x) {
             const int a = e / M3MT_SLICE, n = e % M3MT_SLICE;
             opnd[a * M3MT_OLD + n] = rot(cn, c_bias, a, n0 + n);
         }
         __syncthreads();
-        out_slice(mm, true, dk, ds, n0, qk_row);
+        out_slice(mm, true, dk, ds, n0, (long long)ds);
     }
     // du += (w G)^T dY, a slice of 32 channels.
     for (int p0 = 0; p0 < hd; p0 += M3MT_SLICE) {
@@ -1952,7 +1950,7 @@ __device__ __forceinline__ void m3mb_pairs_tc_body(
             opnd[a * M3MT_OLD + p] = dy_at(a, p0 + p);
         }
         __syncthreads();
-        out_slice(gm, true, du, hd, p0, du_row);
+        out_slice(gm, true, du, hd, p0, (long long)hd);
     }
 }
 

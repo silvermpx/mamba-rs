@@ -269,6 +269,50 @@ fn mamba1_blob() -> String {
     ])
 }
 
+/// The Mamba-2 module, composed as `Mamba2Kernels::compile` composes it.
+fn mamba2_blob() -> String {
+    compose(&[
+        include_str!("../kernels/_typed_prelude.cuh"),
+        include_str!("../kernels/_varlen.cuh"),
+        include_str!("../kernels/_shared_loads.cuh"),
+        include_str!("../kernels/gated_mlp.cu"),
+        include_str!("../kernels/mamba2_ops.cu"),
+        include_str!("../kernels/mamba2_ssd.cu"),
+        include_str!("../kernels/mamba2_bwd.cu"),
+    ])
+}
+
+/// The Mamba-3 SISO module, composed as `Mamba3Kernels` composes it.
+fn mamba3_blob() -> String {
+    compose(&[
+        include_str!("../kernels/_typed_prelude.cuh"),
+        include_str!("../kernels/_varlen.cuh"),
+        include_str!("../kernels/_shared_loads.cuh"),
+        include_str!("../kernels/mamba3_siso.cu"),
+        include_str!("../kernels/mamba3_ops.cu"),
+        include_str!("../kernels/mamba3_chunked.cu"),
+        include_str!("../kernels/mamba3_siso_block.cu"),
+        include_str!("../kernels/gated_mlp.cu"),
+        include_str!("../kernels/elementwise.cu"),
+        include_str!("../kernels/gemm_bi_inference/casts.cu"),
+        include_str!("../kernels/adamw.cu"),
+    ])
+}
+
+/// The Mamba-3 MIMO module, composed as `Mamba3MimoKernels` composes it.
+fn mamba3_mimo_blob() -> String {
+    compose(&[
+        include_str!("../kernels/_typed_prelude.cuh"),
+        include_str!("../kernels/_varlen.cuh"),
+        include_str!("../kernels/_shared_loads.cuh"),
+        include_str!("../kernels/gated_mlp.cu"),
+        include_str!("../kernels/mamba3_mimo.cu"),
+        include_str!("../kernels/mamba3_mimo_chunked.cu"),
+        include_str!("../kernels/mamba3_mimo_bwd.cu"),
+        include_str!("../kernels/mamba3_mimo_chunked_bwd.cu"),
+    ])
+}
+
 /// The kernels the families share through the context.
 fn shared_blob() -> String {
     compose(&[
@@ -2472,10 +2516,20 @@ fn compile_module_uncached(kind: &str, source: String, arch: &'static str) -> St
         "-DNDEBUG".to_string(),
     ];
     // Production options per module: the GEMM tiles read the group size,
-    // and only the Mamba-1 kernels read the state capacity.
+    // the Mamba-1 and Mamba-3 SISO kernels the state capacity, and the MIMO
+    // kernels their rank and chunk length (a short chunk at rank 4 and the
+    // released chunk at rank 2).
     match kind {
-        "Mamba1" => options.push("-DMAMBA_RS_STATE_CAP=256".to_string()),
-        "Shared" => {}
+        "Mamba1" | "Mamba3" => options.push("-DMAMBA_RS_STATE_CAP=256".to_string()),
+        "Mamba3MimoRank4" => {
+            options.push("-DMIMO_RANK=4".to_string());
+            options.push("-DM3M_CHUNK=16".to_string());
+        }
+        "Mamba3MimoRank2" => {
+            options.push("-DMIMO_RANK=2".to_string());
+            options.push("-DM3M_CHUNK=64".to_string());
+        }
+        "Shared" | "Mamba2" => {}
         _ => options.push(format!("-DGEMM_BI_GROUP_M={group_m}")),
     }
     let opts = cudarc::nvrtc::CompileOptions {
@@ -2490,7 +2544,7 @@ fn compile_module_uncached(kind: &str, source: String, arch: &'static str) -> St
     }
 }
 
-fn module_sources(arch: &str) -> [(&'static str, String); 6] {
+fn module_sources(arch: &str) -> [(&'static str, String); 10] {
     [
         ("Inference", inference_blob_for(arch)),
         ("Mamba1", mamba1_blob()),
@@ -2498,7 +2552,55 @@ fn module_sources(arch: &str) -> [(&'static str, String); 6] {
         ("TriadScalar", scalar_blob()),
         ("TriadSm80", sm80_blob()),
         ("TriadSm80+extensions", sm80_streamk_blob()),
+        ("Mamba2", mamba2_blob()),
+        ("Mamba3", mamba3_blob()),
+        ("Mamba3MimoRank4", mamba3_mimo_blob()),
+        ("Mamba3MimoRank2", mamba3_mimo_blob()),
     ]
+}
+
+/// The family modules (Mamba-2, Mamba-3 SISO and MIMO) for every target the
+/// toolkit offers, each compile on a thread of its own: the toolkit lanes
+/// run this under every supported NVRTC, so a construct one NVRTC version
+/// refuses (a generic lambda in JIT mode, say) fails here and not on a
+/// user's machine.
+#[test]
+fn family_modules_compile_for_every_target() {
+    let version = nvrtc_version();
+    let mut targets = vec![
+        "sm_80", "sm_86", "sm_87", "sm_89", "sm_90a", "sm_100a", "sm_120",
+    ];
+    if version >= (13, 2) {
+        targets.push("sm_110a");
+    }
+    let modules = [
+        ("Mamba2", mamba2_blob()),
+        ("Mamba3", mamba3_blob()),
+        ("Mamba3MimoRank4", mamba3_mimo_blob()),
+        ("Mamba3MimoRank2", mamba3_mimo_blob()),
+    ];
+    std::thread::scope(|scope| {
+        let jobs: Vec<_> = targets
+            .iter()
+            .flat_map(|&arch| {
+                modules
+                    .iter()
+                    .map(move |(kind, source)| (arch, *kind, source.clone()))
+            })
+            .map(|(arch, kind, source)| {
+                scope.spawn(move || {
+                    let ptx = compile_module_uncached(kind, source, arch);
+                    assert!(
+                        ptx.contains(".entry"),
+                        "{kind} for {arch} produced no kernels"
+                    );
+                })
+            })
+            .collect();
+        for job in jobs {
+            job.join().expect("a family module failed to compile");
+        }
+    });
 }
 
 fn compile_for(arch: &'static str) {
