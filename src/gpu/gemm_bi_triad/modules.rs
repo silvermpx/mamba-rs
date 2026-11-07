@@ -11711,6 +11711,11 @@ fn tf32_register_cap(module_kind: ModuleKind, symbol: &str) -> Result<u32, Strin
         // The stream-K kernel keeps one CTA per multiprocessor by design and
         // spends the register file on its pipeline state and boundary code.
         ModuleKind::TriadSm120 if symbol.ends_with("_pair_streamk") => Ok(240),
+        // The plain NT 64x128 arm keeps two blocks, like the k-vector arms:
+        // three left the transposed B's addressing no room in 168 registers.
+        ModuleKind::TriadSm120 if symbol == "nt_sm120_tma_fma_m64n128_bk16_s2" => {
+            Ok(super::contract::SM120_FMA_KVEC_REGISTER_CAP)
+        }
         // The eight-warp fold arms hold two blocks of 256 threads.
         ModuleKind::TriadSm120 if symbol.contains("_tma_fma_") && symbol.ends_with("_fold_w8") => {
             Ok(super::contract::SM120_FMA_EIGHT_WARP_REGISTER_CAP)
@@ -14183,6 +14188,21 @@ mod tests {
             );
         }
         assert_eq!(tf32_register_cap(ModuleKind::TriadSm100, TAG33), Ok(128));
+        assert_eq!(
+            tf32_register_cap(ModuleKind::TriadSm120, "nt_sm120_tma_fma_m64n128_bk16_s2"),
+            Ok(super::super::contract::SM120_FMA_KVEC_REGISTER_CAP)
+        );
+        for plain in [
+            "nn_sm120_tma_fma_m64n128_bk16_s2",
+            "tn_sm120_tma_fma_m64n128_bk16_s2",
+            "nt_sm120_tma_fma_m128n64_bk16_s2",
+        ] {
+            assert_eq!(
+                tf32_register_cap(ModuleKind::TriadSm120, plain),
+                Ok(super::super::contract::SM120_FMA_REGISTER_CAP),
+                "{plain} keeps three blocks"
+            );
+        }
     }
 
     #[test]

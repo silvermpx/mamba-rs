@@ -701,8 +701,11 @@ __device__ __forceinline__ void sm120_fma_body(
 // 128x64: four warps stacked, each 32x64. 64x128: four warps side by side,
 // each 64x32. 64x64: two warps stacked, each 32x64. The NT k-vector arms
 // keep a float4-along-k B fragment, and the fold arms the finished pieces'
-// sum, and both pay for it with two blocks per SM. The eight-warp fold arms
-// tile 128x64 and 64x128 with eight warps of 32x32 over 8x4 microtiles.
+// sum, and both pay for it with two blocks per SM. The plain NT 64x128 arm
+// takes two blocks too: at three its 168 registers left no room for the
+// transposed B's addressing, and the CUDA 13.4 assembler and the 615 driver
+// spilled it. The eight-warp fold arms tile 128x64 and 64x128 with eight
+// warps of 32x32 over 8x4 microtiles.
 SM120_DEFINE_FMA_KERNEL(nn_sm120_tma_fma_m128n64_bk16_s2, SM120_FMA_OP_NN, 128, 64, 32, 64, 8, 128, 3, false, false)
 SM120_DEFINE_FMA_KERNEL(nn_sm120_tma_fma_m64n128_bk16_s2, SM120_FMA_OP_NN, 64, 128, 64, 32, 8, 128, 3, false, false)
 SM120_DEFINE_FMA_KERNEL(nn_sm120_tma_fma_m64n64_bk16_s2, SM120_FMA_OP_NN, 64, 64, 32, 64, 8, 64, 5, false, false)
@@ -710,7 +713,7 @@ SM120_DEFINE_FMA_KERNEL(tn_sm120_tma_fma_m128n64_bk16_s2, SM120_FMA_OP_TN, 128, 
 SM120_DEFINE_FMA_KERNEL(tn_sm120_tma_fma_m64n128_bk16_s2, SM120_FMA_OP_TN, 64, 128, 64, 32, 8, 128, 3, false, false)
 SM120_DEFINE_FMA_KERNEL(tn_sm120_tma_fma_m64n64_bk16_s2, SM120_FMA_OP_TN, 64, 64, 32, 64, 8, 64, 5, false, false)
 SM120_DEFINE_FMA_KERNEL(nt_sm120_tma_fma_m128n64_bk16_s2, SM120_FMA_OP_NT, 128, 64, 32, 64, 8, 128, 3, false, false)
-SM120_DEFINE_FMA_KERNEL(nt_sm120_tma_fma_m64n128_bk16_s2, SM120_FMA_OP_NT, 64, 128, 64, 32, 8, 128, 3, false, false)
+SM120_DEFINE_FMA_KERNEL(nt_sm120_tma_fma_m64n128_bk16_s2, SM120_FMA_OP_NT, 64, 128, 64, 32, 8, 128, 2, false, false)
 SM120_DEFINE_FMA_KERNEL(nt_sm120_tma_fma_m64n64_bk16_s2, SM120_FMA_OP_NT, 64, 64, 32, 64, 8, 64, 5, false, false)
 SM120_DEFINE_FMA_KERNEL(nt_sm120_tma_fma_m128n64_bk16_s2_kvec, SM120_FMA_OP_NT, 128, 64, 32, 64, 8, 128, 2, true, true)
 SM120_DEFINE_FMA_KERNEL(nt_sm120_tma_fma_m64n128_bk16_s2_kvec, SM120_FMA_OP_NT, 64, 128, 64, 32, 8, 128, 2, true, true)

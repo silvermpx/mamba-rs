@@ -1754,7 +1754,9 @@ pub struct Tf32Sm120Route {
 /// The reduction tile of the exact-F32 SM120 routes.
 pub const SM120_FMA_BK: u32 = 16;
 /// Register gate of the exact-F32 SM120 routes: the plain arms keep three
-/// blocks per multiprocessor, the NT k-vector and the fold arms two.
+/// blocks per multiprocessor, the NT k-vector and the fold arms two, and so
+/// does the plain NT 64 x 128 arm (its transposed B's addressing did not fit
+/// three).
 pub const SM120_FMA_REGISTER_CAP: u32 = 168;
 pub const SM120_FMA_KVEC_REGISTER_CAP: u32 = 255;
 /// The eight-warp fold arms keep two blocks of 256 threads a
