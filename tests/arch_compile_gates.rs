@@ -5178,7 +5178,7 @@ fn compiles_generic_sm120_triad_modules_with_exact_ptx_contract() {
             &ptx,
             emitted,
             &expected,
-            134,
+            136,
         )
         .unwrap();
 
@@ -5303,7 +5303,7 @@ fn compiles_generic_sm120_triad_modules_with_exact_ptx_contract() {
             );
             assert!(!entry.contains("call.uni"), "device call in {symbol}");
         }
-        assert_eq!(sm120_tf32_symbols().len(), 36);
+        assert_eq!(sm120_tf32_symbols().len(), 38);
         for symbol in sm120_tf32_symbols() {
             let entry = parsed.entry(&symbol);
             assert_compile_gate_entry_tokens(
