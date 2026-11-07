@@ -2945,14 +2945,18 @@ fn rna_one_chain_selection(
 /// pieces. Where the operands stage, a forward of at most `forward_thin_rows`
 /// rows over at least four waves of 32-column strips takes the portable
 /// 16 x 32 tile; otherwise it takes the multistage 128 x 64
-/// tile from `forward_wide` of a wave of its grid (at 128 rows or more), the
+/// tile from `forward_wide` of a wave of its grid (at 128 rows or more), or
+/// while that grid fits `forward_wide_one_round` of one wave and the 64 x 64
+/// tile's needs more than one (at 128 rows or more), the
 /// 32 x 32 four-byte tile ahead of the 64 x 64 tiles while their grid stays
 /// under `forward_quarter_first` (at 32 rows or more, its own grid covering
 /// `forward_quarter`), the
 /// 64 x 64 tile from `forward_work` of a wave of work (rows times 64-column
 /// strips) or `forward_small` of its own grid, the 32 x 32 tile that stages
 /// four bytes at a time from `forward_quarter` of its grid (at 32 rows or
-/// more), and the split members below; an input gradient takes the 64 x 64
+/// more), and the split members below; an input gradient takes the 128 x 64
+/// tile while its grid fits `gradient_wide_one_round` of one wave and the
+/// 64 x 64 tile's needs more than one (at 128 rows or more), the 64 x 64
 /// tile while the 128 x 64 grid stays under `gradient_small_below` of a wave
 /// and its own covers `gradient_small` (at 128 rows or more), the 128 x 64
 /// tile from `gradient_wide` of its grid, the portable 64 x 64 tile from
@@ -2968,10 +2972,12 @@ pub(super) struct Tf32CutRules {
     forward_quarter_first: Option<WaveShare>,
     gradient_small_rows: usize,
     forward_wide: Option<WaveShare>,
+    forward_wide_one_round: Option<WaveShare>,
     forward_work: Option<WaveShare>,
     forward_small: Option<WaveShare>,
     forward_quarter: Option<WaveShare>,
     gradient_small_below: WaveShare,
+    gradient_wide_one_round: Option<WaveShare>,
     gradient_small: Option<WaveShare>,
     gradient_wide: Option<WaveShare>,
     gradient_work: Option<WaveShare>,
@@ -3001,10 +3007,12 @@ const TF32_CUT_SM89: Tf32CutRules = Tf32CutRules {
     forward_quarter_first: Some(WaveShare::new(1, 3)),
     gradient_small_rows: 64,
     forward_wide: Some(WaveShare::new(1, 2)),
+    forward_wide_one_round: None,
     forward_work: Some(WaveShare::new(8, 1)),
     forward_small: Some(WaveShare::new(1, 2)),
     forward_quarter: Some(WaveShare::new(1, 2)),
     gradient_small_below: WaveShare::new(1, 2),
+    gradient_wide_one_round: None,
     gradient_small: Some(WaveShare::new(1, 5)),
     gradient_wide: Some(WaveShare::new(1, 5)),
     gradient_work: None,
@@ -3017,15 +3025,26 @@ const TF32_CUT_SM89: Tf32CutRules = Tf32CutRules {
 /// 0.78% over 414 cut input gradients, where the rule measured before the
 /// nested walk took 6.9%; over 240 unaligned forwards the four-byte tiles
 /// from half a wave each came within 1.0%, where the table alone took 9.4%.
+/// In the same census the 128 x 64 tile ran the forwards whose grid of it
+/// fits four fifths of one wave while the 64 x 64 tile's needs a second in
+/// 0.95 of the 64 x 64 tile's time (15 cells, 11 of them in 0.89 to 0.95:
+/// 512 to 4096 rows into 256 to 2112 outputs over 512 to 1536 inputs, none
+/// slower); a grid filling 0.88 of the wave lost 4% to the 64 x 64 tile.
+/// The input gradients whose 128 x 64 grid fits one wave while the 64 x 64
+/// tile's needs a second ran on the 128 x 64 tile in 0.96 of the 64 x 64
+/// tile's time (21 cells, 13 of them in 0.92 to 0.97: 512 to 4096 rows of
+/// 256 to 2112 inputs over 768 to 2112 outputs, none slower).
 const TF32_CUT_SM120: Tf32CutRules = Tf32CutRules {
     forward_thin_rows: 16,
     forward_quarter_first: None,
     gradient_small_rows: 128,
     forward_wide: Some(WaveShare::new(3, 2)),
+    forward_wide_one_round: Some(WaveShare::new(4, 5)),
     forward_work: Some(WaveShare::new(16, 1)),
     forward_small: Some(WaveShare::new(1, 1)),
     forward_quarter: Some(WaveShare::new(2, 3)),
     gradient_small_below: WaveShare::new(4, 1),
+    gradient_wide_one_round: Some(WaveShare::new(1, 1)),
     gradient_small: Some(WaveShare::new(1, 4)),
     gradient_wide: Some(WaveShare::new(1, 4)),
     gradient_work: Some(WaveShare::new(32, 1)),
@@ -3047,10 +3066,12 @@ const TF32_CUT_SM80: Tf32CutRules = Tf32CutRules {
     forward_quarter_first: None,
     gradient_small_rows: 128,
     forward_wide: Some(WaveShare::new(3, 2)),
+    forward_wide_one_round: None,
     forward_work: Some(WaveShare::new(16, 1)),
     forward_small: Some(WaveShare::new(1, 3)),
     forward_quarter: Some(WaveShare::new(2, 3)),
     gradient_small_below: WaveShare::new(2, 3),
+    gradient_wide_one_round: None,
     gradient_small: Some(WaveShare::new(1, 4)),
     gradient_wide: Some(WaveShare::new(1, 4)),
     gradient_work: Some(WaveShare::new(64, 1)),
@@ -3076,13 +3097,16 @@ fn tf32_cut_rules(compute_capability: Option<(u32, u32)>) -> Tf32CutRules {
 /// `forward_narrow_wide` of its grid, the persistent 128 x 64 tile (rows a
 /// multiple of 128, outputs of 64 and a reduction of 32, up to
 /// `forward_persist_reduction`) from `forward_persist` of its grid, the
-/// multistage 128 x 64 tile from `forward_ms128` of its grid, the multistage
-/// 64 x 64 tile from `forward_ms64` of its grid or `forward_ms64_work` of a
-/// wave of work (rows times 64-column strips), and the multistage 16 x 32
-/// tile below; an input gradient takes the multistage
+/// multistage 128 x 64 tile from `forward_ms128` of its grid, the 128 x 96
+/// tile under `forward_one_round_w128x96` where its grid fits one wave while
+/// the 64 x 64 tile's needs three, the multistage 64 x 64 tile from
+/// `forward_ms64` of its grid or `forward_ms64_work` of a wave of work (rows
+/// times 64-column strips), and the multistage 16 x 32 tile below; an input
+/// gradient takes the multistage
 /// 128 x 128, 64 x 128 and 64 x 64 tiles from their shares of their grids,
-/// the portable 16 x 16 tile up to `gradient_thin_rows` rows, and the
-/// multistage 16 x 32 tile otherwise. Every tile walks an output's reduction
+/// the portable 16 x 16 tile up to `gradient_thin_rows` rows over a
+/// reduction of at most `gradient_thin_reduction`, and the multistage
+/// 16 x 32 tile otherwise. Every tile walks an output's reduction
 /// in one chain, so the choice moves time only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Tf32ChainRules {
@@ -3094,10 +3118,12 @@ struct Tf32ChainRules {
     forward_ms128: Option<WaveShare>,
     forward_ms64: Option<WaveShare>,
     forward_ms64_work: Option<WaveShare>,
+    forward_one_round_w128x96: bool,
     gradient_ms128x128: Option<WaveShare>,
     gradient_ms64x128: Option<WaveShare>,
     gradient_ms64: Option<WaveShare>,
     gradient_thin_rows: usize,
+    gradient_thin_reduction: usize,
 }
 
 /// SM120, from a census of every one-chain route forced in two passes on an
@@ -3115,7 +3141,17 @@ struct Tf32ChainRules {
 /// over 128 to 384 outputs in 0.86 to 0.99 of their time on the 64 x 64 tile)
 /// and the thin ones off the portable 16 x 16 tile (16 and 32 rows over 384
 /// outputs in 0.67 of its time on the multistage 16 x 32 tile): 18 cells by
-/// more than 3%, none slower.
+/// more than 3%, none slower. In the same census the 128 x 96 tile ran the
+/// forwards whose grid of it fits one wave while the 64 x 64 tile's needs
+/// three in 0.96 of the 64 x 64 tile's time (ten cells, the four over 384
+/// inputs in 0.91, none slower); where the 64 x 64 grid needs only two
+/// waves the 128 x 96 tile lost up to 1.42 times. A second RTX 5090,
+/// whose timer resolves the thin input gradients of 2 to 3 microseconds
+/// that the first one counted in steps of 2 microseconds, ran those over
+/// reductions of 128 on the portable 16 x 16 tile in 0.95 of the 16 x 32
+/// tile's time (60 cells; reductions of 192 tied in geometric mean, 384
+/// went to the 16 x 32 tile on both cards), so a gradient of at most 48
+/// rows keeps the 16 x 16 tile up to a reduction of 192.
 const TF32_CHAIN_SM120: Tf32ChainRules = Tf32ChainRules {
     forward_narrow_columns: 16,
     forward_wide: Some(WaveShare::new(8, 1)),
@@ -3125,10 +3161,12 @@ const TF32_CHAIN_SM120: Tf32ChainRules = Tf32ChainRules {
     forward_ms128: Some(WaveShare::new(4, 3)),
     forward_ms64: Some(WaveShare::new(1, 2)),
     forward_ms64_work: Some(WaveShare::new(16, 1)),
+    forward_one_round_w128x96: true,
     gradient_ms128x128: None,
     gradient_ms64x128: None,
     gradient_ms64: Some(WaveShare::new(1, 3)),
-    gradient_thin_rows: 0,
+    gradient_thin_rows: 48,
+    gradient_thin_reduction: 192,
 };
 
 /// SM80, from the same census on an A100 (SXM4, 108 SMs) over the census's
@@ -3153,10 +3191,12 @@ const TF32_CHAIN_SM80: Tf32ChainRules = Tf32ChainRules {
     forward_ms128: Some(WaveShare::new(6, 1)),
     forward_ms64: Some(WaveShare::new(1, 3)),
     forward_ms64_work: None,
+    forward_one_round_w128x96: false,
     gradient_ms128x128: Some(WaveShare::new(2, 3)),
     gradient_ms64x128: Some(WaveShare::new(2, 1)),
     gradient_ms64: Some(WaveShare::new(1, 2)),
     gradient_thin_rows: 0,
+    gradient_thin_reduction: 0,
 };
 
 /// The one-chain rules of the card's architecture, where a census measured
@@ -3209,6 +3249,11 @@ fn rna_chain_rule_route(
             W::MsPersistM128N64Bk16S3
         } else if covers(rules.forward_ms128, grid(128, 64)) {
             W::MsM128N64S3
+        } else if rules.forward_one_round_w128x96
+            && grid(128, 96) <= sms
+            && grid(64, 64) > sms.saturating_mul(2)
+        {
+            W::M128N96S3
         } else if covers(rules.forward_ms64, grid(64, 64))
             || covers(
                 rules.forward_ms64_work,
@@ -3225,7 +3270,9 @@ fn rna_chain_rule_route(
         W::NtMsM64N128Bk16S6
     } else if covers(rules.gradient_ms64, grid(64, 64)) {
         W::NtMsM64N64S3
-    } else if rows <= rules.gradient_thin_rows {
+    } else if rows <= rules.gradient_thin_rows
+        && request.shape.reduction(request.op) <= rules.gradient_thin_reduction
+    {
         return Some(narrow);
     } else {
         W::NtMsM16N32S4
@@ -3342,7 +3389,12 @@ fn rna_layer_pieces_selection(
     {
         [Some(tile_16), None, None]
     } else if forward {
-        if rows >= 128 && covers(rules.forward_wide, wide_tiles) {
+        if rows >= 128
+            && (covers(rules.forward_wide, wide_tiles)
+                || rules
+                    .forward_wide_one_round
+                    .is_some_and(|share| share.fits(wide_tiles, sms) && small_tiles > sms))
+        {
             [
                 Some(multistage(Tf32RnaWideTile::MsM128N64S3)),
                 Some(multistage(Tf32RnaWideTile::MsM64N64S3)),
@@ -3374,6 +3426,16 @@ fn rna_layer_pieces_selection(
         } else {
             [None, None, None]
         }
+    } else if rows >= 128
+        && rules
+            .gradient_wide_one_round
+            .is_some_and(|share| share.fits(wide_tiles, sms) && small_tiles > sms)
+    {
+        [
+            Some(multistage(Tf32RnaWideTile::NtMsM128N64S3)),
+            Some(tile_64),
+            None,
+        ]
     } else if rows >= rules.gradient_small_rows
         && !rules.gradient_small_below.covered(wide_tiles, sms)
         && covers(rules.gradient_small, small_tiles)
@@ -9614,6 +9676,11 @@ impl WaveShare {
     /// Whether `grid` CTAs cover this share of `waves` multiprocessors.
     pub(super) fn covered(self, grid: usize, waves: usize) -> bool {
         grid.saturating_mul(self.den) >= waves.saturating_mul(self.num)
+    }
+
+    /// Whether `grid` CTAs fit within this share of `waves` multiprocessors.
+    pub(super) fn fits(self, grid: usize, waves: usize) -> bool {
+        grid.saturating_mul(self.den) <= waves.saturating_mul(self.num)
     }
 
     /// Whether the last wave of `grid` CTAs over `waves` multiprocessors
@@ -20119,6 +20186,109 @@ mod tf32_tests {
                 sm120.multiprocessors as usize
             )),
         );
+    }
+
+    #[test]
+    fn sm120_one_chain_forward_takes_the_128x96_tile_where_one_wave_holds_it() {
+        use crate::gpu::gemm_bi_triad::contract::Tf32RnaWideTile as Wide;
+        let mut sm120 = sm120_availability_for(SM120_TF32_ARCHITECTURE);
+        sm120.rna = Some(qualified_module(
+            ModuleKind::TriadTf32Rna,
+            "compute_120",
+            "sm_120",
+            (12, 0),
+            true,
+            101_376,
+        ));
+        let route = |availability: F32TriadAvailability, rows, columns, reduction| {
+            super::rna_chain_rule_route(
+                normalized_request(ResolvedGemmOp::Nn, rows, columns, reduction),
+                Some(sm89_joint_operands(ResolvedGemmOp::Nn)),
+                availability,
+            )
+        };
+        let tile = |tile| Some(Tf32PhysicalRoute::MmaTf32RnaWide(tile));
+        // On 170 multiprocessors: 128 to 148 tiles of 128 x 96 run in one
+        // wave where the 64 x 64 grid of 384 to 438 tiles needs three.
+        for (rows, columns, reduction) in [(1024, 1536, 384), (4096, 384, 384), (4621, 384, 384)] {
+            assert_eq!(
+                route(sm120, rows, columns, reduction),
+                tile(Wide::M128N96S3),
+                "{rows}x{columns}x{reduction}"
+            );
+        }
+        // 111 tiles of 128 x 96 against a 64 x 64 grid of 292 that two waves
+        // hold keep the 64 x 64 tile, which ran them in 0.86 of the time.
+        assert_eq!(route(sm120, 4621, 256, 256), tile(Wide::MsM64N64S3));
+        // On 188 multiprocessors the 64 x 64 grid of 384 still needs three
+        // waves; on 200 it needs two and the forward keeps that tile.
+        sm120.multiprocessors = 188;
+        assert_eq!(route(sm120, 1024, 1536, 384), tile(Wide::M128N96S3));
+        sm120.multiprocessors = 200;
+        assert_eq!(route(sm120, 1024, 1536, 384), tile(Wide::MsM64N64S3));
+    }
+
+    #[test]
+    fn sm120_cut_forward_takes_the_128x64_tile_while_one_round_holds_it() {
+        use crate::gpu::gemm_bi_triad::contract::Tf32RnaWideTile as Wide;
+        let mut sm120 = sm120_availability_for(SM120_TF32_ARCHITECTURE);
+        sm120.portable = Some(qualified_module_for_auto_identity(
+            SM120_TF32_PORTABLE_ARCHITECTURE,
+        ));
+        sm120.rna = Some(qualified_module(
+            ModuleKind::TriadTf32Rna,
+            "compute_120",
+            "sm_120",
+            (12, 0),
+            true,
+            101_376,
+        ));
+        let wide = |tile| F32TriadSelection::Tf32(Tf32PhysicalRoute::MmaTf32RnaWidePieces4(tile));
+        // On 170 multiprocessors: forwards of 128 and 96 tiles of 128 x 64
+        // against 64 x 64 grids of 256 and 192 take the 128 x 64 tile; 150
+        // of them, past four fifths of the wave, keep the 64 x 64 tile's
+        // 294. An input gradient takes the 128 x 64 tile up to a whole wave
+        // of it (144 tiles against 288), and keeps the 64 x 64 tile where
+        // that grid fits one wave as well.
+        for (op, rows, columns, reduction, expected) in [
+            (ResolvedGemmOp::Nn, 4096, 256, 512, wide(Wide::MsM128N64S3)),
+            (ResolvedGemmOp::Nn, 1024, 768, 768, wide(Wide::MsM128N64S3)),
+            (ResolvedGemmOp::Nn, 3136, 384, 1536, wide(Wide::MsM64N64S3)),
+            (
+                ResolvedGemmOp::Nt,
+                4096,
+                256,
+                2112,
+                wide(Wide::NtMsM128N64S3),
+            ),
+            (
+                ResolvedGemmOp::Nt,
+                768,
+                1536,
+                768,
+                wide(Wide::NtMsM128N64S3),
+            ),
+            (
+                ResolvedGemmOp::Nt,
+                1024,
+                512,
+                1536,
+                wide(Wide::NtMsM64N64S3),
+            ),
+        ] {
+            let request = normalized_request(op, rows, columns, reduction);
+            assert_eq!(
+                resolve_f32_triad_auto_with_operands(
+                    STRICT,
+                    request,
+                    sm89_joint_operands(op),
+                    sm120
+                )
+                .unwrap(),
+                expected,
+                "{request:?}"
+            );
+        }
     }
 
     #[test]
