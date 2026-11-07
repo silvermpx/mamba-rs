@@ -9845,11 +9845,13 @@ pub(super) enum KmBesideSlim {
     /// it the tile's few CTAs each fold every piece of their rows while the
     /// slim partial spreads the pieces over the card.
     WhileItsGridCovers(WaveShare),
-    /// Up to this many pieces: each CTA of the 32 x 64 tile walks every
-    /// piece of its rows in turn, where the slim partial gives each piece
-    /// its own CTA, so the tile's time grows with the pieces and the slim
-    /// partial's barely does.
-    UpToPieces(usize),
+    /// On a layer with at least as many outputs as rows at any count of
+    /// pieces, where the slim partial would first transpose a weight as wide
+    /// as the layer's outputs, and on a narrower layer up to this many
+    /// pieces: each CTA of the 32 x 64 tile walks every piece of its rows in
+    /// turn, where the slim partial gives each piece its own CTA, so the
+    /// tile's time grows with the pieces and the slim partial's barely does.
+    WideOrUpToPieces(usize),
 }
 
 impl KmBesideSlim {
@@ -9864,7 +9866,7 @@ impl KmBesideSlim {
                     cut.m.div_ceil(32).saturating_mul(cut.outputs.div_ceil(64)),
                     cut.waves,
                 ),
-                Self::UpToPieces(most) => cut.chunks <= most,
+                Self::WideOrUpToPieces(most) => cut.outputs >= cut.m || cut.chunks <= most,
             }
     }
 }
@@ -10180,9 +10182,13 @@ const EXACT_SM89: ExactRules = ExactRules {
 /// the cells of a few microseconds the first one counted in steps of 2,
 /// ran the 32 x 64 input-gradient tile beside the slim partial in 0.88 to
 /// 0.89 of the slim partial's time on layers of 6 pieces and in 1.11 to
-/// 1.12 on 8 (1024 rows into 256 outputs), so it folds up to 6 pieces
-/// there; with the layer tiles off, 8 to 17 pieces of 768 and 1024 rows ran
-/// on the slim partial in 0.80 to 0.91 of the tile's time. The 16 x 16
+/// 1.12 on 8 (1024 rows into 256 outputs), so on a layer with fewer
+/// outputs than rows it folds up to 6 pieces (with the layer tiles off, 8
+/// to 17 pieces of 768 and 1024 rows ran on the slim partial in 0.80 to
+/// 0.91 of the tile's time). A layer at least as wide as its rows keeps it
+/// at any count of pieces, as the rule before did: the slim partial first
+/// transposes the whole weight, and 127 rows into 1928 and 2112 outputs
+/// over 12 pieces ran 1.07 to 1.08 times slower on it. The 16 x 16
 /// partial folds a layer of up to 2^22 products in its
 /// own launch: such a layer runs a few microseconds on the card (4.2 for
 /// 64 rows of 384 inputs into 101 outputs), less than the host spends
@@ -10218,7 +10224,7 @@ const EXACT_SM120: ExactRules = ExactRules {
         km_max_pieces: 24,
         km_any_pieces_rows: None,
         km_wide_pieces: None,
-        km_beside_slim: KmBesideSlim::UpToPieces(6),
+        km_beside_slim: KmBesideSlim::WideOrUpToPieces(6),
     },
     partials: ExactChunkPartials {
         slim_from: WaveShare::new(3, 4),
@@ -21529,11 +21535,18 @@ mod exact_batch_invariant_tests {
         };
         // A cut layer's gradient whose slim grid fills three quarters of the
         // card folds over the transposed weight, where the 32 x 64 tile's grid
-        // passes a wave; under it that tile folds up to 6 pieces itself, and
-        // more pieces go back to the slim partial (12 pieces of 768 rows into
-        // 384 outputs ran in 0.91 of the tile's time there).
+        // passes a wave; under it that tile folds up to 6 pieces itself on a
+        // layer narrower than its rows, and more pieces go back to the slim
+        // partial (12 pieces of 768 rows into 384 outputs ran in 0.91 of the
+        // tile's time there). A layer at least as wide as its rows keeps the
+        // tile at any count, where the slim partial would transpose the whole
+        // weight first.
         assert_eq!(
             exact_batch_invariant_nt_plan(nt(768, 384, 768), 170, (12, 0), false).unwrap(),
+            ScalarDispatchPlan::NtExactKmPieces
+        );
+        assert_eq!(
+            exact_batch_invariant_nt_plan(nt(127, 2112, 1536), 170, (12, 0), false).unwrap(),
             ScalarDispatchPlan::NtExactKmPieces
         );
         for (m, n_in, n_out) in [(768, 384, 1536), (1024, 384, 1536), (512, 1536, 2112)] {
