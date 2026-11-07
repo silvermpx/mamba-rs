@@ -93,6 +93,50 @@ __device__ __forceinline__ void exact_copy_bt(
                  :: "r"(dst), "l"(src), "r"(valid ? 4 : 0));
 }
 
+// One 16-byte word, or four 4-byte copies where the stride or the base
+// forbids the word; elements past `limit` (or a row past the edge) are
+// zero-filled.
+__device__ __forceinline__ void exact_km_copy(
+    unsigned dst, const float* src_row, int first, int limit, bool row_valid, bool vector
+) {
+    if (vector) {
+        int bytes = row_valid ? max(0, min(4, limit - first)) * 4 : 0;
+        const float* src = bytes > 0 ? src_row + first : src_row;
+        asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n"
+                     :: "r"(dst), "l"(src), "r"(bytes));
+    } else {
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            bool valid = row_valid && first + j < limit;
+            const float* src = valid ? src_row + first + j : src_row;
+            asm volatile("cp.async.ca.shared.global [%0], [%1], 4, %2;\n"
+                         :: "r"(dst + (unsigned)(j * 4)), "l"(src), "r"(valid ? 4 : 0));
+        }
+    }
+}
+
+// The same copy through L1 (`.ca`): the rows of A and B a 16 x 16 tile
+// stages are read again by the other tiles of its row or column of the
+// grid, which L1 serves on the same multiprocessor.
+__device__ __forceinline__ void exact_c16_copy(
+    unsigned dst, const float* src_row, int first, int limit, bool row_valid, bool vector
+) {
+    if (vector) {
+        int bytes = row_valid ? max(0, min(4, limit - first)) * 4 : 0;
+        const float* src = bytes > 0 ? src_row + first : src_row;
+        asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"
+                     :: "r"(dst), "l"(src), "r"(bytes));
+    } else {
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            bool valid = row_valid && first + j < limit;
+            const float* src = valid ? src_row + first + j : src_row;
+            asm volatile("cp.async.ca.shared.global [%0], [%1], 4, %2;\n"
+                         :: "r"(dst + (unsigned)(j * 4)), "l"(src), "r"(valid ? 4 : 0));
+        }
+    }
+}
+
 // Explicit-width shared loads for the thin tiles' fold. Over plain loads the
 // compiler's vectoriser chose how to split and merge them differently from
 // one compile to the next in the same process, which moved the module's
@@ -731,8 +775,14 @@ void nt_exact_chunk_partial_m16n64(
 // zero-filled past the reduction - so the same chain and the same padding,
 // bit for bit - with a four-stage cp.async ring in place of its
 // load-then-wait slab, so the next slabs are in flight while one folds. A
-// k-row of the A stage is 18 words: a warp's 16 k by 2 rows then land on 32
-// distinct banks. It takes the thin tiles' parameters and folds partial
+// is staged [row][k], as it lies in memory, and a transposed B
+// [column][k]: one 16-byte word per thread and slab for each, where 4-byte
+// copies took four, kept in L1 for the tiles beside it that read the same
+// rows, and a thread reads four k of a row or a column as one 16-byte
+// shared load. A forward's B stays [k][column]. The stage rows
+// are 20 words, so the eight rows or columns a quarter warp reads start in
+// distinct banks; over a transposed B a thread owns columns c and c + 8 for
+// the same reason. It takes the thin tiles' parameters and folds partial
 // planes the same way: plane z of the grid's third axis folds inputs
 // [z * slab, z * slab + slab) from +0.0, and a plane whose length is not a
 // multiple of `close` ends with one +0.0 add - redundant after the
@@ -741,7 +791,7 @@ void nt_exact_chunk_partial_m16n64(
 #define EXACT_C16_BN 16
 #define EXACT_C16_BK 16
 #define EXACT_C16_STAGES 4
-#define EXACT_C16_A_ROW (EXACT_C16_BM + 2)
+#define EXACT_C16_K_ROW (EXACT_C16_BK + 4)
 #define EXACT_C16_B_ROW EXACT_C16_BN
 
 template <bool B_T>
@@ -752,8 +802,9 @@ __device__ __forceinline__ void exact_m16n16_tile(
     const float* __restrict__ bias,
     const ExactThinParams& params
 ) {
-    __shared__ __align__(16) float As[EXACT_C16_STAGES][EXACT_C16_BK * EXACT_C16_A_ROW];
-    __shared__ __align__(16) float Bs[EXACT_C16_STAGES][EXACT_C16_BK * EXACT_C16_B_ROW];
+    __shared__ __align__(16) float As[EXACT_C16_STAGES][EXACT_C16_BM * EXACT_C16_K_ROW];
+    __shared__ __align__(16) float Bs[EXACT_C16_STAGES]
+        [B_T ? EXACT_C16_BN * EXACT_C16_K_ROW : EXACT_C16_BK * EXACT_C16_B_ROW];
 
     const int k_begin = blockIdx.z * params.slab;
     const int k_len = min(params.slab, params.k - k_begin);
@@ -765,59 +816,55 @@ __device__ __forceinline__ void exact_m16n16_tile(
     const int column_tile = blockIdx.x * EXACT_C16_BN;
     const int warp = threadIdx.x >> 5;
     const int lane = threadIdx.x & 31;
-    // Two warps of 8 x 16; a lane owns 2 x 2.
+    // Two warps of 8 x 16; a lane owns two rows by two columns: adjacent
+    // columns over a forward's B, columns c and c + 8 over a transposed one.
     const int row0 = warp * 8 + (lane >> 3) * 2;
-    const int col0 = (lane & 7) * 2;
+    const int col0 = B_T ? (lane & 7) : (lane & 7) * 2;
+    const int col_step = B_T ? 8 : 1;
 
     float acc[2][2];
     #pragma unroll
     for (int j = 0; j < 2; ++j) {
-        const int g_column = column_tile + col0 + j;
+        const int g_column = column_tile + col0 + j * col_step;
         const float seed = (bias != nullptr && g_column < params.n) ? bias[g_column] : 0.0f;
         acc[0][j] = seed;
         acc[1][j] = seed;
     }
 
-    const bool b_rows_vector = ((params.ldb & 3) == 0) && is_aligned_16(B);
+    const bool a_vector = ((params.lda & 3) == 0) && is_aligned_16(A);
+    const bool b_vector = ((params.ldb & 3) == 0) && is_aligned_16(B);
     const int tiles = (k_len + EXACT_C16_BK - 1) / EXACT_C16_BK;
 
     auto issue = [&](int stage, int k0) {
-        // A [16 rows x 16 k]: 256 words, four per thread, k-major stage; a
-        // half-warp reads one row's 16 k, one 64-byte run.
-        unsigned a_base = (unsigned)__cvta_generic_to_shared(&As[stage][0]);
-        #pragma unroll
-        for (int i = 0; i < 4; ++i) {
-            const int kk = lane & 15;
-            const int r = warp * 8 + i * 2 + (lane >> 4);
+        // A [16 rows x 16 k]: 64 words, one per thread.
+        {
+            const int r = threadIdx.x >> 2;
+            const int w = (threadIdx.x & 3) * 4;
             const int g_row = row_tile + r;
-            const int g_k = k0 + kk;
-            const bool valid = g_row < params.m && g_k < k_len;
-            const float* src = valid ? A + (long long)g_row * params.lda + g_k : A;
-            const unsigned dst = a_base + (unsigned)((kk * EXACT_C16_A_ROW + r) * 4);
-            asm volatile("cp.async.ca.shared.global [%0], [%1], 4, %2;\n"
-                         :: "r"(dst), "l"(src), "r"(valid ? 4 : 0));
+            const unsigned dst =
+                (unsigned)__cvta_generic_to_shared(&As[stage][r * EXACT_C16_K_ROW + w]);
+            exact_c16_copy(dst, A + (long long)min(g_row, params.m - 1) * params.lda, k0 + w, k_len,
+                          g_row < params.m, a_vector);
         }
-        // B [16 k x 16 columns]: 64 words of 16 bytes, one per thread, or
-        // for a transposed B 256 elements, four per thread, a half-warp per
-        // column's 16 k.
-        unsigned b_base = (unsigned)__cvta_generic_to_shared(&Bs[stage][0]);
         if (B_T) {
-            #pragma unroll
-            for (int i = 0; i < 4; ++i) {
-                const int e = threadIdx.x + i * 64;
-                const int kt = e & 15;
-                const int c = e >> 4;
-                exact_copy_bt(b_base + (unsigned)((kt * EXACT_C16_B_ROW + c) * 4), B,
-                              params.ldb, k0 + kt, k_len, column_tile + c, params.n);
-            }
+            // B [16 columns x 16 k]: 64 words, one per thread.
+            const int c = threadIdx.x >> 2;
+            const int w = (threadIdx.x & 3) * 4;
+            const int g_column = column_tile + c;
+            const unsigned dst =
+                (unsigned)__cvta_generic_to_shared(&Bs[stage][c * EXACT_C16_K_ROW + w]);
+            exact_c16_copy(dst, B + (long long)min(g_column, params.n - 1) * params.ldb, k0 + w,
+                          k_len, g_column < params.n, b_vector);
             return;
         }
+        // B [16 k x 16 columns]: 64 words of 16 bytes, one per thread.
         const int kk = threadIdx.x >> 2;
         const int c4 = (threadIdx.x & 3) * 4;
         const int g_k = k0 + kk;
         const int g_column = column_tile + c4;
-        const unsigned dst = b_base + (unsigned)((kk * EXACT_C16_B_ROW + c4) * 4);
-        if (b_rows_vector && g_k < k_len && g_column + 3 < params.n) {
+        const unsigned dst =
+            (unsigned)__cvta_generic_to_shared(&Bs[stage][kk * EXACT_C16_B_ROW + c4]);
+        if (b_vector && g_k < k_len && g_column + 3 < params.n) {
             asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n"
                          :: "r"(dst), "l"(B + (long long)g_k * params.ldb + g_column));
         } else {
@@ -846,16 +893,37 @@ __device__ __forceinline__ void exact_m16n16_tile(
             issue(next % EXACT_C16_STAGES, next * EXACT_C16_BK);
         }
         asm volatile("cp.async.commit_group;\n");
-        const float* a_stage = &As[t % EXACT_C16_STAGES][row0];
-        const float* b_stage = &Bs[t % EXACT_C16_STAGES][col0];
+        const float* a_stage = &As[t % EXACT_C16_STAGES][0];
+        const float* b_stage = &Bs[t % EXACT_C16_STAGES][0];
         #pragma unroll
-        for (int kk = 0; kk < EXACT_C16_BK; ++kk) {
-            const float2 a = *reinterpret_cast<const float2*>(a_stage + kk * EXACT_C16_A_ROW);
-            const float2 b = *reinterpret_cast<const float2*>(b_stage + kk * EXACT_C16_B_ROW);
-            acc[0][0] = __fmaf_rn(a.x, b.x, acc[0][0]);
-            acc[0][1] = __fmaf_rn(a.x, b.y, acc[0][1]);
-            acc[1][0] = __fmaf_rn(a.y, b.x, acc[1][0]);
-            acc[1][1] = __fmaf_rn(a.y, b.y, acc[1][1]);
+        for (int g = 0; g < EXACT_C16_BK / 4; ++g) {
+            const float4 a0 = *reinterpret_cast<const float4*>(a_stage + row0 * EXACT_C16_K_ROW + 4 * g);
+            const float4 a1 = *reinterpret_cast<const float4*>(a_stage + (row0 + 1) * EXACT_C16_K_ROW + 4 * g);
+            const float av0[4] = {a0.x, a0.y, a0.z, a0.w};
+            const float av1[4] = {a1.x, a1.y, a1.z, a1.w};
+            if (B_T) {
+                const float4 b0 = *reinterpret_cast<const float4*>(b_stage + col0 * EXACT_C16_K_ROW + 4 * g);
+                const float4 b1 = *reinterpret_cast<const float4*>(b_stage + (col0 + 8) * EXACT_C16_K_ROW + 4 * g);
+                const float bv0[4] = {b0.x, b0.y, b0.z, b0.w};
+                const float bv1[4] = {b1.x, b1.y, b1.z, b1.w};
+                #pragma unroll
+                for (int kk = 0; kk < 4; ++kk) {
+                    acc[0][0] = __fmaf_rn(av0[kk], bv0[kk], acc[0][0]);
+                    acc[0][1] = __fmaf_rn(av0[kk], bv1[kk], acc[0][1]);
+                    acc[1][0] = __fmaf_rn(av1[kk], bv0[kk], acc[1][0]);
+                    acc[1][1] = __fmaf_rn(av1[kk], bv1[kk], acc[1][1]);
+                }
+            } else {
+                #pragma unroll
+                for (int kk = 0; kk < 4; ++kk) {
+                    const float2 b = *reinterpret_cast<const float2*>(
+                        b_stage + (4 * g + kk) * EXACT_C16_B_ROW + col0);
+                    acc[0][0] = __fmaf_rn(av0[kk], b.x, acc[0][0]);
+                    acc[0][1] = __fmaf_rn(av0[kk], b.y, acc[0][1]);
+                    acc[1][0] = __fmaf_rn(av1[kk], b.x, acc[1][0]);
+                    acc[1][1] = __fmaf_rn(av1[kk], b.y, acc[1][1]);
+                }
+            }
         }
     }
     asm volatile("cp.async.wait_group 0;\n");
@@ -869,7 +937,7 @@ __device__ __forceinline__ void exact_m16n16_tile(
         }
         #pragma unroll
         for (int j = 0; j < 2; ++j) {
-            const int g_column = column_tile + col0 + j;
+            const int g_column = column_tile + col0 + j * col_step;
             if (g_column < params.n) {
                 const float value = close ? __fadd_rn(acc[i][j], 0.0f) : acc[i][j];
                 C[(long long)g_row * params.ldc + g_column] = value;
@@ -1064,28 +1132,6 @@ struct ExactKmStage {
     float a[EXACT_KM_BM * EXACT_KM_ROW];
     float b[B_T ? EXACT_KM_BN * EXACT_KM_ROW : EXACT_KM_BK * EXACT_KM_B_NN_ROW];
 };
-
-// One 16-byte word, or four 4-byte copies where the stride or the base
-// forbids the word; elements past `limit` (or a row past the edge) are
-// zero-filled.
-__device__ __forceinline__ void exact_km_copy(
-    unsigned dst, const float* src_row, int first, int limit, bool row_valid, bool vector
-) {
-    if (vector) {
-        int bytes = row_valid ? max(0, min(4, limit - first)) * 4 : 0;
-        const float* src = bytes > 0 ? src_row + first : src_row;
-        asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n"
-                     :: "r"(dst), "l"(src), "r"(bytes));
-    } else {
-        #pragma unroll
-        for (int j = 0; j < 4; ++j) {
-            bool valid = row_valid && first + j < limit;
-            const float* src = valid ? src_row + first + j : src_row;
-            asm volatile("cp.async.ca.shared.global [%0], [%1], 4, %2;\n"
-                         :: "r"(dst + (unsigned)(j * 4)), "l"(src), "r"(valid ? 4 : 0));
-        }
-    }
-}
 
 template <bool B_T, bool Pieces>
 __device__ __forceinline__ void exact_km_m32n64_tile(
@@ -1346,7 +1392,7 @@ void nt_exact_km_pieces_m32n64_bk16_s4(
 #undef EXACT_KM_BM
 
 #undef EXACT_C16_B_ROW
-#undef EXACT_C16_A_ROW
+#undef EXACT_C16_K_ROW
 #undef EXACT_C16_STAGES
 #undef EXACT_C16_BK
 #undef EXACT_C16_BN
