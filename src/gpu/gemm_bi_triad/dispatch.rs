@@ -9657,7 +9657,9 @@ pub(super) fn exact_batch_invariant_nn_plan(
         let partial = if slim {
             ExactChunkPartial::Slim
         } else if rules.partials.narrow(m, n, chunks, waves) {
-            rules.partials.narrow16(piece_rows, n)
+            rules
+                .partials
+                .narrow16(piece_rows, n, m.saturating_mul(k).saturating_mul(n))
         } else {
             rules.partials.small(m)
         };
@@ -9843,6 +9845,11 @@ pub(super) enum KmBesideSlim {
     /// it the tile's few CTAs each fold every piece of their rows while the
     /// slim partial spreads the pieces over the card.
     WhileItsGridCovers(WaveShare),
+    /// Up to this many pieces: each CTA of the 32 x 64 tile walks every
+    /// piece of its rows in turn, where the slim partial gives each piece
+    /// its own CTA, so the tile's time grows with the pieces and the slim
+    /// partial's barely does.
+    UpToPieces(usize),
 }
 
 impl KmBesideSlim {
@@ -9857,6 +9864,7 @@ impl KmBesideSlim {
                     cut.m.div_ceil(32).saturating_mul(cut.outputs.div_ceil(64)),
                     cut.waves,
                 ),
+                Self::UpToPieces(most) => cut.chunks <= most,
             }
     }
 }
@@ -9893,10 +9901,10 @@ impl WaveWindow {
 /// (while its own grid stays under `narrow_rows_below`, where set) or while
 /// the 32 x 64 partial's grid stays under `narrow_below` of a wave
 /// (`narrow_below_unpadded` on rows its 16-row tiles pad no less), folded by
-/// its last arriving CTAs in the same launch (`fused`, where the piece's
-/// tiles fit the arrival counters) or by `splitk_reduce`, and the 32 x 64
-/// partial otherwise. Every partial writes the same planes and both folds
-/// add them in the same order.
+/// its last arriving CTAs in the same launch (up to `fused_products`
+/// products, where the piece's tiles fit the arrival counters) or by
+/// `splitk_reduce`, and the 32 x 64 partial otherwise. Every partial writes
+/// the same planes and both folds add them in the same order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ExactChunkPartials {
     slim_from: WaveShare,
@@ -9918,7 +9926,10 @@ pub(super) struct ExactChunkPartials {
     narrow_rows_below: Option<WaveShare>,
     /// The most rows the 16 x 64 partial takes in place of the 32 x 64 one.
     small16_rows: usize,
-    fused: bool,
+    /// The most products (rows x inputs x outputs) of a layer whose 16 x 16
+    /// partial folds its planes in its own launch: `usize::MAX` every layer,
+    /// 0 none.
+    fused_products: usize,
 }
 
 impl ExactChunkPartials {
@@ -9977,9 +9988,14 @@ impl ExactChunkPartials {
     }
 
     /// The 16 x 16 partial of a piece of `piece_rows` rows over `columns`
-    /// outputs.
-    pub(super) fn narrow16(self, piece_rows: usize, columns: usize) -> ExactChunkPartial {
-        if self.fused
+    /// outputs, in a layer of `products` products.
+    pub(super) fn narrow16(
+        self,
+        piece_rows: usize,
+        columns: usize,
+        products: usize,
+    ) -> ExactChunkPartial {
+        if products <= self.fused_products
             && piece_rows.div_ceil(16).saturating_mul(columns.div_ceil(16))
                 <= TF32_SPLITK_COUNTER_CAP
         {
@@ -10112,7 +10128,7 @@ const EXACT_SM89: ExactRules = ExactRules {
         narrow_rows: 0,
         narrow_rows_below: None,
         small16_rows: 16,
-        fused: true,
+        fused_products: usize::MAX,
     },
     uncut: ExactUncutTiles {
         nn_km: WaveWindow::new(WaveShare::new(1, 2), WaveShare::new(3, 1)),
@@ -10160,7 +10176,21 @@ const EXACT_SM89: ExactRules = ExactRules {
 /// tiles pad more than the 32-row tiles while the 32 x 64 partial's grid
 /// stays under four waves (65 and 129 rows: 0.70 to 0.94). The slab tile
 /// takes staged rows only: over 833 and 582 inputs it ran 2.7 and 3.0
-/// times the slim partial's time.
+/// times the slim partial's time. Two more RTX 5090s, whose timers resolve
+/// the cells of a few microseconds the first one counted in steps of 2,
+/// ran the 32 x 64 input-gradient tile beside the slim partial in 0.88 to
+/// 0.89 of the slim partial's time on layers of 6 pieces and in 1.11 to
+/// 1.12 on 8 (1024 rows into 256 outputs), so it folds up to 6 pieces
+/// there; with the layer tiles off, 8 to 17 pieces of 768 and 1024 rows ran
+/// on the slim partial in 0.80 to 0.91 of the tile's time. The 16 x 16
+/// partial folds a layer of up to 2^22 products in its
+/// own launch: such a layer runs a few microseconds on the card (4.2 for
+/// 64 rows of 384 inputs into 101 outputs), less than the host spends
+/// queueing the partial and the reducer (about 6), and one launch queues
+/// in half that. On the card alone the fold in its own launch ran 108 such
+/// layers in 0.996 of the reducer's time (geometric mean, 17 more than 3%
+/// slower, 32 more than 3% faster); against the reference the 64-row layer
+/// above went from 1.08 of its time to 0.69.
 const EXACT_SM120: ExactRules = ExactRules {
     forward: ExactCutTiles {
         slab: None,
@@ -10188,7 +10218,7 @@ const EXACT_SM120: ExactRules = ExactRules {
         km_max_pieces: 24,
         km_any_pieces_rows: None,
         km_wide_pieces: None,
-        km_beside_slim: KmBesideSlim::Always,
+        km_beside_slim: KmBesideSlim::UpToPieces(6),
     },
     partials: ExactChunkPartials {
         slim_from: WaveShare::new(3, 4),
@@ -10199,7 +10229,7 @@ const EXACT_SM120: ExactRules = ExactRules {
         narrow_rows: 16,
         narrow_rows_below: None,
         small16_rows: 0,
-        fused: false,
+        fused_products: 1 << 22,
     },
     uncut: ExactUncutTiles {
         nn_km: WaveWindow::new(WaveShare::new(1, 2), WaveShare::new(1, 1)),
@@ -10304,7 +10334,7 @@ const EXACT_SM80: ExactRules = ExactRules {
         narrow_rows: 16,
         narrow_rows_below: None,
         small16_rows: 0,
-        fused: true,
+        fused_products: usize::MAX,
     },
     uncut: ExactUncutTiles {
         nn_km: WaveWindow::from(WaveShare::new(1, 2)),
@@ -10545,7 +10575,11 @@ pub(super) fn exact_batch_invariant_nt_plan(
         let partial = if slim {
             ExactChunkPartial::Slim
         } else if rules.partials.narrow(m, n_in, chunks, waves) {
-            rules.partials.narrow16(piece_rows, n_in)
+            rules.partials.narrow16(
+                piece_rows,
+                n_in,
+                m.saturating_mul(n_in).saturating_mul(n_out),
+            )
         } else {
             rules.partials.small(m)
         };
@@ -21364,7 +21398,11 @@ mod exact_batch_invariant_tests {
                                 let expected = if slim {
                                     ExactChunkPartial::Slim
                                 } else if narrow {
-                                    rules.narrow16(piece_rows as usize, n_in)
+                                    rules.narrow16(
+                                        piece_rows as usize,
+                                        n_in,
+                                        m.saturating_mul(n_in).saturating_mul(n_out),
+                                    )
                                 } else {
                                     rules.small(m)
                                 };
@@ -21491,12 +21529,14 @@ mod exact_batch_invariant_tests {
         };
         // A cut layer's gradient whose slim grid fills three quarters of the
         // card folds over the transposed weight, where the 32 x 64 tile's grid
-        // passes a wave; under it that tile folds the pieces itself.
+        // passes a wave; under it that tile folds up to 6 pieces itself, and
+        // more pieces go back to the slim partial (12 pieces of 768 rows into
+        // 384 outputs ran in 0.91 of the tile's time there).
         assert_eq!(
-            exact_batch_invariant_nt_plan(nt(768, 384, 1536), 170, (12, 0), false).unwrap(),
+            exact_batch_invariant_nt_plan(nt(768, 384, 768), 170, (12, 0), false).unwrap(),
             ScalarDispatchPlan::NtExactKmPieces
         );
-        for (m, n_in, n_out) in [(1024, 384, 1536), (512, 1536, 2112)] {
+        for (m, n_in, n_out) in [(768, 384, 1536), (1024, 384, 1536), (512, 1536, 2112)] {
             let plan =
                 exact_batch_invariant_nt_plan(nt(m, n_in, n_out), 170, (12, 0), false).unwrap();
             assert!(
