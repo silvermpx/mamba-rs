@@ -5286,6 +5286,7 @@ pub(super) fn sm120_fma_exact_route(
         in_cta,
         layer_fold: false,
         pairs,
+        eight_warps: false,
     };
     let route = SM120_FMA_MEASURED_CELLS
         .iter()
@@ -5393,17 +5394,37 @@ pub(super) fn sm120_fma_layer_route(
             multiprocessors,
             false,
         );
-    let route = Sm120FmaRoute {
+    let in_cta = splits > 1 && !pairs;
+    let four_warps = Sm120FmaRoute {
         tile,
         kvec,
         splits,
-        in_cta: splits > 1 && !pairs,
+        in_cta,
         layer_fold: true,
         pairs,
+        eight_warps: false,
     };
     if cut && !pairs && !sm120_layer_takes_cut(outputs, multiprocessors) {
         return None;
     }
+    // A forward's fold runs the eight-warp arm where its rule takes the grid
+    // and the card binds that arm, the four-warp arm otherwise; both write
+    // the same bits.
+    let eight_warps = Sm120FmaRoute {
+        eight_warps: true,
+        ..four_warps
+    };
+    let route = if request.op == ResolvedGemmOp::Nn
+        && in_cta
+        && sm120_fold_takes_eight_warps(sm120_generic_tiles(request, tile), tile, multiprocessors)
+        && !qualified
+            .sm120_fma_exclusions
+            .is_excluded(request.op, eight_warps)
+    {
+        eight_warps
+    } else {
+        four_warps
+    };
     if qualified
         .sm120_fma_exclusions
         .is_excluded(request.op, route)
@@ -5427,6 +5448,27 @@ fn sm120_layer_takes_cut((rows, columns): (usize, usize), multiprocessors: u32) 
         rows.div_ceil(128).saturating_mul(columns.div_ceil(64)),
         multiprocessors as usize,
     )
+}
+
+/// Whether a cut forward that folds its pieces in one CTA a tile runs the
+/// eight-warp arm of its tile (8 x 4 microtiles over 256 threads) rather
+/// than the four-warp arm (8 x 8 over 128). Both hold two blocks a
+/// multiprocessor; a block left alone on its multiprocessor in the last
+/// wave runs faster on eight warps, while a full multiprocessor runs the
+/// larger microtile faster. So the eight-warp arm takes a grid of at most
+/// four waves of fold blocks whose last wave, or only one, is less than
+/// half full. Over the 98 cut forwards of an RTX 5090's SM120 layer census
+/// that ran 44 cells in 0.94 of the four-warp arm's time in geometric mean,
+/// 32 of them in under 0.97 and none slower by more than 1%; the arm lost
+/// 6% on the grids whose last wave was half full or more and up to 5% past
+/// four waves. The 64 x 64 tile has no eight-warp arm.
+fn sm120_fold_takes_eight_warps(tiles: usize, tile: Sm120FmaTile, multiprocessors: u32) -> bool {
+    let slots = (multiprocessors as usize).saturating_mul(tile.min_blocks(true) as usize);
+    let tail = tiles.checked_rem(slots).unwrap_or(0);
+    tile != Sm120FmaTile::M64N64
+        && tiles <= slots.saturating_mul(4)
+        && tail != 0
+        && tail.saturating_mul(2) < slots
 }
 
 /// The tile a cut forward folds on in the SM120 layer kernels: the 128 x 64
@@ -15841,6 +15883,59 @@ mod tf32_tests {
     }
 
     #[test]
+    fn sm120_fold_takes_eight_warps_where_its_last_wave_is_thin() {
+        use super::sm120_fold_takes_eight_warps as takes;
+        // 170 multiprocessors hold 340 fold blocks.
+        assert!(takes(848, Sm120FmaTile::M128N64, 170), "2.49 waves");
+        assert!(!takes(864, Sm120FmaTile::M128N64, 170), "2.54 waves");
+        assert!(takes(128, Sm120FmaTile::M64N128, 170), "0.38 of a wave");
+        assert!(!takes(256, Sm120FmaTile::M128N64, 170), "0.75 of a wave");
+        assert!(
+            !takes(1_360, Sm120FmaTile::M128N64, 170),
+            "four whole waves"
+        );
+        assert!(!takes(1_400, Sm120FmaTile::M128N64, 170), "past four waves");
+        assert!(!takes(128, Sm120FmaTile::M64N64, 170), "no eight-warp arm");
+        // The card's own count sizes the waves: 864 tiles over 188
+        // multiprocessors fill 2.30 waves.
+        assert!(takes(864, Sm120FmaTile::M128N64, 188));
+    }
+
+    #[test]
+    fn sm120_cut_forward_folds_on_eight_warps_where_its_last_wave_is_thin() {
+        let mut availability = sm120_availability_for(sm120_cohort().identity);
+        if let Some(specialized) = availability.specialized.as_mut() {
+            specialized.device.multiprocessor_count = 170;
+        }
+        let operands = F32TriadOperands {
+            output: 0x1000,
+            a: 0x2000,
+            b: 0x3000,
+            bias: None,
+            alpha: 1.0,
+            beta: 0.0,
+        };
+        let layer = |dims| {
+            let request = F32TriadRequest {
+                op: ResolvedGemmOp::Nn,
+                shape: F32TriadShape::contiguous(ResolvedGemmOp::Nn, dims),
+            };
+            super::sm120_fma_layer_route(request, operands, availability)
+                .expect("a cut forward on the layer kernels")
+        };
+        // 2048 rows into 3352 outputs over 768 inputs fold on 848 tiles of
+        // 128 x 64, 2.49 waves of the 340 fold blocks; into 3432 outputs on
+        // 864 tiles, 2.54 waves.
+        let thin = layer((2_048, 768, 3_352));
+        assert!(
+            thin.in_cta && thin.eight_warps && thin.tile == Sm120FmaTile::M128N64,
+            "{thin:?}"
+        );
+        let full = layer((2_048, 768, 3_432));
+        assert!(full.in_cta && !full.eight_warps, "{full:?}");
+    }
+
+    #[test]
     fn sm120_small_cut_layers_deal_their_pieces_in_pairs() {
         let availability = sm120_availability_for(sm120_cohort().identity);
         let operands = F32TriadOperands {
@@ -16075,6 +16170,7 @@ mod tf32_tests {
             in_cta: false,
             layer_fold: false,
             pairs: false,
+            eight_warps: false,
         };
         let error = crate::gpu::gemm_bi_triad::launch::sm120_fma_launch_plan(request, route)
             .expect_err("a split the portable plan does not make");
@@ -16141,6 +16237,7 @@ mod tf32_tests {
                             || super::SM120_TN_FOLD_WINDOW.holds(tiles, multiprocessors as usize)),
                     layer_fold: false,
                     pairs,
+                    eight_warps: false,
                 })
             };
             assert_eq!(
@@ -16226,6 +16323,7 @@ mod tf32_tests {
             in_cta: false,
             layer_fold: false,
             pairs: false,
+            eight_warps: false,
         };
         let availability =
             exact_sm120_availability_with_exclusions(&[(ResolvedGemmOp::Nt, measured)]);
@@ -16278,6 +16376,7 @@ mod tf32_tests {
             in_cta: false,
             layer_fold: false,
             pairs: false,
+            eight_warps: false,
         };
         let generic = Sm120FmaRoute {
             tile: Sm120FmaTile::M128N64,
@@ -16286,6 +16385,7 @@ mod tf32_tests {
             in_cta: false,
             layer_fold: false,
             pairs: false,
+            eight_warps: false,
         };
         let availability = exact_sm120_availability_with_exclusions(&[
             (ResolvedGemmOp::Nt, measured),
@@ -16314,6 +16414,7 @@ mod tf32_tests {
             in_cta: false,
             layer_fold: false,
             pairs: false,
+            eight_warps: false,
         };
         let availability =
             exact_sm120_availability_with_exclusions(&[(ResolvedGemmOp::Nt, excluded)]);
@@ -16330,6 +16431,7 @@ mod tf32_tests {
                     in_cta: true,
                     layer_fold: true,
                     pairs: false,
+                    eight_warps: false,
                 },
             ),
             (
@@ -16345,6 +16447,7 @@ mod tf32_tests {
                     in_cta: false,
                     layer_fold: false,
                     pairs: true,
+                    eight_warps: false,
                 },
             ),
         ] {
@@ -16382,6 +16485,7 @@ mod tf32_tests {
             in_cta: false,
             layer_fold: false,
             pairs: false,
+            eight_warps: false,
         };
         let availability = exact_sm120_availability_with_exclusions(&[(ResolvedGemmOp::Nt, exact)]);
         let (request, _) = nt_d768_out_request_and_operands();

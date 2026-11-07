@@ -1068,6 +1068,9 @@ fn sm120_tf32_symbols() -> Vec<String> {
             symbols.push(format!("{op}_sm120_tma_fma_{tile}_bk16_s2_fold"));
         }
     }
+    for tile in ["m128n64", "m64n128"] {
+        symbols.push(format!("nn_sm120_tma_fma_{tile}_bk16_s2_fold_w8"));
+    }
     symbols
 }
 

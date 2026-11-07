@@ -8152,7 +8152,7 @@ fn validate_sm120_ptx(arch: &str, ptx: &str) -> Result<(), String> {
         .map(|spec| spec.symbol)
         .collect();
     expected.extend(super::contract::tf32_module_symbols(ModuleKind::TriadSm120));
-    let parsed = validate_exact_ptx_exports("TriadSm120", 134, &expected, ptx)?;
+    let parsed = validate_exact_ptx_exports("TriadSm120", 136, &expected, ptx)?;
     validate_sm120_entry_features(&parsed)?;
     // The stream-K kernels count each tile's parts in with one wrapping
     // atomicInc; every other entry holds no atomic at all.
@@ -11711,6 +11711,10 @@ fn tf32_register_cap(module_kind: ModuleKind, symbol: &str) -> Result<u32, Strin
         // The stream-K kernel keeps one CTA per multiprocessor by design and
         // spends the register file on its pipeline state and boundary code.
         ModuleKind::TriadSm120 if symbol.ends_with("_pair_streamk") => Ok(240),
+        // The eight-warp fold arms hold two blocks of 256 threads.
+        ModuleKind::TriadSm120 if symbol.contains("_tma_fma_") && symbol.ends_with("_fold_w8") => {
+            Ok(super::contract::SM120_FMA_EIGHT_WARP_REGISTER_CAP)
+        }
         // The exact FMA routes hold a 64-accumulator microtile; the NT
         // k-vector arms also keep a float4 B fragment per column, and the
         // fold arms the finished pieces' sum.
@@ -14008,6 +14012,7 @@ mod tests {
             in_cta: false,
             layer_fold: false,
             pairs: false,
+            eight_warps: false,
         };
         let excluded_symbol = "nt_sm120_tma_fma_m64n128_bk16_s2";
         let exclusions = [
@@ -15179,7 +15184,7 @@ mod tests {
         let expected_count = match module_kind {
             ModuleKind::TriadSm90a => 18,
             ModuleKind::TriadSm100 => 108,
-            ModuleKind::TriadSm120 => 134,
+            ModuleKind::TriadSm120 => 136,
             _ => unreachable!(),
         };
         assert_eq!(symbols.len(), expected_count);
@@ -15841,7 +15846,7 @@ mod tests {
             (ModuleKind::TriadSm80, 30),
             (ModuleKind::TriadSm90a, 6),
             (ModuleKind::TriadSm100, 36),
-            (ModuleKind::TriadSm120, 36),
+            (ModuleKind::TriadSm120, 38),
         ] {
             let kernel_specs = super::super::contract::tf32_route_specs(module_kind);
             let symbols: BTreeSet<_> =

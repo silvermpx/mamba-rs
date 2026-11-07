@@ -6912,6 +6912,7 @@ pub(in crate::gpu) fn launch_cached_inference_sm120_exact_tma<O: PhysicalLaunchO
         in_cta: false,
         layer_fold: false,
         pairs: false,
+        eight_warps: false,
     });
     if resolve_tf32_forced(request, ctx.kernels.f32_triad_availability(), route).is_err() {
         return Ok(false);
@@ -16891,6 +16892,7 @@ mod prepared_f32_launch_tests {
             in_cta: false,
             layer_fold: false,
             pairs: false,
+            eight_warps: false,
         });
         assert_distinct(
             context_token,
@@ -16917,6 +16919,7 @@ mod prepared_f32_launch_tests {
                     in_cta: false,
                     layer_fold: false,
                     pairs: false,
+                    eight_warps: false,
                 },)),
                 request,
                 operands,

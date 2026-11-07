@@ -1,5 +1,6 @@
 // Exact-F32 SM120 routes: the production ascending-k FMA chain behind an 8x8
-// register microtile, fed by TMA, for NN, TN and NT, with a deterministic
+// register microtile (8x4 in the forward's eight-warp fold arms), fed by TMA,
+// for NN, TN and NT, with a deterministic
 // reduction split. Compiled into the TriadSm120 module after sm120.cu, which
 // declares the tensor-map descriptor type.
 //
@@ -24,7 +25,11 @@
 // a cut. A CTA that folds its own pieces keeps their sum in a second set of
 // registers, which the fold kernels (the NT k-vector arms and the _fold
 // arms) pay for with two blocks a multiprocessor instead of three: moving
-// the sum through L2 at every piece end cost more than the third block.
+// the sum through L2 at every piece end cost more than the third block, and
+// a third block that spills the sum ran no faster. The forward's eight-warp
+// arms (_fold_w8) hold the sum over 8x4 microtiles in eight warps, the same
+// two blocks: they run a grid whose last wave leaves blocks alone on their
+// multiprocessors faster, the four-warp arms a full card.
 // A grid too small to fill the card that way is cut into pairs of pieces
 // instead: unit s of a tile walks pieces 2s and 2s+1, holding the first in
 // the fold registers and the second in the accumulators, then adds both in
@@ -52,7 +57,6 @@
 
 #define SM120_FMA_BK 16
 #define SM120_FMA_TM 8
-#define SM120_FMA_TN 8
 #define SM120_FMA_WARP_SIZE 32
 #define SM120_FMA_GROUP_M 16
 #define SM120_FMA_K_PIPE 2
@@ -132,7 +136,7 @@ static __device__ __forceinline__ unsigned sm120_fma_flag_read(
     return value;
 }
 
-template <int OP, int BM, int BN, int WM, int WN, int THREADS, bool NT_KVEC, bool FOLD>
+template <int OP, int BM, int BN, int WM, int WN, int TN, int THREADS, bool NT_KVEC, bool FOLD>
 __device__ __forceinline__ void sm120_fma_body(
     float* __restrict__ C,
     const float* __restrict__ bias,
@@ -144,7 +148,6 @@ __device__ __forceinline__ void sm120_fma_body(
 ) {
     constexpr int BK = SM120_FMA_BK;
     constexpr int TM = SM120_FMA_TM;
-    constexpr int TN = SM120_FMA_TN;
     constexpr int K_PIPE = SM120_FMA_K_PIPE;
     constexpr int A_STAGE = BM * BK;
     constexpr int B_STAGE = BK * BN;
@@ -679,7 +682,7 @@ __device__ __forceinline__ void sm120_fma_body(
 
 // The parameter order follows the SM120 stream-K ABI: output, slabs, flags,
 // the two tensor maps, bias, then the parameter bundle.
-#define SM120_DEFINE_FMA_KERNEL(NAME, OP, BM, BN, WM, WN, THREADS, MIN_BLOCKS, NT_KVEC, FOLD) \
+#define SM120_DEFINE_FMA_KERNEL(NAME, OP, BM, BN, WM, WN, TN, THREADS, MIN_BLOCKS, NT_KVEC, FOLD) \
     extern "C" __global__ __launch_bounds__(THREADS, MIN_BLOCKS)                     \
     void NAME(                                                                        \
         float* __restrict__ C,                                                        \
@@ -691,38 +694,40 @@ __device__ __forceinline__ void sm120_fma_body(
         const __grid_constant__ Sm120FmaKernelParams params                           \
     ) {                                                                               \
         assert(params.alpha == 1.0f || bias == nullptr);                              \
-        sm120_fma_body<OP, BM, BN, WM, WN, THREADS, NT_KVEC, FOLD>(                   \
+        sm120_fma_body<OP, BM, BN, WM, WN, TN, THREADS, NT_KVEC, FOLD>(               \
             C, bias, partials, flags, params, a_map, b_map);                          \
     }
 
 // 128x64: four warps stacked, each 32x64. 64x128: four warps side by side,
 // each 64x32. 64x64: two warps stacked, each 32x64. The NT k-vector arms
 // keep a float4-along-k B fragment, and the fold arms the finished pieces'
-// sum, and both pay for it with two blocks per SM.
-SM120_DEFINE_FMA_KERNEL(nn_sm120_tma_fma_m128n64_bk16_s2, SM120_FMA_OP_NN, 128, 64, 32, 64, 128, 3, false, false)
-SM120_DEFINE_FMA_KERNEL(nn_sm120_tma_fma_m64n128_bk16_s2, SM120_FMA_OP_NN, 64, 128, 64, 32, 128, 3, false, false)
-SM120_DEFINE_FMA_KERNEL(nn_sm120_tma_fma_m64n64_bk16_s2, SM120_FMA_OP_NN, 64, 64, 32, 64, 64, 5, false, false)
-SM120_DEFINE_FMA_KERNEL(tn_sm120_tma_fma_m128n64_bk16_s2, SM120_FMA_OP_TN, 128, 64, 32, 64, 128, 3, false, false)
-SM120_DEFINE_FMA_KERNEL(tn_sm120_tma_fma_m64n128_bk16_s2, SM120_FMA_OP_TN, 64, 128, 64, 32, 128, 3, false, false)
-SM120_DEFINE_FMA_KERNEL(tn_sm120_tma_fma_m64n64_bk16_s2, SM120_FMA_OP_TN, 64, 64, 32, 64, 64, 5, false, false)
-SM120_DEFINE_FMA_KERNEL(nt_sm120_tma_fma_m128n64_bk16_s2, SM120_FMA_OP_NT, 128, 64, 32, 64, 128, 3, false, false)
-SM120_DEFINE_FMA_KERNEL(nt_sm120_tma_fma_m64n128_bk16_s2, SM120_FMA_OP_NT, 64, 128, 64, 32, 128, 3, false, false)
-SM120_DEFINE_FMA_KERNEL(nt_sm120_tma_fma_m64n64_bk16_s2, SM120_FMA_OP_NT, 64, 64, 32, 64, 64, 5, false, false)
-SM120_DEFINE_FMA_KERNEL(nt_sm120_tma_fma_m128n64_bk16_s2_kvec, SM120_FMA_OP_NT, 128, 64, 32, 64, 128, 2, true, true)
-SM120_DEFINE_FMA_KERNEL(nt_sm120_tma_fma_m64n128_bk16_s2_kvec, SM120_FMA_OP_NT, 64, 128, 64, 32, 128, 2, true, true)
-SM120_DEFINE_FMA_KERNEL(nt_sm120_tma_fma_m64n64_bk16_s2_kvec, SM120_FMA_OP_NT, 64, 64, 32, 64, 64, 4, true, true)
-SM120_DEFINE_FMA_KERNEL(nn_sm120_tma_fma_m128n64_bk16_s2_fold, SM120_FMA_OP_NN, 128, 64, 32, 64, 128, 2, false, true)
-SM120_DEFINE_FMA_KERNEL(nn_sm120_tma_fma_m64n128_bk16_s2_fold, SM120_FMA_OP_NN, 64, 128, 64, 32, 128, 2, false, true)
-SM120_DEFINE_FMA_KERNEL(nn_sm120_tma_fma_m64n64_bk16_s2_fold, SM120_FMA_OP_NN, 64, 64, 32, 64, 64, 4, false, true)
-SM120_DEFINE_FMA_KERNEL(tn_sm120_tma_fma_m128n64_bk16_s2_fold, SM120_FMA_OP_TN, 128, 64, 32, 64, 128, 2, false, true)
-SM120_DEFINE_FMA_KERNEL(tn_sm120_tma_fma_m64n128_bk16_s2_fold, SM120_FMA_OP_TN, 64, 128, 64, 32, 128, 2, false, true)
-SM120_DEFINE_FMA_KERNEL(tn_sm120_tma_fma_m64n64_bk16_s2_fold, SM120_FMA_OP_TN, 64, 64, 32, 64, 64, 4, false, true)
+// sum, and both pay for it with two blocks per SM. The eight-warp fold arms
+// tile 128x64 and 64x128 with eight warps of 32x32 over 8x4 microtiles.
+SM120_DEFINE_FMA_KERNEL(nn_sm120_tma_fma_m128n64_bk16_s2, SM120_FMA_OP_NN, 128, 64, 32, 64, 8, 128, 3, false, false)
+SM120_DEFINE_FMA_KERNEL(nn_sm120_tma_fma_m64n128_bk16_s2, SM120_FMA_OP_NN, 64, 128, 64, 32, 8, 128, 3, false, false)
+SM120_DEFINE_FMA_KERNEL(nn_sm120_tma_fma_m64n64_bk16_s2, SM120_FMA_OP_NN, 64, 64, 32, 64, 8, 64, 5, false, false)
+SM120_DEFINE_FMA_KERNEL(tn_sm120_tma_fma_m128n64_bk16_s2, SM120_FMA_OP_TN, 128, 64, 32, 64, 8, 128, 3, false, false)
+SM120_DEFINE_FMA_KERNEL(tn_sm120_tma_fma_m64n128_bk16_s2, SM120_FMA_OP_TN, 64, 128, 64, 32, 8, 128, 3, false, false)
+SM120_DEFINE_FMA_KERNEL(tn_sm120_tma_fma_m64n64_bk16_s2, SM120_FMA_OP_TN, 64, 64, 32, 64, 8, 64, 5, false, false)
+SM120_DEFINE_FMA_KERNEL(nt_sm120_tma_fma_m128n64_bk16_s2, SM120_FMA_OP_NT, 128, 64, 32, 64, 8, 128, 3, false, false)
+SM120_DEFINE_FMA_KERNEL(nt_sm120_tma_fma_m64n128_bk16_s2, SM120_FMA_OP_NT, 64, 128, 64, 32, 8, 128, 3, false, false)
+SM120_DEFINE_FMA_KERNEL(nt_sm120_tma_fma_m64n64_bk16_s2, SM120_FMA_OP_NT, 64, 64, 32, 64, 8, 64, 5, false, false)
+SM120_DEFINE_FMA_KERNEL(nt_sm120_tma_fma_m128n64_bk16_s2_kvec, SM120_FMA_OP_NT, 128, 64, 32, 64, 8, 128, 2, true, true)
+SM120_DEFINE_FMA_KERNEL(nt_sm120_tma_fma_m64n128_bk16_s2_kvec, SM120_FMA_OP_NT, 64, 128, 64, 32, 8, 128, 2, true, true)
+SM120_DEFINE_FMA_KERNEL(nt_sm120_tma_fma_m64n64_bk16_s2_kvec, SM120_FMA_OP_NT, 64, 64, 32, 64, 8, 64, 4, true, true)
+SM120_DEFINE_FMA_KERNEL(nn_sm120_tma_fma_m128n64_bk16_s2_fold, SM120_FMA_OP_NN, 128, 64, 32, 64, 8, 128, 2, false, true)
+SM120_DEFINE_FMA_KERNEL(nn_sm120_tma_fma_m64n128_bk16_s2_fold, SM120_FMA_OP_NN, 64, 128, 64, 32, 8, 128, 2, false, true)
+SM120_DEFINE_FMA_KERNEL(nn_sm120_tma_fma_m64n64_bk16_s2_fold, SM120_FMA_OP_NN, 64, 64, 32, 64, 8, 64, 4, false, true)
+SM120_DEFINE_FMA_KERNEL(nn_sm120_tma_fma_m128n64_bk16_s2_fold_w8, SM120_FMA_OP_NN, 128, 64, 32, 32, 4, 256, 2, false, true)
+SM120_DEFINE_FMA_KERNEL(nn_sm120_tma_fma_m64n128_bk16_s2_fold_w8, SM120_FMA_OP_NN, 64, 128, 32, 32, 4, 256, 2, false, true)
+SM120_DEFINE_FMA_KERNEL(tn_sm120_tma_fma_m128n64_bk16_s2_fold, SM120_FMA_OP_TN, 128, 64, 32, 64, 8, 128, 2, false, true)
+SM120_DEFINE_FMA_KERNEL(tn_sm120_tma_fma_m64n128_bk16_s2_fold, SM120_FMA_OP_TN, 64, 128, 64, 32, 8, 128, 2, false, true)
+SM120_DEFINE_FMA_KERNEL(tn_sm120_tma_fma_m64n64_bk16_s2_fold, SM120_FMA_OP_TN, 64, 64, 32, 64, 8, 64, 4, false, true)
 
 #undef SM120_DEFINE_FMA_KERNEL
 #undef SM120_FMA_K_PIPE
 #undef SM120_FMA_GROUP_M
 #undef SM120_FMA_WARP_SIZE
-#undef SM120_FMA_TN
 #undef SM120_FMA_TM
 #undef SM120_FMA_BK
 

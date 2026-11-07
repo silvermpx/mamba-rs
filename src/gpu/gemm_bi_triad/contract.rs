@@ -1757,6 +1757,9 @@ pub const SM120_FMA_BK: u32 = 16;
 /// blocks per multiprocessor, the NT k-vector and the fold arms two.
 pub const SM120_FMA_REGISTER_CAP: u32 = 168;
 pub const SM120_FMA_KVEC_REGISTER_CAP: u32 = 255;
+/// The eight-warp fold arms keep two blocks of 256 threads a
+/// multiprocessor, 128 registers each.
+pub const SM120_FMA_EIGHT_WARP_REGISTER_CAP: u32 = 128;
 
 /// Block tiles of the exact-F32 SM120 routes: an 8x8 register microtile,
 /// BK 16, two TMA stages.
@@ -1831,6 +1834,10 @@ pub struct Sm120FmaRoute {
     /// the in-CTA fold's bits on a grid too small to fill the card with
     /// one CTA a tile.
     pub pairs: bool,
+    /// A forward's in-CTA fold on the eight-warp arm of its tile (8 x 4
+    /// microtiles over 256 threads) instead of the four-warp arm (8 x 8
+    /// over 128): the same chains folded in the same order.
+    pub eight_warps: bool,
 }
 
 impl Sm120FmaRoute {
@@ -1856,6 +1863,18 @@ impl Sm120FmaRoute {
         if self.pairs && op == ResolvedGemmOp::Nt && !self.kvec {
             return Err("an NT pair of pieces folds in the k-vector kernels only".into());
         }
+        if self.eight_warps
+            && (op != ResolvedGemmOp::Nn
+                || !self.in_cta
+                || self.kvec
+                || matches!(self.tile, Sm120FmaTile::M64N64))
+        {
+            return Err(
+                "the eight-warp arm folds a forward's pieces in one CTA of a 128 x 64 or \
+                 64 x 128 tile"
+                    .into(),
+            );
+        }
         Ok(())
     }
 
@@ -1871,6 +1890,7 @@ impl Sm120FmaRoute {
             in_cta: (self.in_cta || self.pairs) && !self.kvec,
             layer_fold: false,
             pairs: false,
+            eight_warps: self.eight_warps,
         }
     }
 }
@@ -3822,6 +3842,7 @@ const fn sm120_fma_spec(
             in_cta: fold,
             layer_fold: false,
             pairs: false,
+            eight_warps: false,
         }),
         symbol,
         module_kind: ModuleKind::TriadSm120,
@@ -3839,9 +3860,28 @@ const fn sm120_fma_spec(
     }
 }
 
+/// The eight-warp fold arm of a forward's tile: 256 threads over 8 x 4
+/// microtiles, otherwise the four-warp fold arm's spec.
+const fn sm120_fma_eight_warp_spec(tile: Sm120FmaTile, symbol: &'static str) -> Tf32KernelSpec {
+    Tf32KernelSpec {
+        route: Tf32PhysicalRoute::Sm120TmaFmaExact(Sm120FmaRoute {
+            tile,
+            kvec: false,
+            splits: 1,
+            in_cta: true,
+            layer_fold: false,
+            pairs: false,
+            eight_warps: true,
+        }),
+        threads: 256,
+        ..sm120_fma_spec(ResolvedGemmOp::Nn, tile, (false, true), symbol)
+    }
+}
+
 /// The exact-F32 SM120 inventory: three tiles per operation, the NT
-/// k-vector arms, and the forward and weight-gradient fold arms.
-pub const SM120_FMA_ROUTE_SPECS: [Tf32KernelSpec; 18] = [
+/// k-vector arms, the forward and weight-gradient fold arms, and the
+/// forward's eight-warp fold arms.
+pub const SM120_FMA_ROUTE_SPECS: [Tf32KernelSpec; 20] = [
     sm120_fma_spec(
         ResolvedGemmOp::Nn,
         Sm120FmaTile::M128N64,
@@ -3950,9 +3990,17 @@ pub const SM120_FMA_ROUTE_SPECS: [Tf32KernelSpec; 18] = [
         (false, true),
         "tn_sm120_tma_fma_m64n64_bk16_s2_fold",
     ),
+    sm120_fma_eight_warp_spec(
+        Sm120FmaTile::M128N64,
+        "nn_sm120_tma_fma_m128n64_bk16_s2_fold_w8",
+    ),
+    sm120_fma_eight_warp_spec(
+        Sm120FmaTile::M64N128,
+        "nn_sm120_tma_fma_m64n128_bk16_s2_fold_w8",
+    ),
 ];
 
-pub const SM120_TF32_ROUTE_SPECS: [Tf32KernelSpec; 36] = [
+pub const SM120_TF32_ROUTE_SPECS: [Tf32KernelSpec; 38] = [
     SM120_TF32_NN[0],
     SM120_TF32_NN[1],
     SM120_TF32_NN[2],
@@ -3989,6 +4037,8 @@ pub const SM120_TF32_ROUTE_SPECS: [Tf32KernelSpec; 36] = [
     SM120_FMA_ROUTE_SPECS[15],
     SM120_FMA_ROUTE_SPECS[16],
     SM120_FMA_ROUTE_SPECS[17],
+    SM120_FMA_ROUTE_SPECS[18],
+    SM120_FMA_ROUTE_SPECS[19],
 ];
 
 pub fn tf32_route_specs(module_kind: ModuleKind) -> &'static [Tf32KernelSpec] {
@@ -8037,6 +8087,7 @@ mod tests {
             in_cta: false,
             layer_fold: true,
             pairs: true,
+            eight_warps: false,
         };
         assert!(pairs.validate(ResolvedGemmOp::Nn).is_ok());
         assert!(
@@ -8267,7 +8318,7 @@ mod tests {
             (ModuleKind::TriadSm89Tf32Joint, 11, [2, 6, 3]),
             (ModuleKind::TriadSm90a, 6, [2, 2, 2]),
             (ModuleKind::TriadSm100, 36, [12, 12, 12]),
-            (ModuleKind::TriadSm120, 36, [12, 13, 11]),
+            (ModuleKind::TriadSm120, 38, [14, 13, 11]),
             (ModuleKind::TriadTf32Rna, 27, [19, 0, 8]),
         ];
         let expected_total = expected.iter().map(|(_, count, _)| count).sum::<usize>();
