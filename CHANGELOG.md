@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.8.3 (unreleased)
+
+### Fixed
+
+- Mamba-3 MIMO: the chunked pair backward kernel compiles under CUDA 12.8
+  and 13.0. With 0.8.0 to 0.8.2 the NVRTC of those toolkits refused the
+  MIMO module, so MIMO training failed there.
+- RTX 5090 and RTX PRO 6000: an exact input-gradient kernel that CUDA 13.4
+  and recent drivers compiled past its register budget, and that was
+  therefore skipped at run time, now compiles within it on every toolkit.
+
+### Performance
+
+- A100 and other SM80 GPUs: the f32 and TF32 GEMM tables are refit from
+  an A100 PCIe census, and the 64 x 64 slab tile stages whole 32-deep
+  slabs by a copy plan. On the A100 against 0.8.2: exact f32 cut layers
+  0.975 (788 shapes, none slower), the slab tile's layers 0.89, and the
+  f32 training step faster than 0.8.1 in all four Mamba families.
+- RTX 5090 and RTX PRO 6000: the f32 and TF32 GEMM tables are refit from
+  censuses on three RTX 5090s. On an RTX 5090 against 0.8.2, in GPU time
+  per GEMM (geometric mean, results bit-identical to 0.8.2): exact f32 cut
+  layers 0.945 (788 shapes), training layers 0.969, TF32 weight gradients
+  0.890 (893 shapes), other TF32 shapes 0.988 to 0.998.
+- The exact 16 x 16 tile stages its operands by 16-byte copies on every
+  GPU: on an RTX 5090 the layers it serves ran in 0.82 to 0.99 of the
+  previous time. Small exact layers on RTX 5090 and RTX PRO 6000 fold
+  their pieces in one launch instead of two.
+- Mamba f32 training step on an RTX 5090 against 0.8.1: Mamba-1 9% faster,
+  Mamba-2 and Mamba-3 within 0.4%.
+
+### Added
+
+- `qual/run.sh toolkits`: the toolkit lane under every CUDA toolkit
+  installed as `/usr/local/cuda-X.Y`. The compile gates build every model
+  family's kernel modules in every configuration a model can request
+  (state capacity, MIMO rank and chunk length) for every target.
+
 ## 0.8.2 (2026-10-28)
 
 ### Breaking
