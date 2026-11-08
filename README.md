@@ -13,6 +13,10 @@ NVRTC, and cuBLAS only with the `cublas` feature.
 
 ## What's new in 0.8
 
+- **0.8.3: faster GEMMs on RTX 5090, RTX PRO 6000 and A100.** Their f32
+  and TF32 GEMM tables are refit with the bits of 0.8.2, a GEMM call on a
+  shape it has already run costs less host time, and Mamba-3 MIMO builds
+  under CUDA 12.8 and 13.0. See the [changelog](CHANGELOG.md).
 - **0.8.2: the same bits at any batch size.** Forward and input-gradient
   GEMMs give each row the same bits whatever the batch, exact f32 gives the
   same bits on every GPU architecture, and f32 decode runs 1.4 to 5 times

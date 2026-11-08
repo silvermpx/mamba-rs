@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.8.3 (unreleased)
+## 0.8.3 (2026-11-08)
 
 ### Fixed
 
@@ -32,8 +32,13 @@
   again. On an RTX 6000 Ada the host time of a call on a tiny product fell
   from 1.7 to 1.8 microseconds to 1.5 for exact f32, and from 1.6 to 1.5
   for TF32.
-- Mamba f32 training step on an RTX 5090 against 0.8.1: Mamba-1 9% faster,
-  Mamba-2 and Mamba-3 within 0.4%.
+- Mamba f32 training step against 0.8.1 (4 layers of 768, batch 4 by 512
+  tokens, the two releases in alternating rounds): on an RTX 5090 Mamba-1
+  9% faster, Mamba-2 and Mamba-3 within 0.4%; on an RTX 6000 Ada Mamba-1
+  7% faster, Mamba-2 and Mamba-3 within 0.2%.
+- Not measured for this release: the decode and prompt steps of
+  `family_compare_bench` against 0.8.2. The GEMM censuses and the training
+  steps above are.
 
 ### Added
 
