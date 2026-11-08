@@ -7027,6 +7027,408 @@ fn physical_observation_oracle_rejects_zero_tf32_transitive_mutations() {
     );
 }
 
+/// The driver's own launch entries, which cudarc's builder calls inside its
+/// `launch`; production code reaches them only through the two replay
+/// primitives.
+const RAW_DRIVER_LAUNCHES: [&str; 6] = [
+    "launch_kernel",
+    "launch_cooperative_kernel",
+    "cuLaunchKernel",
+    "cuLaunchKernelEx",
+    "cuLaunchCooperativeKernel",
+    "cuLaunchCooperativeKernelMultiDevice",
+];
+
+/// One replay of an eager launch: `name` with its one direct driver call
+/// `launch` (`launch_kernel` for a plain kernel, `launch_cooperative_kernel`
+/// for one whose CTAs wait on each other at a grid barrier). It takes no
+/// observer, so it cannot stand where a launch must be recorded.
+fn validate_unobserved_replay_primitive_named(
+    source: &str,
+    name: &str,
+    launch: &str,
+) -> Result<(), String> {
+    let function = active_inlined_production_function_scope(source, name)?;
+    let compact = compact_code(function);
+    let signature = compact
+        .split_once('{')
+        .map(|(signature, _)| signature)
+        .ok_or_else(|| "unobserved replay primitive has no body".to_string())?;
+    let expected_signature = compact_code(&format!(
+        "fn {name}(stream: &cudarc::driver::CudaStream, function: &cudarc::driver::CudaFunction, config: cudarc::driver::LaunchConfig, params: &mut [*mut std::ffi::c_void],) -> Result<(), PhysicalCudaLaunchError>",
+    ));
+    if signature != expected_signature {
+        return Err(format!(
+            "unobserved replay primitive must accept only a stream, one function, one config and its argument pointers: actual={signature:?}, expected={expected_signature:?}"
+        ));
+    }
+    if !compact_code(source).contains(&format!("pub(super)unsafe{expected_signature}{{")) {
+        return Err("unobserved replay primitive must stay GPU-private and unsafe".into());
+    }
+    let body = direct_function_body(function, name)?;
+    let expected_body = compact_code(&format!(
+        r#"
+        stream
+            .context()
+            .bind_to_thread()
+            .map_err(PhysicalCudaLaunchError::Driver)?;
+        unsafe {{
+            cudarc::driver::result::{launch}(
+                function.cu_function(),
+                config.grid_dim,
+                config.block_dim,
+                config.shared_mem_bytes,
+                stream.cu_stream(),
+                params,
+            )
+        }}
+        .map_err(PhysicalCudaLaunchError::Driver)
+        "#,
+    ));
+    if body != expected_body {
+        return Err(
+            "unobserved replay primitive must bind its context and make one same-config driver launch of its arguments"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn scope_range(source: &str, scope: &str) -> (usize, usize) {
+    let start = scope.as_ptr() as usize - source.as_ptr() as usize;
+    (start, start + scope.len())
+}
+
+fn previous_token_is(mask: &str, offset: usize, token: &str) -> bool {
+    let before = mask[..offset].trim_end();
+    before.len() >= token.len() && token_at(mask, before.len() - token.len(), token)
+}
+
+/// The calls of `callee` in `source`, without its definition.
+fn call_offsets(source: &str, callee: &str) -> Vec<usize> {
+    let mask = source_mask(source);
+    token_offsets(&mask, callee)
+        .into_iter()
+        .filter(|&offset| {
+            let open = skip_ascii_whitespace(&mask, offset + callee.len());
+            mask.as_bytes().get(open) == Some(&b'(') && !previous_token_is(&mask, offset, "fn")
+        })
+        .collect()
+}
+
+/// The struct literals of `type_name` in `source`, without its definition.
+fn struct_literal_offsets(source: &str, type_name: &str) -> Vec<usize> {
+    let mask = source_mask(source);
+    token_offsets(&mask, type_name)
+        .into_iter()
+        .filter(|&offset| {
+            let open = skip_ascii_whitespace(&mask, offset + type_name.len());
+            mask.as_bytes().get(open) == Some(&b'{')
+                && !previous_token_is(&mask, offset, "struct")
+                && !previous_token_is(&mask, offset, "impl")
+        })
+        .collect()
+}
+
+/// The eager replay's boundary: only the two replay primitives launch
+/// through the driver directly, only the eager replay calls them, only the
+/// eager enqueue, whose observer records nothing, calls the replay or fills
+/// an entry's replay, and a replay's kernels come only from what the first
+/// eager enqueue bound: the scalar controller's own launches, or the
+/// physical package a graph capture of the entry submits.
+fn validate_unobserved_replay_topology(sources: &[(PathBuf, String)]) -> Result<(), String> {
+    let find = |suffix: &str| {
+        sources
+            .iter()
+            .find(|(path, _)| path.ends_with(suffix))
+            .map(|(_, source)| source.as_str())
+            .ok_or_else(|| format!("missing {suffix}"))
+    };
+    let identity = find("gpu/kernel_identity.rs")?;
+    let launch = find("gpu/gemm_bi_triad/launch.rs")?;
+    validate_unobserved_replay_primitive_named(
+        identity,
+        "enqueue_unobserved_replay",
+        "launch_kernel",
+    )?;
+    validate_unobserved_replay_primitive_named(
+        identity,
+        "enqueue_cooperative_unobserved_replay",
+        "launch_cooperative_kernel",
+    )?;
+    let plain = scope_range(
+        identity,
+        active_inlined_production_function_scope(identity, "enqueue_unobserved_replay")?,
+    );
+    let cooperative = scope_range(
+        identity,
+        active_inlined_production_function_scope(
+            identity,
+            "enqueue_cooperative_unobserved_replay",
+        )?,
+    );
+    let replay = scope_range(
+        launch,
+        active_production_function_scope(launch, "enqueue_eager_replay")?,
+    );
+    let ordinary = scope_range(
+        launch,
+        active_production_function_scope(launch, "enqueue_validated_prepared_f32_triad")?,
+    );
+    let control = scope_range(
+        launch,
+        active_inlined_production_method_scope(launch, "ScalarLaunchControl", "enqueue")?,
+    );
+    let direct_scope = active_production_function_scope(launch, "direct_eager_replay")?;
+    let direct = scope_range(launch, direct_scope);
+    let inside = |(start, end): (usize, usize), offset: usize| start <= offset && offset < end;
+
+    let mut driver_launches = Vec::new();
+    let mut replay_calls = Vec::new();
+    let mut eager_replays = 0_usize;
+    let mut replay_builds = 0_usize;
+    let mut replay_fills = 0_usize;
+    for (path, source) in sources {
+        let is_identity = path.ends_with("gpu/kernel_identity.rs");
+        let is_launch = path.ends_with("gpu/gemm_bi_triad/launch.rs");
+        let mask = source_mask(source);
+        for name in RAW_DRIVER_LAUNCHES {
+            for offset in token_offsets(&mask, name) {
+                let allowed = is_identity
+                    && match name {
+                        "launch_kernel" => inside(plain, offset),
+                        "launch_cooperative_kernel" => inside(cooperative, offset),
+                        _ => false,
+                    };
+                if !allowed {
+                    return Err(format!(
+                        "{} reaches the driver's {name} outside the replay primitives",
+                        path.display()
+                    ));
+                }
+                driver_launches.push(name);
+            }
+        }
+        for name in [
+            "enqueue_unobserved_replay",
+            "enqueue_cooperative_unobserved_replay",
+        ] {
+            for offset in call_offsets(source, name) {
+                if !(is_launch && inside(replay, offset)) {
+                    return Err(format!(
+                        "{} calls {name} outside the eager replay",
+                        path.display()
+                    ));
+                }
+                replay_calls.push(name);
+            }
+        }
+        for offset in call_offsets(source, "enqueue_eager_replay") {
+            if !(is_launch && inside(ordinary, offset)) {
+                return Err(format!(
+                    "{} replays a prepared launch outside the unobserved eager enqueue",
+                    path.display()
+                ));
+            }
+            eager_replays += 1;
+        }
+        for offset in struct_literal_offsets(source, "EagerReplayLaunch") {
+            if !(is_launch && (inside(control, offset) || inside(direct, offset))) {
+                return Err(format!(
+                    "{} builds a replay kernel outside the two recorders",
+                    path.display()
+                ));
+            }
+            replay_builds += 1;
+        }
+        for offset in token_offsets(&mask, "eager_replay") {
+            let after = skip_ascii_whitespace(&mask, offset + "eager_replay".len());
+            if !compact_code(&mask[after..]).starts_with(".set(") {
+                continue;
+            }
+            if !(is_launch && inside(ordinary, offset)) {
+                return Err(format!(
+                    "{} fills a prepared entry's replay outside the unobserved eager enqueue",
+                    path.display()
+                ));
+            }
+            replay_fills += 1;
+        }
+    }
+    driver_launches.sort_unstable();
+    if driver_launches != ["launch_cooperative_kernel", "launch_kernel"] {
+        return Err(format!(
+            "each replay primitive must make exactly one driver launch: {driver_launches:?}"
+        ));
+    }
+    replay_calls.sort_unstable();
+    if replay_calls
+        != [
+            "enqueue_cooperative_unobserved_replay",
+            "enqueue_unobserved_replay",
+        ]
+    {
+        return Err(format!(
+            "the eager replay must call each replay primitive once: {replay_calls:?}"
+        ));
+    }
+    if eager_replays != 1 || replay_builds != 2 || replay_fills != 2 {
+        return Err(format!(
+            "the eager enqueue must replay once and fill the replay from its two recorders: replays={eager_replays} builds={replay_builds} fills={replay_fills}"
+        ));
+    }
+    let packages =
+        matching_call_ranges(direct_scope, "prepare_prepared_f32_direct_graph_sequence")?;
+    let [(start, end)] = packages.as_slice() else {
+        return Err("a direct replay must come from exactly one physical package".into());
+    };
+    let arguments = top_level_arguments(&direct_scope[*start..*end])?;
+    if arguments.len() != 3 || compact_code(arguments[1]) != "&NoPhysicalObserver" {
+        return Err(
+            "a direct replay's package must be built with an observer that records nothing".into(),
+        );
+    }
+    Ok(())
+}
+
+fn production_rust_sources() -> Vec<(PathBuf, String)> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut sources = Vec::new();
+    collect_rust_sources(&root, &mut sources);
+    sources
+}
+
+#[test]
+fn eager_replay_is_reached_only_from_the_unobserved_enqueue() {
+    validate_unobserved_replay_topology(&production_rust_sources()).unwrap();
+}
+
+#[test]
+fn eager_replay_oracle_rejects_bypasses_and_recording_paths() {
+    let sources = production_rust_sources();
+    let mutate = |suffix: &str, mutated: String| {
+        sources
+            .iter()
+            .map(|(path, source)| {
+                if path.ends_with(suffix) {
+                    (path.clone(), mutated.clone())
+                } else {
+                    (path.clone(), source.clone())
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let launch = "gpu/gemm_bi_triad/launch.rs";
+    let identity = "gpu/kernel_identity.rs";
+    let mutations = [
+        (
+            "the observed enqueue replays",
+            mutate(
+                launch,
+                replace_nth_in_function(
+                    LAUNCH_SOURCE,
+                    "enqueue_validated_prepared_f32_triad_observed",
+                    "let physical_resources_digest",
+                    "if let Some(replay) = prepared.eager_replay.get() { return unsafe { enqueue_eager_replay(ctx, replay) }; }\n    let physical_resources_digest",
+                    0,
+                ),
+            ),
+        ),
+        (
+            "the observed enqueue fills a replay",
+            mutate(
+                launch,
+                replace_nth_in_function(
+                    LAUNCH_SOURCE,
+                    "enqueue_validated_prepared_f32_triad_observed",
+                    "let physical_resources_digest",
+                    "let _ = prepared.eager_replay.set(Box::new([]));\n    let physical_resources_digest",
+                    0,
+                ),
+            ),
+        ),
+        (
+            "a raw driver launch beside the builder",
+            mutate(
+                launch,
+                format!(
+                    "{LAUNCH_SOURCE}\nunsafe fn enqueue_beside(f: CUfunction, s: CUstream, p: &mut [*mut std::ffi::c_void]) {{ let _ = unsafe {{ cudarc::driver::result::launch_kernel(f, (1, 1, 1), (1, 1, 1), 0, s, p) }}; }}"
+                ),
+            ),
+        ),
+        (
+            "a second caller of the replay primitive",
+            mutate(
+                launch,
+                format!(
+                    "{LAUNCH_SOURCE}\nunsafe fn replay_beside(ctx: &GpuCtx, f: &CudaFunction, c: LaunchConfig, p: &mut [*mut std::ffi::c_void]) {{ let _ = unsafe {{ enqueue_unobserved_replay(&ctx.stream, f, c, p) }}; }}"
+                ),
+            ),
+        ),
+        (
+            "a replay kernel built from elsewhere",
+            mutate(
+                launch,
+                replace_nth_in_function(
+                    LAUNCH_SOURCE,
+                    "direct_eager_replay",
+                    "prepare_prepared_f32_direct_graph_sequence(ctx, &NoPhysicalObserver, prepared)",
+                    "fabricated_direct_sequence(ctx, prepared)",
+                    0,
+                ),
+            ),
+        ),
+        (
+            "a recording observer builds the replay package",
+            mutate(
+                launch,
+                replace_nth_in_function(
+                    LAUNCH_SOURCE,
+                    "direct_eager_replay",
+                    "&NoPhysicalObserver",
+                    "&recording_observer",
+                    0,
+                ),
+            ),
+        ),
+        (
+            "a replay primitive launches twice",
+            mutate(
+                identity,
+                replace_nth_in_inlined_function(
+                    IDENTITY_SOURCE,
+                    "enqueue_unobserved_replay",
+                    ".map_err(PhysicalCudaLaunchError::Driver)\n}",
+                    ".map_err(PhysicalCudaLaunchError::Driver)?;\n    unsafe { cudarc::driver::result::launch_kernel(function.cu_function(), config.grid_dim, config.block_dim, config.shared_mem_bytes, stream.cu_stream(), params) }.map_err(PhysicalCudaLaunchError::Driver)\n}",
+                    0,
+                ),
+            ),
+        ),
+        (
+            "a replay primitive takes another configuration",
+            mutate(
+                identity,
+                replace_nth_in_inlined_function(
+                    IDENTITY_SOURCE,
+                    "enqueue_cooperative_unobserved_replay",
+                    "config.grid_dim,",
+                    "(1, 1, 1),",
+                    0,
+                ),
+            ),
+        ),
+    ];
+    let accepted = mutations
+        .iter()
+        .filter(|(_, sources)| validate_unobserved_replay_topology(sources).is_ok())
+        .map(|(label, _)| *label)
+        .collect::<Vec<_>>();
+    assert!(
+        accepted.is_empty(),
+        "the eager replay oracle accepted mutations: {accepted:?}"
+    );
+}
+
 #[test]
 fn physical_observation_oracle_rejects_control_flow_and_raw_launch_mutations() {
     validate_concrete_physical_enqueue_primitive(IDENTITY_SOURCE).unwrap();

@@ -19,8 +19,9 @@ use crate::gpu::kernel_identity::{
     SCHEDULE_REVISION, SM89_EXACT_F32_D128_ROUTE_REVISION, SM89_EXACT_F32_TN_ROUTE_REVISION,
     SM89_HALF_ROUTE_REVISION, SM89_INFERENCE_COPYPLAN_ROUTE_REVISION, Sha256Digest,
     TUNING_TABLE_REVISION, build_resolved_gemm_launch_set, build_zero_reduction_route_identity,
-    enqueue_cooperative_prepared_physical_launch, enqueue_cooperative_with_physical_observation,
-    enqueue_prepared_physical_launch, enqueue_with_physical_observation,
+    enqueue_cooperative_prepared_physical_launch, enqueue_cooperative_unobserved_replay,
+    enqueue_cooperative_with_physical_observation, enqueue_prepared_physical_launch,
+    enqueue_unobserved_replay, enqueue_with_physical_observation,
     prepare_recording_physical_observer, resolve_physical_launch_observation,
 };
 use cudarc::driver::{
@@ -627,6 +628,16 @@ pub(in crate::gpu) struct PreparedF32TriadLaunch {
     /// looked up once at preparation: a launch of a tiny product otherwise
     /// spends a measurable share of its time finding it by name.
     function: Option<CudaFunction>,
+    /// The kernels as this entry's first eager enqueue bound them, which
+    /// every later eager enqueue of the entry submits as they are. The
+    /// entry's key holds the operands, the policy and the shape, so a later
+    /// enqueue would bind the same functions, configurations and argument
+    /// bytes again; on a launch of a tiny product that binding cost as much
+    /// host time as the driver's own enqueue. The replay lives and dies with
+    /// this entry, so a refreshed entry records it afresh. An entry whose
+    /// kernels could not be kept holds `None` and stays on the bound path
+    /// without trying again.
+    eager_replay: std::cell::OnceCell<Option<Box<[EagerReplayLaunch]>>>,
 }
 
 impl PreparedF32TriadLaunch {
@@ -1781,6 +1792,8 @@ pub(in crate::gpu) struct ScalarLaunchControl<'a> {
     plan: ScalarDispatchPlan,
     operands: F32TriadOperands,
     next: usize,
+    /// Where set, each enqueued kernel is also kept for the entry's replay.
+    record: Option<Vec<EagerReplayLaunch>>,
 }
 
 fn validate_prepared_scalar_binding(
@@ -1881,12 +1894,32 @@ impl ScalarLaunchController for ScalarLaunchControl<'_> {
         config: LaunchConfig,
         builder: &mut ScalarLaunchArgs<'_>,
     ) -> Result<(), PhysicalCudaLaunchError> {
-        self.bind(symbol, config)
+        let route = self
+            .bind(symbol, config)
             .map_err(PhysicalCudaLaunchError::from)?;
+        if let Some(record) = self.record.as_mut() {
+            match builder.take_prepared() {
+                Ok((function, arguments)) => record.push(EagerReplayLaunch {
+                    function,
+                    config,
+                    arguments,
+                    enqueue: KernelEnqueue::Plain,
+                    symbol,
+                    route: Some(route),
+                }),
+                // A kernel whose arguments cannot be kept still launches;
+                // its entry just has no replay.
+                Err(_) => self.record = None,
+            }
+        }
         let mut observer = NoPhysicalObserver;
         unsafe {
             enqueue_with_physical_observation(&mut observer, builder.launch_args(), config, None)
         }
+    }
+
+    fn prepares_physical_graph(&self) -> bool {
+        self.record.is_some()
     }
 
     fn plan(&self) -> ScalarDispatchPlan {
@@ -2015,6 +2048,18 @@ impl PhysicalScalarKernelArguments {
     fn values(&self) -> &[PhysicalScalarKernelArgument] {
         &self.values[..self.len]
     }
+}
+
+/// One kernel of a prepared launch as its first eager enqueue bound it: the
+/// function, the configuration, the argument bytes and how it was enqueued,
+/// with the route that enqueue recorded ahead of it, where it recorded one.
+struct EagerReplayLaunch {
+    function: CudaFunction,
+    config: LaunchConfig,
+    arguments: Box<PhysicalScalarKernelArguments>,
+    enqueue: KernelEnqueue,
+    symbol: &'static str,
+    route: Option<ResolvedGemmRoute>,
 }
 
 struct ScalarLaunchArgs<'a> {
@@ -5090,6 +5135,7 @@ fn prepare_scalar_f32_with_plan(
     let resolved_launch_set = build_resolved_gemm_launch_set(&routes)?;
     let managed_epoch = resources.managed_epoch();
     Ok(PreparedF32TriadLaunch {
+        eager_replay: std::cell::OnceCell::new(),
         context_token: ctx.instance_token(),
         stream_token: ctx.stream_token(),
         request,
@@ -5164,6 +5210,7 @@ fn prepare_scalar_zero_f32(
     };
     let managed_epoch = resources.managed_epoch();
     Ok(PreparedF32TriadLaunch {
+        eager_replay: std::cell::OnceCell::new(),
         context_token: ctx.instance_token(),
         stream_token: ctx.stream_token(),
         request,
@@ -5317,6 +5364,7 @@ fn prepare_tf32_f32(
     let managed_epoch = resources.managed_epoch();
     let function = Some(prepared_tf32_function(ctx, &routes)?);
     Ok(PreparedF32TriadLaunch {
+        eager_replay: std::cell::OnceCell::new(),
         context_token: ctx.instance_token(),
         stream_token: ctx.stream_token(),
         request,
@@ -5614,6 +5662,7 @@ fn prepare_sm89_tf32_tn_pre_rna(
     let resolved_launch_set = build_resolved_gemm_launch_set(&routes)?;
     let managed_epoch = resources.managed_epoch();
     Ok(PreparedF32TriadLaunch {
+        eager_replay: std::cell::OnceCell::new(),
         context_token: ctx.instance_token(),
         stream_token: ctx.stream_token(),
         request,
@@ -5724,6 +5773,7 @@ fn prepare_tf32_streamk_f32(
     let managed_epoch = resources.managed_epoch();
     let function = Some(prepared_tf32_function(ctx, &routes)?);
     Ok(PreparedF32TriadLaunch {
+        eager_replay: std::cell::OnceCell::new(),
         context_token: ctx.instance_token(),
         stream_token: ctx.stream_token(),
         request,
@@ -5817,6 +5867,7 @@ fn prepare_sm120_fma_f32(
     let managed_epoch = resources.managed_epoch();
     let function = Some(prepared_tf32_function(ctx, &routes)?);
     Ok(PreparedF32TriadLaunch {
+        eager_replay: std::cell::OnceCell::new(),
         context_token: ctx.instance_token(),
         stream_token: ctx.stream_token(),
         request,
@@ -5897,6 +5948,7 @@ fn prepare_tf32_splitk_f32(
     let managed_epoch = resources.managed_epoch();
     let function = Some(prepared_tf32_splitk_function(ctx, &routes)?);
     Ok(PreparedF32TriadLaunch {
+        eager_replay: std::cell::OnceCell::new(),
         context_token: ctx.instance_token(),
         stream_token: ctx.stream_token(),
         request,
@@ -7127,6 +7179,7 @@ fn prepare_prepared_scalar_physical_graph_sequence<O: PhysicalLaunchObserver>(
         .try_reserve_exact(prepared.routes.len())
         .map_err(|error| format!("reserve prepared scalar physical launches: {error}"))?;
     let base = ScalarLaunchControl {
+        record: None,
         ctx,
         routes: &prepared.routes,
         plan,
@@ -8869,6 +8922,11 @@ pub(in crate::gpu) unsafe fn enqueue_validated_prepared_f32_triad(
     prepared: &PreparedF32TriadLaunch,
     scalar: impl FnOnce(&mut ScalarLaunchControl<'_>) -> Result<(), String>,
 ) -> Result<(), String> {
+    let record = match prepared.eager_replay.get() {
+        Some(Some(replay)) => return unsafe { enqueue_eager_replay(ctx, replay) },
+        Some(None) => false,
+        None => true,
+    };
     match &prepared.kind {
         PreparedF32Kind::Scalar(plan) => {
             let mut control = ScalarLaunchControl {
@@ -8877,14 +8935,28 @@ pub(in crate::gpu) unsafe fn enqueue_validated_prepared_f32_triad(
                 plan: *plan,
                 operands: prepared.operands,
                 next: 0,
+                record: record.then(|| Vec::with_capacity(prepared.routes.len())),
             };
             scalar(&mut control)?;
-            control.finish()
+            control.finish()?;
+            if record {
+                // Only the first eager enqueue of an entry records, so the
+                // cell is empty here.
+                let replay = control
+                    .record
+                    .take()
+                    .filter(|kernels| kernels.len() == prepared.routes.len())
+                    .map(Vec::into_boxed_slice);
+                let _ = prepared.eager_replay.set(replay);
+            }
+            return Ok(());
         }
         PreparedF32Kind::ScalarZero { params, config, .. } => {
             ctx.record_resolved_gemm_route(prepared.routes[0])?;
             let mut observer = NoPhysicalObserver;
-            unsafe { enqueue_scalar_zero_f32(ctx, prepared, params, *config, &mut observer, None) }
+            unsafe {
+                enqueue_scalar_zero_f32(ctx, prepared, params, *config, &mut observer, None)
+            }?;
         }
         PreparedF32Kind::Tf32 { .. } | PreparedF32Kind::Tf32StreamK { .. } => {
             let (route, maps, params, config, streamk) = tf32_prepared_kernel_parts(prepared)?;
@@ -8908,7 +8980,7 @@ pub(in crate::gpu) unsafe fn enqueue_validated_prepared_f32_triad(
                     },
                     &mut observer,
                 )
-            }
+            }?;
         }
         PreparedF32Kind::Tf32SplitK {
             params,
@@ -8927,13 +8999,89 @@ pub(in crate::gpu) unsafe fn enqueue_validated_prepared_f32_triad(
                     &mut observer,
                     None,
                 )
-            }
+            }?;
         }
         PreparedF32Kind::Tf32TnPreRna { .. } => {
             let mut observer = NoPhysicalObserver;
-            unsafe { enqueue_sm89_tf32_tn_pre_rna(ctx, prepared, &mut observer, None) }
+            unsafe { enqueue_sm89_tf32_tn_pre_rna(ctx, prepared, &mut observer, None) }?;
         }
     }
+    // A launch without a scalar body takes its arguments from the entry
+    // alone, and the package a graph capture of the entry submits holds
+    // exactly those; an entry that package cannot describe keeps this path.
+    if record {
+        let _ = prepared
+            .eager_replay
+            .set(direct_eager_replay(ctx, prepared).ok());
+    }
+    Ok(())
+}
+
+/// The replay of a prepared launch without a scalar body: the kernels of the
+/// entry's physical package, with the entry's one route recorded ahead of
+/// the first, where its eager enqueue records it.
+fn direct_eager_replay(
+    ctx: &GpuCtx,
+    prepared: &PreparedF32TriadLaunch,
+) -> Result<Box<[EagerReplayLaunch]>, String> {
+    let [route] = prepared.routes.as_ref() else {
+        return Err("a prepared launch without a scalar body replays one route".into());
+    };
+    let sequence = prepare_prepared_f32_direct_graph_sequence(ctx, &NoPhysicalObserver, prepared)?;
+    Ok(sequence
+        .launches
+        .into_vec()
+        .into_iter()
+        .enumerate()
+        .map(|(index, launch)| EagerReplayLaunch {
+            function: launch.function,
+            config: launch.config,
+            arguments: launch.arguments,
+            enqueue: launch.enqueue,
+            symbol: launch.node.symbol,
+            route: (index == 0).then_some(*route),
+        })
+        .collect())
+}
+
+/// Submits a prepared launch's kernels as its first eager enqueue bound them:
+/// a route that enqueue recorded ahead of a kernel is recorded again, then
+/// the kernel goes to the driver with its recorded argument bytes, pointed
+/// to from the stack, plainly or cooperatively as that enqueue sent it.
+///
+/// # Safety
+///
+/// The replay must come from this entry, whose key fixed the operands it
+/// points to; the caller upholds [`enqueue_validated_prepared_f32_triad`]'s
+/// contract.
+unsafe fn enqueue_eager_replay(ctx: &GpuCtx, replay: &[EagerReplayLaunch]) -> Result<(), String> {
+    for launch in replay {
+        if let Some(route) = launch.route {
+            ctx.record_resolved_gemm_route(route)?;
+        }
+        let values = launch.arguments.values();
+        let mut params =
+            [std::ptr::null_mut::<std::ffi::c_void>(); PHYSICAL_SCALAR_MAX_KERNEL_ARGUMENTS];
+        for (param, value) in params.iter_mut().zip(values) {
+            *param = std::ptr::from_ref(value).cast_mut().cast();
+        }
+        let params = &mut params[..values.len()];
+        unsafe {
+            match launch.enqueue {
+                KernelEnqueue::Plain => {
+                    enqueue_unobserved_replay(&ctx.stream, &launch.function, launch.config, params)
+                }
+                KernelEnqueue::Cooperative => enqueue_cooperative_unobserved_replay(
+                    &ctx.stream,
+                    &launch.function,
+                    launch.config,
+                    params,
+                ),
+            }
+        }
+        .map_err(|error| error.with_driver_context(format_args!("{}", launch.symbol)))?;
+    }
+    Ok(())
 }
 
 /// The parts of a prepared tiled or stream-K TF32 launch that its raw launch
@@ -8984,6 +9132,7 @@ where
     match &prepared.kind {
         PreparedF32Kind::Scalar(plan) => {
             let base = ScalarLaunchControl {
+                record: None,
                 ctx,
                 routes: &prepared.routes,
                 plan: *plan,
@@ -17323,6 +17472,201 @@ mod prepared_f32_launch_tests {
             .expect("hit managed f32 cache");
         assert_eq!(allocation_identity_query_count(), 0);
         ctx.stream.synchronize().expect("finish cached launches");
+    }
+
+    #[test]
+    #[ignore = "requires a CUDA device"]
+    fn prepared_scalar_launch_replays_the_kernels_its_first_enqueue_bound() {
+        let device = GpuDevice::new(0).expect("open CUDA device");
+        let ctx = GpuCtx::new(&device).expect("create GPU context");
+        ctx.set_gemm_mode(crate::gpu::GemmMode::Deterministic)
+            .unwrap();
+        ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+        ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFma);
+        let dims = (64, 1536, 384);
+        let x = GpuBuffer::from_cpu(&ctx.stream, &alignment_fixture_values(dims.0 * dims.1, 5))
+            .expect("allocate X");
+        let w = GpuBuffer::from_cpu(&ctx.stream, &alignment_fixture_values(dims.1 * dims.2, 7))
+            .expect("allocate W");
+        let mut y = GpuBuffer::zeros(&ctx.stream, dims.0 * dims.2).expect("allocate Y");
+        let replays = |ctx: &GpuCtx| {
+            ctx.with_f32_prepared_launches(|cache| {
+                Ok(cache
+                    .entries
+                    .values()
+                    .filter_map(|entry| {
+                        entry
+                            .eager_replay
+                            .get()
+                            .and_then(Option::as_ref)
+                            .map(|replay| replay.len())
+                    })
+                    .collect::<Vec<_>>())
+            })
+            .expect("read the prepared cache")
+        };
+
+        launch_cached_f32_forward(&ctx, &mut y, &x, w.cached_ptr(), 0, dims)
+            .expect("first enqueue records");
+        let first = y.to_cpu(&ctx.stream).expect("read the first output");
+        let recorded = replays(&ctx);
+        assert_eq!(recorded.len(), 1, "the first enqueue records one replay");
+        assert!(recorded[0] >= 1, "the replay holds the launch's kernels");
+
+        // The same operands hit the entry: the replay writes the output again.
+        y.upload(&ctx.stream, &vec![f32::NAN; dims.0 * dims.2])
+            .expect("poison the output");
+        launch_cached_f32_forward(&ctx, &mut y, &x, w.cached_ptr(), 0, dims)
+            .expect("second enqueue replays");
+        let second = y.to_cpu(&ctx.stream).expect("read the replayed output");
+        assert_eq!(
+            replays(&ctx),
+            recorded,
+            "a replay is recorded once per entry"
+        );
+        assert!(
+            first
+                .iter()
+                .zip(&second)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "the replay writes the first enqueue's bits"
+        );
+    }
+
+    fn prepared_kind_name(kind: &PreparedF32Kind) -> &'static str {
+        match kind {
+            PreparedF32Kind::Scalar(_) => "scalar",
+            PreparedF32Kind::ScalarZero { .. } => "scalar-zero",
+            PreparedF32Kind::Tf32 { .. } => "tf32",
+            PreparedF32Kind::Tf32SplitK { .. } => "tf32-split-k",
+            PreparedF32Kind::Tf32StreamK { .. } => "tf32-stream-k",
+            PreparedF32Kind::Tf32TnPreRna { .. } => "tf32-tn-pre-rna",
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a CUDA device"]
+    fn prepared_tf32_launch_replays_the_kernels_its_first_enqueue_bound() {
+        let device = GpuDevice::new(0).expect("open CUDA device");
+        let ctx = GpuCtx::new(&device).expect("create GPU context");
+        ctx.set_gemm_mode(crate::gpu::GemmMode::Deterministic)
+            .unwrap();
+        ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+        ctx.set_f32_triad_policy(F32TriadPolicy::RnaTf32BatchInvariant);
+        // Forwards, an input gradient and weight gradients: a small one, a
+        // deep one that cuts its reduction, a wide one that the pre-rounding
+        // tiles take where the card has them (a transpose and a GEMM), and
+        // a forward with nothing to reduce.
+        let cases = [
+            (ResolvedGemmOp::Nn, (4096, 128, 16)),
+            (ResolvedGemmOp::Nn, (64, 384, 101)),
+            (ResolvedGemmOp::Nt, (64, 384, 101)),
+            (ResolvedGemmOp::Tn, (64, 384, 101)),
+            (ResolvedGemmOp::Tn, (4096, 64, 64)),
+            (ResolvedGemmOp::Tn, (512, 1536, 768)),
+            (ResolvedGemmOp::Nn, (64, 0, 32)),
+        ];
+        let census = |ctx: &GpuCtx| {
+            ctx.with_f32_prepared_launches(|cache| {
+                Ok(cache
+                    .entries
+                    .values()
+                    .map(|entry| {
+                        (
+                            prepared_kind_name(&entry.kind),
+                            entry
+                                .routes
+                                .iter()
+                                .map(|route| route.symbol)
+                                .collect::<Vec<_>>(),
+                            entry
+                                .eager_replay
+                                .get()
+                                .map(|replay| replay.as_ref().map(|kernels| kernels.len())),
+                        )
+                    })
+                    .collect::<Vec<_>>())
+            })
+            .expect("read the prepared cache")
+        };
+        for (op, dims) in cases {
+            let (m, k, n) = dims;
+            // Row operands hold X or dY; the weight holds W.
+            let rows = (m * k.max(n)).max(1);
+            let rows_a = GpuBuffer::from_cpu(&ctx.stream, &alignment_fixture_values(rows, 5))
+                .expect("allocate the first row operand");
+            let rows_b = GpuBuffer::from_cpu(&ctx.stream, &alignment_fixture_values(rows, 9))
+                .expect("allocate the second row operand");
+            let weight =
+                GpuBuffer::from_cpu(&ctx.stream, &alignment_fixture_values((k * n).max(1), 7))
+                    .expect("allocate the weight");
+            let bias = GpuBuffer::from_cpu(&ctx.stream, &alignment_fixture_values(n.max(k), 11))
+                .expect("allocate the bias");
+            let output_len = match op {
+                ResolvedGemmOp::Nn => m * n,
+                ResolvedGemmOp::Nt => m * k,
+                ResolvedGemmOp::Tn => k * n,
+            };
+            let start = alignment_fixture_values(output_len, 13);
+            let mut output = GpuBuffer::from_cpu(&ctx.stream, &start).expect("allocate the output");
+            let mut run = |ctx: &GpuCtx, fill: &[f32]| {
+                output.upload(&ctx.stream, fill).expect("set the output");
+                match op {
+                    ResolvedGemmOp::Nn => launch_cached_f32_forward(
+                        ctx,
+                        &mut output,
+                        &rows_a,
+                        weight.cached_ptr(),
+                        bias.cached_ptr(),
+                        dims,
+                    ),
+                    ResolvedGemmOp::Nt => launch_cached_f32_backward_dx(
+                        ctx,
+                        &mut output,
+                        &rows_a,
+                        weight.cached_ptr(),
+                        dims,
+                    ),
+                    ResolvedGemmOp::Tn => launch_cached_f32_backward_dw(
+                        ctx,
+                        output.cached_ptr(),
+                        &rows_a,
+                        &rows_b,
+                        dims,
+                    ),
+                }
+                .unwrap_or_else(|error| panic!("{op:?} {dims:?}: {error}"));
+                output.to_cpu(&ctx.stream).expect("read the output")
+            };
+            // An overwritten output is poisoned before the replay, so it
+            // must write every element; an accumulated one starts equal.
+            let second_fill = match op {
+                ResolvedGemmOp::Tn => start.clone(),
+                _ => vec![f32::NAN; output_len],
+            };
+            let first = run(&ctx, &start);
+            let recorded = census(&ctx);
+            let second = run(&ctx, &second_fill);
+            for (kind, symbols, replay) in &recorded {
+                println!("{op:?} {dims:?}: {kind} {symbols:?} replay {replay:?}");
+                assert!(
+                    matches!(replay, Some(Some(_))),
+                    "{kind} {symbols:?} recorded no replay"
+                );
+            }
+            assert_eq!(
+                census(&ctx),
+                recorded,
+                "a replay is recorded once per entry"
+            );
+            assert!(
+                first
+                    .iter()
+                    .zip(&second)
+                    .all(|(a, b)| a.to_bits() == b.to_bits()),
+                "{op:?} {dims:?}: the replay writes the first enqueue's bits"
+            );
+        }
     }
 
     fn alignment_fixture_values(len: usize, salt: usize) -> Vec<f32> {

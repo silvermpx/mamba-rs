@@ -3952,6 +3952,72 @@ pub(super) unsafe fn enqueue_cooperative_prepared_physical_launch(
     }
 }
 
+/// Submits again a launch that an earlier eager enqueue sent through
+/// [`enqueue_with_physical_observation`] with an observer that records
+/// nothing: the same function, configuration and argument bytes, pointed to
+/// from `params`, as the cudarc launch did. It takes no observer, so it
+/// cannot stand where a launch must be recorded.
+///
+/// # Safety
+///
+/// `params` must point to argument bytes of `function`'s ABI, and every
+/// device pointer among them must stay live until the stream has run the
+/// launch.
+#[inline(always)]
+pub(super) unsafe fn enqueue_unobserved_replay(
+    stream: &cudarc::driver::CudaStream,
+    function: &cudarc::driver::CudaFunction,
+    config: cudarc::driver::LaunchConfig,
+    params: &mut [*mut std::ffi::c_void],
+) -> Result<(), PhysicalCudaLaunchError> {
+    stream
+        .context()
+        .bind_to_thread()
+        .map_err(PhysicalCudaLaunchError::Driver)?;
+    unsafe {
+        cudarc::driver::result::launch_kernel(
+            function.cu_function(),
+            config.grid_dim,
+            config.block_dim,
+            config.shared_mem_bytes,
+            stream.cu_stream(),
+            params,
+        )
+    }
+    .map_err(PhysicalCudaLaunchError::Driver)
+}
+
+/// [`enqueue_unobserved_replay`] for a kernel whose CTAs wait on each other
+/// at a grid barrier, launched cooperatively as
+/// [`enqueue_cooperative_with_physical_observation`] launches it.
+///
+/// # Safety
+///
+/// As for [`enqueue_unobserved_replay`].
+#[inline(always)]
+pub(super) unsafe fn enqueue_cooperative_unobserved_replay(
+    stream: &cudarc::driver::CudaStream,
+    function: &cudarc::driver::CudaFunction,
+    config: cudarc::driver::LaunchConfig,
+    params: &mut [*mut std::ffi::c_void],
+) -> Result<(), PhysicalCudaLaunchError> {
+    stream
+        .context()
+        .bind_to_thread()
+        .map_err(PhysicalCudaLaunchError::Driver)?;
+    unsafe {
+        cudarc::driver::result::launch_cooperative_kernel(
+            function.cu_function(),
+            config.grid_dim,
+            config.block_dim,
+            config.shared_mem_bytes,
+            stream.cu_stream(),
+            params,
+        )
+    }
+    .map_err(PhysicalCudaLaunchError::Driver)
+}
+
 struct PhysicalTraceRecorder {
     capacity: usize,
     nodes: Vec<ResolvedPhysicalKernelLaunch>,

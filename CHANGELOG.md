@@ -27,6 +27,11 @@
   GPU: on an RTX 5090 the layers it serves ran in 0.82 to 0.99 of the
   previous time. Small exact layers on RTX 5090 and RTX PRO 6000 fold
   their pieces in one launch instead of two.
+- A GEMM call on a shape it has already run hands the driver the kernels
+  its first call bound, instead of binding their functions and arguments
+  again. On an RTX 6000 Ada the host time of a call on a tiny product fell
+  from 1.7 to 1.8 microseconds to 1.5 for exact f32, and from 1.6 to 1.5
+  for TF32.
 - Mamba f32 training step on an RTX 5090 against 0.8.1: Mamba-1 9% faster,
   Mamba-2 and Mamba-3 within 0.4%.
 
