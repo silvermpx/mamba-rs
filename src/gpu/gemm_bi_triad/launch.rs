@@ -4708,7 +4708,7 @@ fn tf32_splitk_resolved_routes(
         operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32,
         ownership,
         symbol: spec.symbol,
-        module_kind: ModuleKind::TriadSm80,
+        module_kind: spec.route.module_kind(),
         target: qualified.target,
         artifact: qualified.artifact,
         compiler: qualified.compiler,
@@ -4736,7 +4736,10 @@ fn tf32_splitk_resolved_routes(
         tensor_map_revision: 0,
         tensor_maps_digest: [0; 32],
         resources_digest,
-        tuning_table_revision: F32_TF32_TUNING_REVISION,
+        tuning_table_revision: match spec.route.module_kind() {
+            ModuleKind::TriadTf32Rna => super::contract::TF32_RNA_TUNING_REVISION,
+            _ => F32_TF32_TUNING_REVISION,
+        },
         schedule_revision: SCHEDULE_REVISION,
     };
     vec![fused].into_boxed_slice()
@@ -17553,16 +17556,18 @@ mod prepared_f32_launch_tests {
             .unwrap();
         ctx.set_bi_gemm_family(BiGemmFamily::Triad);
         ctx.set_f32_triad_policy(F32TriadPolicy::RnaTf32BatchInvariant);
-        // Forwards, an input gradient and weight gradients: a small one, a
-        // deep one that cuts its reduction, a wide one that the pre-rounding
-        // tiles take where the card has them (a transpose and a GEMM), and
-        // a forward with nothing to reduce.
+        // Forwards, an input gradient and weight gradients: a small one, two
+        // deep ones that cut their reduction (the wider one on the split
+        // members of the wide-tile module), a wide one that the
+        // pre-rounding tiles take where the card has them (a transpose and a
+        // GEMM), and a forward with nothing to reduce.
         let cases = [
             (ResolvedGemmOp::Nn, (4096, 128, 16)),
             (ResolvedGemmOp::Nn, (64, 384, 101)),
             (ResolvedGemmOp::Nt, (64, 384, 101)),
             (ResolvedGemmOp::Tn, (64, 384, 101)),
             (ResolvedGemmOp::Tn, (4096, 64, 64)),
+            (ResolvedGemmOp::Tn, (4096, 256, 256)),
             (ResolvedGemmOp::Tn, (512, 1536, 768)),
             (ResolvedGemmOp::Nn, (64, 0, 32)),
         ];

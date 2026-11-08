@@ -10,6 +10,12 @@
 - RTX 5090 and RTX PRO 6000: an exact input-gradient kernel that CUDA 13.4
   and recent drivers compiled past its register budget, and that was
   therefore skipped at run time, now compiles within it on every toolkit.
+- TF32 weight gradients on the wide tiles' split members (deep weight
+  gradients under `RnaTf32BatchInvariant`) were resolved under the portable
+  module's identity and tuning revision, so the check of a prepared launch
+  refused them, and a CUDA graph could not capture a step that ran one;
+  0.8.2 had the same fault. Their routes now carry the wide-tile module's
+  identity.
 
 ### Performance
 
