@@ -5372,6 +5372,12 @@ pub(super) fn sm120_fma_layer_route(
     let splits = u8::try_from(reduction.div_ceil(piece)).ok()?;
     let outputs = (shape.output_rows(request.op), columns);
     let multiprocessors = qualified.device.multiprocessor_count;
+    if request.op == ResolvedGemmOp::Nt
+        && cut
+        && sm120_nt_layer_leaves_padded_rows(outputs, splits, multiprocessors)
+    {
+        return None;
+    }
     // A cut layer passes its own fills below; one chain needs the generic
     // tile's.
     let (tile, kvec) = if cut {
@@ -5448,6 +5454,31 @@ fn sm120_layer_takes_cut((rows, columns): (usize, usize), multiprocessors: u32) 
         rows.div_ceil(128).saturating_mul(columns.div_ceil(64)),
         multiprocessors as usize,
     )
+}
+
+/// Whether a cut input gradient leaves the SM120 layer kernels for the
+/// portable route: its rows fill two 128-row tiles of the 128 x 64 tile,
+/// the second at most a quarter full, and its cut is either short (six
+/// pieces at most) or odd over a grid of under a fifth of the card's
+/// multiprocessors, where the pairs fold chains the odd last piece behind
+/// the others. The portable 32-row tiles cover those rows with a quarter of
+/// the padding and write the same bits. On two RTX 5090s the portable route
+/// ran every such layer measured (129 to 160 rows into 768 to 2112 outputs)
+/// in 0.71 to 1.00 of the layer kernels' time, 0.80 and 0.84 in geometric
+/// mean, and none slower; the same rows over a longer even cut, or over an
+/// odd cut on a wider grid, ran the 128 x 64 tile up to 1.2 times as fast,
+/// and from three row tiles on it led on every layer measured.
+fn sm120_nt_layer_leaves_padded_rows(
+    (rows, columns): (usize, usize),
+    splits: u8,
+    multiprocessors: u32,
+) -> bool {
+    let second = rows % 128;
+    if rows.div_ceil(128) != 2 || second == 0 || second > 32 {
+        return false;
+    }
+    let tiles = columns.div_ceil(64).saturating_mul(2);
+    splits <= 6 || (splits % 2 == 1 && tiles.saturating_mul(5) < multiprocessors as usize)
 }
 
 /// Whether a cut forward that folds its pieces in one CTA a tile runs the
@@ -16042,6 +16073,34 @@ mod tf32_tests {
         // Too few pairs to fill the card, and too few tiles to fold: the
         // portable chunk partials keep it.
         assert_eq!(layer(ResolvedGemmOp::Nn, (128, 1_536, 768)), None);
+    }
+
+    #[test]
+    fn sm120_input_gradients_leave_the_layer_kernels_over_a_nearly_empty_second_row_tile() {
+        // (rows, columns, pieces, multiprocessors) -> leaves the layer kernels
+        let cases = [
+            ((129, 768), 17, 170, true),
+            ((160, 768), 17, 170, true),
+            ((129, 1928), 6, 170, true),
+            ((144, 2112), 6, 170, true),
+            ((129, 1536), 6, 188, true),
+            ((129, 768), 12, 170, false),
+            ((129, 1536), 17, 170, false),
+            ((129, 1536), 17, 188, false),
+            ((129, 2112), 12, 170, false),
+            ((161, 2112), 6, 170, false),
+            ((192, 2112), 6, 170, false),
+            ((256, 2112), 6, 170, false),
+            ((257, 768), 6, 170, false),
+            ((128, 768), 6, 170, false),
+        ];
+        for ((rows, columns), pieces, sms, leaves) in cases {
+            assert_eq!(
+                super::sm120_nt_layer_leaves_padded_rows((rows, columns), pieces, sms),
+                leaves,
+                "{rows} rows into {columns} outputs, {pieces} pieces, {sms} multiprocessors"
+            );
+        }
     }
 
     #[test]

@@ -29,6 +29,12 @@
   per GEMM (geometric mean, results bit-identical to 0.8.2): exact f32 cut
   layers 0.945 (788 shapes), training layers 0.969, TF32 weight gradients
   0.890 (893 shapes), other TF32 shapes 0.988 to 0.998.
+- RTX 5090 and RTX PRO 6000: an exact input gradient whose rows fill two
+  128-row tiles with the second at most a quarter full (129 to 160 rows)
+  leaves the 128 x 64 TMA tile for the portable 32-row tiles where its cut
+  is short, or odd on a small grid. On two RTX 5090s those layers ran in
+  0.71 to 1.00 of the previous time (0.80 and 0.84 in geometric mean), with
+  the same bits.
 - The exact 16 x 16 tile stages its operands by 16-byte copies on every
   GPU: on an RTX 5090 the layers it serves ran in 0.82 to 0.99 of the
   previous time. Small exact layers on RTX 5090 and RTX PRO 6000 fold
