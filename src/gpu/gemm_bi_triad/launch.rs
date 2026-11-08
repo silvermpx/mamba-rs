@@ -17555,21 +17555,39 @@ mod prepared_f32_launch_tests {
         ctx.set_gemm_mode(crate::gpu::GemmMode::Deterministic)
             .unwrap();
         ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-        ctx.set_f32_triad_policy(F32TriadPolicy::RnaTf32BatchInvariant);
         // Forwards, an input gradient and weight gradients: a small one, two
         // deep ones that cut their reduction (the wider one on the split
         // members of the wide-tile module), a wide one that the
         // pre-rounding tiles take where the card has them (a transpose and a
-        // GEMM), and a forward with nothing to reduce.
+        // GEMM), and a forward with nothing to reduce. The last three take
+        // the SM120 stream-K launches where the card has them: a measured
+        // weight gradient, enqueued cooperatively, and the exact layer
+        // kernels of a forward and an input gradient.
+        let tf32 = F32TriadPolicy::RnaTf32BatchInvariant;
         let cases = [
-            (ResolvedGemmOp::Nn, (4096, 128, 16)),
-            (ResolvedGemmOp::Nn, (64, 384, 101)),
-            (ResolvedGemmOp::Nt, (64, 384, 101)),
-            (ResolvedGemmOp::Tn, (64, 384, 101)),
-            (ResolvedGemmOp::Tn, (4096, 64, 64)),
-            (ResolvedGemmOp::Tn, (4096, 256, 256)),
-            (ResolvedGemmOp::Tn, (512, 1536, 768)),
-            (ResolvedGemmOp::Nn, (64, 0, 32)),
+            (tf32, ResolvedGemmOp::Nn, (4096, 128, 16)),
+            (tf32, ResolvedGemmOp::Nn, (64, 384, 101)),
+            (tf32, ResolvedGemmOp::Nt, (64, 384, 101)),
+            (tf32, ResolvedGemmOp::Tn, (64, 384, 101)),
+            (tf32, ResolvedGemmOp::Tn, (4096, 64, 64)),
+            (tf32, ResolvedGemmOp::Tn, (4096, 256, 256)),
+            (tf32, ResolvedGemmOp::Tn, (512, 1536, 768)),
+            (tf32, ResolvedGemmOp::Nn, (64, 0, 32)),
+            (
+                F32TriadPolicy::AllowDeterministicTf32,
+                ResolvedGemmOp::Tn,
+                (2048, 768, 3072),
+            ),
+            (
+                F32TriadPolicy::ExactFmaBatchInvariant,
+                ResolvedGemmOp::Nn,
+                (8192, 1536, 384),
+            ),
+            (
+                F32TriadPolicy::ExactFmaBatchInvariant,
+                ResolvedGemmOp::Nt,
+                (8192, 384, 1536),
+            ),
         ];
         let census = |ctx: &GpuCtx| {
             ctx.with_f32_prepared_launches(|cache| {
@@ -17594,7 +17612,8 @@ mod prepared_f32_launch_tests {
             })
             .expect("read the prepared cache")
         };
-        for (op, dims) in cases {
+        for (policy, op, dims) in cases {
+            ctx.set_f32_triad_policy(policy);
             let (m, k, n) = dims;
             // Row operands hold X or dY; the weight holds W.
             let rows = (m * k.max(n)).max(1);
