@@ -579,10 +579,10 @@ fn m3_mimo_gpu_chunked_prefill_tracks_the_recurrence() {
 }
 
 /// A rank-16 head of 16 channels and 128 states: in the rank's chunk of 4
-/// tokens the chunked scan's 8-token key tile would need 132 KB of shared
-/// memory, so the geometry takes a smaller one (the same sums in the same
-/// order). The chunked prefill still tracks the CPU and the recurrence, and
-/// decode continues from it.
+/// tokens the chunked scan's 8-token key tile needs 132 KB of shared memory,
+/// so a card with less takes a smaller one (the same sums in the same order)
+/// and a card with room keeps it. Either way the chunked prefill tracks the
+/// CPU and the recurrence, and decode continues from it.
 #[test]
 fn m3_mimo_gpu_chunked_prefill_fits_a_wide_rank() {
     use mamba_rs::config::ScanMode;
@@ -602,15 +602,19 @@ fn m3_mimo_gpu_chunked_prefill_fits_a_wide_rank() {
             cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
         )
         .unwrap() as usize;
-    let geom = chunked_geom(
-        (16, 128, 16, chunk_len(16)),
-        optin,
-        true,
-        ChunkThreads::uniform(1024),
-    )
-    .unwrap();
+    let dims = (16, 128, 16, chunk_len(16));
+    let geom = chunked_geom(dims, optin, true, ChunkThreads::uniform(1024)).unwrap();
     eprintln!("rank-16 geometry at {optin} bytes: {geom:?}");
-    assert!(geom.scan.1 < 8, "the key tile should shrink: {geom:?}");
+    assert!(geom.scan.2 <= optin, "the key tile must fit: {geom:?}");
+    let roomy = chunked_geom(dims, 1 << 20, true, ChunkThreads::uniform(1024)).unwrap();
+    if roomy.scan.2 > optin {
+        assert!(
+            geom.scan.1 < roomy.scan.1,
+            "the key tile should shrink: {geom:?}"
+        );
+    } else {
+        assert_eq!(geom.scan, roomy.scan, "a card with room keeps its key tile");
+    }
     let input_dim = 40usize;
     let (batch, seq) = (2usize, 150usize);
     for (dtype, tol) in [(WeightDtype::F32, TOL), (WeightDtype::Bf16, 3e-2)] {
