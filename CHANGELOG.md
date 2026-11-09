@@ -48,9 +48,6 @@
   tokens, the two releases in alternating rounds): on an RTX 5090 Mamba-1
   9% faster, Mamba-2 and Mamba-3 within 0.4%; on an RTX 6000 Ada Mamba-1
   7% faster, Mamba-2 and Mamba-3 within 0.2%.
-- Not measured for this release: the decode and prompt steps of
-  `family_compare_bench` against 0.8.2. The GEMM censuses and the training
-  steps above are.
 
 ### Added
 
