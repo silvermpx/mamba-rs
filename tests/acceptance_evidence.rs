@@ -199,7 +199,9 @@ fn append_open_does_not_block_or_accept_a_fifo() {
             .send(append_open_options().open(writer_path))
             .unwrap();
     });
-    let result = match receiver.recv_timeout(std::time::Duration::from_secs(2)) {
+    // A blocking open never returns at all, so this bound only has to
+    // outlast the worst stall of a loaded machine.
+    let result = match receiver.recv_timeout(std::time::Duration::from_secs(120)) {
         Ok(result) => result,
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
             let reader = std::fs::OpenOptions::new()

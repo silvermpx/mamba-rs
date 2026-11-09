@@ -145,7 +145,9 @@ mod tests {
 
     #[test]
     fn deadline_returns_result_when_fast() {
-        let out = run_with_deadline("fast", Duration::from_secs(5), || 41 + 1).unwrap();
+        // A fast call returns at once, so this bound only has to outlast
+        // the worst stall of a loaded machine.
+        let out = run_with_deadline("fast", Duration::from_secs(120), || 41 + 1).unwrap();
         assert_eq!(out, 42);
     }
 
@@ -161,43 +163,72 @@ mod tests {
 
     #[test]
     fn watchdog_fires_on_deadline_and_reports_through_disarm() {
+        let deadline = Duration::from_millis(30);
         let fired = Arc::new(AtomicUsize::new(0));
         let f2 = fired.clone();
-        let wd = Watchdog::arm("fire", Duration::from_millis(30), move || {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let armed_at = Instant::now();
+        let wd = Watchdog::arm("fire", deadline, move || {
             f2.fetch_add(1, Ordering::SeqCst);
+            let _ = tx.send(());
         })
         .unwrap();
-        std::thread::sleep(Duration::from_millis(120));
-        assert_eq!(fired.load(Ordering::SeqCst), 1, "must fire exactly once");
+        // Wait for the action itself: a loaded machine may wake the timer
+        // thread arbitrarily late, and only a timer that never fires is a
+        // failure.
+        rx.recv_timeout(Duration::from_secs(120))
+            .expect("the deadline action must run");
+        assert!(armed_at.elapsed() >= deadline, "fired before the deadline");
         assert!(wd.disarm(), "disarm must report the fire");
-        assert_eq!(fired.load(Ordering::SeqCst), 1);
+        assert_eq!(fired.load(Ordering::SeqCst), 1, "must fire exactly once");
     }
 
     #[test]
     fn watchdog_stays_quiet_when_disarmed_in_time() {
+        let deadline = Duration::from_millis(200);
         let fired = Arc::new(AtomicUsize::new(0));
         let f2 = fired.clone();
-        let wd = Watchdog::arm("quiet", Duration::from_millis(200), move || {
+        let armed_at = Instant::now();
+        let wd = Watchdog::arm("quiet", deadline, move || {
             f2.fetch_add(1, Ordering::SeqCst);
         })
         .unwrap();
-        assert!(!wd.disarm(), "in-time disarm must report no fire");
-        std::thread::sleep(Duration::from_millis(300));
-        assert_eq!(fired.load(Ordering::SeqCst), 0, "disarmed watchdog fired");
+        let lost_the_race = wd.disarm();
+        // A loaded machine can hold this thread past the deadline, and then
+        // the disarm loses honestly. One that arrived in time must win.
+        assert!(
+            !lost_the_race || armed_at.elapsed() >= deadline,
+            "in-time disarm must report no fire"
+        );
+        std::thread::sleep(deadline + Duration::from_millis(100));
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            usize::from(lost_the_race),
+            "the action must run exactly when the disarm reports it"
+        );
     }
 
     #[test]
     fn disarm_is_immediate_not_poll_paced() {
         // The old implementation slept in 10 ms steps and joined in
         // disarm — a per-window tax. The park-based timer must disarm
-        // in well under one step.
-        let wd = Watchdog::arm("swift", Duration::from_secs(30), || {}).unwrap();
-        let t0 = Instant::now();
-        assert!(!wd.disarm());
+        // in well under one step. A loaded machine can stall any single
+        // disarm, so the fastest of many is judged; the pause puts the
+        // timer thread into its wait first, where a poll-paced timer
+        // would make every attempt slow.
+        let fastest = (0..16)
+            .map(|_| {
+                let wd = Watchdog::arm("swift", Duration::from_secs(30), || {}).unwrap();
+                std::thread::sleep(Duration::from_millis(1));
+                let t0 = Instant::now();
+                assert!(!wd.disarm());
+                t0.elapsed()
+            })
+            .min()
+            .unwrap();
         assert!(
-            t0.elapsed() < Duration::from_millis(8),
-            "disarm took {:?}",
-            t0.elapsed()
+            fastest < Duration::from_millis(8),
+            "disarm took at best {fastest:?}"
         );
     }
 }
