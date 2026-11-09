@@ -10201,7 +10201,7 @@ const EXACT_SM89: ExactRules = ExactRules {
 /// tile (31% before) and left the 414 cells above as they were. A census of
 /// every route timed alone over the 788 cut cells on an RTX 5090 at its
 /// stock 575 W moved 22 cells, 15 by more than 3% and none slower: the
-/// 64 x 64 rung runs the slab tile from two thirds of a wave (64 rows into
+/// 64 x 64 rung runs the slab tile from two thirds of a wave (at 64 rows into
 /// 8192 to 32000 outputs over 768 to 2048 inputs in 0.73 to 0.83 of the
 /// 32 x 64 and 64 x 64 tiles' time), the 128 x 64 tile pays from a third of
 /// a wave, the 32 x 64 input-gradient tile folds beside the slim partial
@@ -20654,7 +20654,7 @@ mod tf32_tests {
             );
         }
         // Over 64 rows the 64 x 64 tile stays, as it does on a grid it fits
-        // in one wave (512 x 768: 96 tiles).
+        // in one wave, as 512 x 768 does with 96 tiles.
         for dims in [(64, 384, 1536), (1024, 512, 768)] {
             assert_eq!(
                 route(dims),
