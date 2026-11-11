@@ -961,7 +961,7 @@ impl Mamba3GpuEngine {
             } else {
                 k.step_block_threads.get(width)
             };
-            let grid = super::kernels::step_head_cfg(tier, b, nh, hd, ds, *block_threads);
+            let grid = super::kernels::step_head_cfg(tier, b, nh, hd, ds, *block_threads, !pf);
             let kernel = match (tier, pf) {
                 (crate::mamba3_siso::route::HeadTier::Warp, false) => k.m3_step_fwd.get(width),
                 (crate::mamba3_siso::route::HeadTier::Warp, true) => k.m3_step_fwd_pf.get(width),
@@ -1814,7 +1814,7 @@ impl Mamba3GpuEngineMixed {
                 } else {
                     k.step_block_threads.get(width)
                 };
-                let grid = super::kernels::step_head_cfg(tier, b, nh, hd, ds, *block_threads);
+                let grid = super::kernels::step_head_cfg(tier, b, nh, hd, ds, *block_threads, !pf);
                 let kernel = match (tier, pf) {
                     (crate::mamba3_siso::route::HeadTier::Warp, false) => {
                         k.m3_step_fwd_typed.get(width).get(dt)

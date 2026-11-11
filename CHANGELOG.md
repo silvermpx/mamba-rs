@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Performance
+
+- Mamba-3 SISO decode at headdim 64 and wider: where many heads share the
+  card, the step stages each head's state in shared memory and reads and
+  writes it in contiguous runs instead of one row per thread. A batch of
+  16 sequences on an RTX 6000 Ada (4 layers of 768, heads of 64 x 128):
+  bf16 438 -> 246 us a step, f16 447 -> 257, f32 and tf32 505 -> 414.
+  Bits unchanged.
+
 ## 0.8.3 (2026-11-09)
 
 ### Fixed

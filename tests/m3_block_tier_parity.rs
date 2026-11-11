@@ -149,83 +149,106 @@ fn m3_decode_steps_keep_the_bits_of_their_released_form() {
                     let released = frozen
                         .load_function(&format!("m3_reference_step{name}{suffix}{wide}"))
                         .unwrap();
-                    let cfg =
-                        step_head_cfg(tier, batch, nh, hd, ds, *m3k.step_block_threads.get(width));
-                    let run = |f: &CudaFunction| -> Vec<Vec<f32>> {
-                        let st = StepState::new(
-                            &ctx,
-                            &det(batch * nh * hd * ds, 11, 0.5),
-                            &det(batch * nh * ds, 12, 0.5),
-                            &det(batch * nh * hd, 13, 0.5),
-                        );
-                        let d = GpuBuffer::from_cpu(&ctx.stream, &det(nh, 14, 1.0)).unwrap();
-                        let mut out = Vec::new();
-                        for step in 0..2u64 {
-                            let x = upload_typed(&ctx, &det(batch * di, 20 + step, 1.0), dtype);
-                            let kc =
-                                upload_typed(&ctx, &det(batch * nh * ds, 30 + step, 1.0), dtype);
-                            let qc =
-                                upload_typed(&ctx, &det(batch * nh * ds, 40 + step, 1.0), dtype);
-                            let dt_vals: Vec<f32> = det(batch * nh, 50 + step, 1.0)
-                                .into_iter()
-                                .map(|v| 0.01 + v.abs() * 0.3)
-                                .collect();
-                            let a_vals: Vec<f32> = det(batch * nh, 60 + step, 1.0)
-                                .into_iter()
-                                .map(|v| -0.1 - v.abs())
-                                .collect();
-                            let trap_vals: Vec<f32> = det(batch * nh, 70 + step, 1.0)
-                                .into_iter()
-                                .map(|v| 0.5 + 0.4 * v)
-                                .collect();
-                            let dt = GpuBuffer::from_cpu(&ctx.stream, &dt_vals).unwrap();
-                            let a = GpuBuffer::from_cpu(&ctx.stream, &a_vals).unwrap();
-                            let trap = GpuBuffer::from_cpu(&ctx.stream, &trap_vals).unwrap();
-                            let y = upload_typed(&ctx, &vec![f32::NAN; batch * di], dtype);
-                            let ptrs = [
-                                st.ssm.cached_ptr(),
-                                st.k.cached_ptr(),
-                                st.v.cached_ptr(),
-                                y.cached_ptr(),
-                                x.cached_ptr(),
-                                kc.cached_ptr(),
-                                qc.cached_ptr(),
-                                dt.cached_ptr(),
-                                a.cached_ptr(),
-                                trap.cached_ptr(),
-                                d.cached_ptr(),
-                            ];
-                            let dims = [batch, nh, hd, ds].map(|v| v as i32);
-                            for (y_first, cfg) in y_runs(cfg) {
-                                let mut bld = ctx.stream.launch_builder(f);
-                                for ptr in &ptrs {
-                                    bld.arg(ptr);
-                                }
-                                for dim in &dims {
-                                    bld.arg(dim);
-                                }
-                                bld.arg(&y_first);
-                                unsafe { bld.launch(cfg) }.unwrap();
-                            }
-                            ctx.stream.synchronize().unwrap();
-                            out.push(download_typed(&ctx, &y));
-                        }
-                        out.push(download(&ctx, &st.ssm));
-                        out.push(download(&ctx, &st.k));
-                        out.push(download(&ctx, &st.v));
-                        out
+                    // The block tier keeps its bits whether or not the launch
+                    // stages the state; the warp tier has no staging.
+                    let stagings: &[bool] = match tier {
+                        HeadTier::Warp => &[false],
+                        HeadTier::Block => &[false, true],
                     };
-                    let want = run(&released);
-                    let got = run(current);
-                    let label = format!("{tier:?} hd {hd} d_state {ds} {dtype:?} {width:?}");
-                    for (part, (w, g)) in
-                        ["y step 0", "y step 1", "ssm_state", "k_state", "v_state"]
-                            .iter()
-                            .zip(want.iter().zip(&got))
-                    {
-                        assert_bits(&format!("{label} {part}"), w, g);
+                    for &stage in stagings {
+                        let cfg = step_head_cfg(
+                            tier,
+                            batch,
+                            nh,
+                            hd,
+                            ds,
+                            *m3k.step_block_threads.get(width),
+                            stage,
+                        );
+                        let run = |f: &CudaFunction| -> Vec<Vec<f32>> {
+                            let st = StepState::new(
+                                &ctx,
+                                &det(batch * nh * hd * ds, 11, 0.5),
+                                &det(batch * nh * ds, 12, 0.5),
+                                &det(batch * nh * hd, 13, 0.5),
+                            );
+                            let d = GpuBuffer::from_cpu(&ctx.stream, &det(nh, 14, 1.0)).unwrap();
+                            let mut out = Vec::new();
+                            for step in 0..2u64 {
+                                let x = upload_typed(&ctx, &det(batch * di, 20 + step, 1.0), dtype);
+                                let kc = upload_typed(
+                                    &ctx,
+                                    &det(batch * nh * ds, 30 + step, 1.0),
+                                    dtype,
+                                );
+                                let qc = upload_typed(
+                                    &ctx,
+                                    &det(batch * nh * ds, 40 + step, 1.0),
+                                    dtype,
+                                );
+                                let dt_vals: Vec<f32> = det(batch * nh, 50 + step, 1.0)
+                                    .into_iter()
+                                    .map(|v| 0.01 + v.abs() * 0.3)
+                                    .collect();
+                                let a_vals: Vec<f32> = det(batch * nh, 60 + step, 1.0)
+                                    .into_iter()
+                                    .map(|v| -0.1 - v.abs())
+                                    .collect();
+                                let trap_vals: Vec<f32> = det(batch * nh, 70 + step, 1.0)
+                                    .into_iter()
+                                    .map(|v| 0.5 + 0.4 * v)
+                                    .collect();
+                                let dt = GpuBuffer::from_cpu(&ctx.stream, &dt_vals).unwrap();
+                                let a = GpuBuffer::from_cpu(&ctx.stream, &a_vals).unwrap();
+                                let trap = GpuBuffer::from_cpu(&ctx.stream, &trap_vals).unwrap();
+                                let y = upload_typed(&ctx, &vec![f32::NAN; batch * di], dtype);
+                                let ptrs = [
+                                    st.ssm.cached_ptr(),
+                                    st.k.cached_ptr(),
+                                    st.v.cached_ptr(),
+                                    y.cached_ptr(),
+                                    x.cached_ptr(),
+                                    kc.cached_ptr(),
+                                    qc.cached_ptr(),
+                                    dt.cached_ptr(),
+                                    a.cached_ptr(),
+                                    trap.cached_ptr(),
+                                    d.cached_ptr(),
+                                ];
+                                let dims = [batch, nh, hd, ds].map(|v| v as i32);
+                                for (y_first, cfg) in y_runs(cfg) {
+                                    let mut bld = ctx.stream.launch_builder(f);
+                                    for ptr in &ptrs {
+                                        bld.arg(ptr);
+                                    }
+                                    for dim in &dims {
+                                        bld.arg(dim);
+                                    }
+                                    bld.arg(&y_first);
+                                    unsafe { bld.launch(cfg) }.unwrap();
+                                }
+                                ctx.stream.synchronize().unwrap();
+                                out.push(download_typed(&ctx, &y));
+                            }
+                            out.push(download(&ctx, &st.ssm));
+                            out.push(download(&ctx, &st.k));
+                            out.push(download(&ctx, &st.v));
+                            out
+                        };
+                        let want = run(&released);
+                        let got = run(current);
+                        let label = format!(
+                            "{tier:?} hd {hd} d_state {ds} {dtype:?} {width:?} staged {stage}"
+                        );
+                        for (part, (w, g)) in
+                            ["y step 0", "y step 1", "ssm_state", "k_state", "v_state"]
+                                .iter()
+                                .zip(want.iter().zip(&got))
+                        {
+                            assert_bits(&format!("{label} {part}"), w, g);
+                        }
+                        cases += 1;
                     }
-                    cases += 1;
                 }
             }
         }
@@ -253,11 +276,18 @@ fn m3_step_block_matches_warp_bits() {
                 let k0 = det(batch * nh * ds, 12, 0.5);
                 let v0 = det(batch * nh * hd, 13, 0.5);
                 let d = GpuBuffer::from_cpu(&ctx.stream, &det(nh, 14, 1.0)).unwrap();
+                // The warp tier, then the block tier without and with the
+                // state staged in shared memory.
                 let mut tiers = [
-                    (HeadTier::Warp, StepState::new(&ctx, &ssm0, &k0, &v0)),
-                    (HeadTier::Block, StepState::new(&ctx, &ssm0, &k0, &v0)),
+                    (HeadTier::Warp, false, StepState::new(&ctx, &ssm0, &k0, &v0)),
+                    (
+                        HeadTier::Block,
+                        false,
+                        StepState::new(&ctx, &ssm0, &k0, &v0),
+                    ),
+                    (HeadTier::Block, true, StepState::new(&ctx, &ssm0, &k0, &v0)),
                 ];
-                let mut ys: [Vec<Vec<f32>>; 2] = [Vec::new(), Vec::new()];
+                let mut ys: [Vec<Vec<f32>>; 3] = [Vec::new(), Vec::new(), Vec::new()];
                 for step in 0..2u64 {
                     let x = upload_typed(&ctx, &det(batch * di, 20 + step, 1.0), dtype);
                     let kc = upload_typed(&ctx, &det(batch * nh * ds, 30 + step, 1.0), dtype);
@@ -277,14 +307,21 @@ fn m3_step_block_matches_warp_bits() {
                     let dt = GpuBuffer::from_cpu(&ctx.stream, &dt_vals).unwrap();
                     let a = GpuBuffer::from_cpu(&ctx.stream, &a_vals).unwrap();
                     let trap = GpuBuffer::from_cpu(&ctx.stream, &trap_vals).unwrap();
-                    for (slot, (tier, st)) in tiers.iter_mut().enumerate() {
+                    for (slot, (tier, stage, st)) in tiers.iter_mut().enumerate() {
                         let y = upload_typed(&ctx, &vec![f32::NAN; batch * di], dtype);
                         let kernel = match tier {
                             HeadTier::Warp => m3k.m3_step_fwd_typed.i32.get(dtype),
                             HeadTier::Block => m3k.m3_step_fwd_block_typed.i32.get(dtype),
                         };
-                        let cfg =
-                            step_head_cfg(*tier, batch, nh, hd, ds, m3k.step_block_threads.i32);
+                        let cfg = step_head_cfg(
+                            *tier,
+                            batch,
+                            nh,
+                            hd,
+                            ds,
+                            m3k.step_block_threads.i32,
+                            *stage,
+                        );
                         let ptrs = [
                             st.ssm.cached_ptr(),
                             st.k.cached_ptr(),
@@ -314,20 +351,23 @@ fn m3_step_block_matches_warp_bits() {
                         ys[slot].push(download_typed(&ctx, &y));
                     }
                 }
-                let [(_, warp), (_, block)] = &tiers;
-                for (name, want, got) in [
-                    ("ssm_state", &warp.ssm, &block.ssm),
-                    ("k_state", &warp.k, &block.k),
-                    ("v_state", &warp.v, &block.v),
-                ] {
-                    assert_bits(
-                        &format!("{label} {name}"),
-                        &download(&ctx, want),
-                        &download(&ctx, got),
-                    );
-                }
-                for (step, (want, got)) in ys[0].iter().zip(&ys[1]).enumerate() {
-                    assert_bits(&format!("{label} y step {step}"), want, got);
+                let [(_, _, warp), blocks @ ..] = &tiers;
+                for (slot, (_, stage, block)) in blocks.iter().enumerate() {
+                    let label = format!("{label} staged {stage}");
+                    for (name, want, got) in [
+                        ("ssm_state", &warp.ssm, &block.ssm),
+                        ("k_state", &warp.k, &block.k),
+                        ("v_state", &warp.v, &block.v),
+                    ] {
+                        assert_bits(
+                            &format!("{label} {name}"),
+                            &download(&ctx, want),
+                            &download(&ctx, got),
+                        );
+                    }
+                    for (step, (want, got)) in ys[0].iter().zip(&ys[slot + 1]).enumerate() {
+                        assert_bits(&format!("{label} y step {step}"), want, got);
+                    }
                 }
             }
         }

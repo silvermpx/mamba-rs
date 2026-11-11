@@ -72,11 +72,24 @@
 // whole warps, at most the threads the kernel's registers allow in a block;
 // a wider head takes its elements in turns. Dynamic shared memory:
 // (4 + 3 * ds) floats, the four step coefficients then the current K,
-// previous K and current Q rows.
+// previous K and current Q rows; a launch that also gives the head's whole
+// state room (M3_STEP_STAGED_FLOATS, see step_head_cfg) takes the staged
+// path.
+//
+// The state of a head is hd rows of ds floats, one row per element. Read
+// row by row, the lanes of a warp touch as many rows as they have lanes,
+// so every load of the step pulls 32 scattered sectors for 4 bytes each.
+// The staged path reads the head's state into shared memory and writes it
+// back in whole contiguous runs, and each element then walks its row there
+// (the row stride is odd, so the lanes' rows fall in distinct banks). Each
+// element's arithmetic is the plain path's, value for value and in the
+// same order, so both paths give the same bits.
 //
 // The previous K is staged by every thread before the barrier, so the
 // head's new K may overwrite k_state right after it: no thread reads
 // k_state again.
+#define M3_STEP_ROW_STRIDE(ds) ((ds) | 1)
+#define M3_STEP_STAGED_FLOATS(hd, ds) (4 + 3 * (ds) + (hd) * M3_STEP_ROW_STRIDE(ds))
 #define DEFINE_M3_STEP_FWD_BLOCK(NAME, IDX, TY, FROM_F, PF)                   \
 extern "C" __global__ void NAME(                                              \
     float* ssm_state,                                                         \
@@ -96,13 +109,20 @@ extern "C" __global__ void NAME(                                              \
     float* kc_sm = coef + 4;                                                  \
     float* kp_sm = kc_sm + ds;                                                \
     float* qc_sm = kp_sm + ds;                                                \
+    float* hs = qc_sm + ds;                                                   \
     IDX b = blockIdx.x;                                                       \
     int h = y_first + blockIdx.y;                                             \
     int tid = threadIdx.x;                                                    \
     /* Uniform across the block, so every thread reaches the barrier. */      \
     if (b >= batch || h >= nh || ds > MAMBA_RS_STATE_CAP) return;             \
+    unsigned smem_bytes;                                                      \
+    asm("mov.u32 %0, %%dynamic_smem_size;" : "=r"(smem_bytes));               \
+    int hs_stride = M3_STEP_ROW_STRIDE(ds);                                   \
+    bool staged = (unsigned long long)smem_bytes >=                           \
+        (unsigned long long)M3_STEP_STAGED_FLOATS(hd, ds) * sizeof(float);    \
     int d_inner = nh * hd;                                                    \
     IDX row = b * nh * ds + h * ds;                                           \
+    IDX head_base = (b * nh * hd + h * hd) * ds;                              \
     if (tid == 0) {                                                           \
         float dt_v = dt[b * nh + h];                                          \
         float a_v = a_val[b * nh + h];                                        \
@@ -118,6 +138,13 @@ extern "C" __global__ void NAME(                                              \
         kp_sm[n] = k_state[row + n];                                          \
         qc_sm[n] = to_f(q_cur[row + n]);                                      \
     }                                                                         \
+    if (staged) {                                                             \
+        for (IDX i = tid; i < (IDX)hd * ds; i += blockDim.x) {                \
+            int p = (int)(i / ds);                                            \
+            int n = (int)(i - (IDX)p * ds);                                   \
+            hs[p * hs_stride + n] = ssm_state[head_base + i];                 \
+        }                                                                     \
+    }                                                                         \
     __syncthreads();                                                          \
     for (int n = tid; n < ds; n += blockDim.x) k_state[row + n] = kc_sm[n];   \
     float alpha_h = coef[0];                                                  \
@@ -131,26 +158,46 @@ extern "C" __global__ void NAME(                                              \
         float y_val = d_skip * x_val;                                         \
         float bv = beta_h * v_prev;                                           \
         float gx = gamma_h * x_val;                                           \
-        M3_STEP_PRE_##PF                                                      \
-        for (int n0 = 0; n0 < ds; n0 += M3_STEP_SLICE) {                      \
-            M3_STEP_LOAD_##PF                                                 \
-            _Pragma("unroll")                                                 \
-            for (int j = 0; j < M3_STEP_SLICE; j++) if (n0 + j >= ds) break; else { \
-                float kc_n = kc_sm[n0 + j];                                   \
-                float kp_n = kp_sm[n0 + j];                                   \
-                float qc_n = qc_sm[n0 + j];                                   \
-                h_local[j] = __fmaf_rn(gx, kc_n,                              \
-                                       __fmaf_rn(h_local[j], alpha_h,         \
-                                                 __fmul_rn(bv, kp_n)));       \
-                y_val = __fmaf_rn(h_local[j], qc_n, y_val);                   \
+        if (staged) {                                                         \
+            float* h_row = hs + p * hs_stride;                                \
+            _Pragma("unroll 8")                                               \
+            for (int n = 0; n < ds; n++) {                                    \
+                float h_new = __fmaf_rn(gx, kc_sm[n],                         \
+                                        __fmaf_rn(h_row[n], alpha_h,          \
+                                                  __fmul_rn(bv, kp_sm[n])));  \
+                y_val = __fmaf_rn(h_new, qc_sm[n], y_val);                    \
+                h_row[n] = h_new;                                             \
             }                                                                 \
-            _Pragma("unroll")                                                 \
-            for (int j = 0; j < M3_STEP_SLICE; j++) if (n0 + j >= ds) break; else\
-                ssm_state[h_base + n0 + j] = h_local[j];                      \
-            M3_STEP_CARRY_##PF                                                \
+        } else {                                                              \
+            M3_STEP_PRE_##PF                                                  \
+            for (int n0 = 0; n0 < ds; n0 += M3_STEP_SLICE) {                  \
+                M3_STEP_LOAD_##PF                                             \
+                _Pragma("unroll")                                             \
+                for (int j = 0; j < M3_STEP_SLICE; j++) if (n0 + j >= ds) break; else { \
+                    float kc_n = kc_sm[n0 + j];                               \
+                    float kp_n = kp_sm[n0 + j];                               \
+                    float qc_n = qc_sm[n0 + j];                               \
+                    h_local[j] = __fmaf_rn(gx, kc_n,                          \
+                                           __fmaf_rn(h_local[j], alpha_h,     \
+                                                     __fmul_rn(bv, kp_n)));   \
+                    y_val = __fmaf_rn(h_local[j], qc_n, y_val);               \
+                }                                                             \
+                _Pragma("unroll")                                             \
+                for (int j = 0; j < M3_STEP_SLICE; j++) if (n0 + j >= ds) break; else\
+                    ssm_state[h_base + n0 + j] = h_local[j];                  \
+                M3_STEP_CARRY_##PF                                            \
+            }                                                                 \
         }                                                                     \
         y[b * d_inner + h * hd + p] = FROM_F(y_val);                          \
         v_state[b * nh * hd + h * hd + p] = x_val;                            \
+    }                                                                         \
+    if (staged) {                                                             \
+        __syncthreads();                                                      \
+        for (IDX i = tid; i < (IDX)hd * ds; i += blockDim.x) {                \
+            int p = (int)(i / ds);                                            \
+            int n = (int)(i - (IDX)p * ds);                                   \
+            ssm_state[head_base + i] = hs[p * hs_stride + n];                 \
+        }                                                                     \
     }                                                                         \
 }
 

@@ -330,7 +330,7 @@ fn the_decode_step_gives_heads_past_the_y_extent_their_twins_bits() {
             HeadTier::Warp => &k.m3_step_fwd.i32,
             HeadTier::Block => &k.m3_step_fwd_block_typed.i32.f32,
         };
-        let cfg = step_head_cfg(tier, batch, NH, hd, ds, k.step_block_threads.i32);
+        let cfg = step_head_cfg(tier, batch, NH, hd, ds, k.step_block_threads.i32, true);
         assert!(cfg.grid_dim.1 > GRID_YZ_EXTENT);
         let mut args: Vec<Arg> = [
             &ssm, &k_state, &v_state, &y, &x, &kc, &qc, &dt, &a, &trap, &d,

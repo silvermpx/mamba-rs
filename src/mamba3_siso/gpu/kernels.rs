@@ -1297,7 +1297,12 @@ fn step_prefetch_forced() -> Option<bool> {
 /// rounded up to whole warps, at most `block_threads`
 /// ([`Mamba3Kernels::step_block_threads`]) whose threads a wider head's
 /// elements take in turns, with the step coefficients and the K and Q rows
-/// staged in shared memory.
+/// staged in shared memory, and with `stage` the head's state as well when
+/// it fits. Staging pays where many heads share the card (a batch of 16
+/// steps 1.7 times faster at headdim 64 and 128 states) and costs where a
+/// few heads leave it idle (a tenth slower for a single sequence), so the engine
+/// stages exactly when it does not take the prefetching build
+/// ([`step_prefetches`]).
 pub fn step_head_cfg(
     tier: crate::mamba3_siso::route::HeadTier,
     batch: usize,
@@ -1305,6 +1310,7 @@ pub fn step_head_cfg(
     hd: usize,
     ds: usize,
     block_threads: usize,
+    stage: bool,
 ) -> cudarc::driver::LaunchConfig {
     use crate::mamba3_siso::route::HeadTier;
     match tier {
@@ -1313,11 +1319,28 @@ pub fn step_head_cfg(
             block_dim: (hd as u32, 1, 1),
             shared_mem_bytes: 0,
         },
-        HeadTier::Block => cudarc::driver::LaunchConfig {
-            grid_dim: (batch as u32, nh as u32, 1),
-            block_dim: (hd.next_multiple_of(32).min(block_threads) as u32, 1, 1),
-            shared_mem_bytes: ((4 + 3 * ds) * std::mem::size_of::<f32>()) as u32,
-        },
+        HeadTier::Block => {
+            // The head's whole state staged in shared memory, rows at an odd
+            // stride, when it fits the 48 KiB every launch may take without
+            // an opt-in: the step then reads and writes it in contiguous
+            // runs (kernels/mamba3_siso_block.cu). The kernel reads the size
+            // it was given, and both paths give the same bits.
+            let plain = (4 + 3 * ds) * std::mem::size_of::<f32>();
+            let staged = (4 + 3 * ds + hd * (ds | 1)) * std::mem::size_of::<f32>();
+            let staging = stage && staged <= 48 * 1024;
+            // Staging moves the whole state through every thread of the
+            // block, so a head narrower than four warps still takes four.
+            let threads = if staging {
+                hd.next_multiple_of(32).max(128)
+            } else {
+                hd.next_multiple_of(32)
+            };
+            cudarc::driver::LaunchConfig {
+                grid_dim: (batch as u32, nh as u32, 1),
+                block_dim: (threads.min(block_threads) as u32, 1, 1),
+                shared_mem_bytes: if staging { staged } else { plain } as u32,
+            }
+        }
     }
 }
 
