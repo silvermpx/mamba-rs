@@ -58,7 +58,7 @@ f16 storage, 0.8.3 -> 0.8.4 (speedup):
 | Mamba-3 SISO | 155 -> 156 us (1.00x) | 449 -> 259 us (1.73x) | 0.60 -> 0.65 M tokens/s (1.10x) | 9.83 -> 9.54 ms (1.03x) |
 | Mamba-3 MIMO | 145 -> 144 us (1.00x) | 224 -> 224 us (1.00x) | 0.25 -> 0.43 M tokens/s (1.69x) | 37.84 -> 28.94 ms (1.31x) |
 
-Mamba-2's prompt and training step run the kernels of 0.8.3; a prompt row
+Mamba-2's prompt and training step run the kernels of 0.8.3. A prompt row
 varies by several percent between passes of one tree (here 0.66 to 0.80 M
 tokens/s for the 0.8.4 tf32 prompt). The Mamba-3 MIMO decode in f32 and
 tf32 is about 1 percent slower.

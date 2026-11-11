@@ -4,16 +4,16 @@
 
 ### Performance
 
-- Against 0.8.3: Mamba-3 MIMO prompts up to 1.95x as fast and its training
-  steps up to 1.33x; Mamba-3 SISO decode at batch 16 up to 1.77x; Mamba and
-  Mamba-2 decode 5 to 14 percent faster, Mamba training 5 to 11 percent.
-  Tables in [docs/family-benchmarks.md](docs/family-benchmarks.md).
+- Faster than 0.8.3. Mamba-3 MIMO prompts up to 1.95x and training steps
+  up to 1.33x. Mamba-3 SISO decode at batch 16 up to 1.77x. Mamba and
+  Mamba-2 decode 5 to 14 percent, Mamba training 5 to 11 percent. Tables
+  in [docs/family-benchmarks.md](docs/family-benchmarks.md).
 
 ### Changed
 
-- Mamba-3 MIMO in TF32, bf16 and f16: the chunked scan runs on the tensor
-  cores, in f16 as three TF32 passes that keep near-f32 accuracy. These
-  outputs move within TF32 rounding; every other output keeps the bits of
+- Mamba-3 MIMO in TF32, bf16 and f16 runs the chunked scan on the tensor
+  cores. f16 takes three TF32 passes and keeps near-f32 accuracy. These
+  outputs move within TF32 rounding. Every other output keeps the bits of
   0.8.3.
 - `benches/family_compare_bench.rs` times all four storages.
 
