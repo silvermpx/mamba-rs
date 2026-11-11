@@ -80,11 +80,15 @@ __device__ __forceinline__ float m3c_heavy_tail_deriv(float x) {
 // both are held bit for bit to the frozen pre-state trio in
 // tests/fixtures/m3_chunked_forward_reference.cu.
 //
-// Grid: (B * n_chunks, nh). Block: chunk_size (= 64 at the serve shape).
+// Grid: (B * n_chunks, nh). Block: M3_PRE_STATE_THREADS, whatever the chunk:
+// phase A takes a t a thread and phase B strides its outputs over the block,
+// so the block's size moves no chain. Its tile fills an SM's shared memory,
+// so the block is wide enough to keep the SM's schedulers busy.
 // Dynamic smem floats: chunk_size * (ds + 4) (K_scaled) + chunk_size * hd
 // (x) + chunk_size (the decay) + chunk_size (the decay cumsum).
+#define M3_PRE_STATE_THREADS 512
 #define DEFINE_M3_CHUNK_PRE_STATE_FUSED_F32(NAME, IDX)                         \
-extern "C" __global__ void NAME(                                               \
+extern "C" __global__ void __launch_bounds__(M3_PRE_STATE_THREADS) NAME(       \
     float* __restrict__ K_scaled,                                              \
     float* __restrict__ qk_dot,                                                \
     float* __restrict__ scale_out,                                             \
@@ -1707,12 +1711,26 @@ __device__ __forceinline__ void m3_dqktheta_row(
         && M3_QUAD_ALIGNED(K_raw, T_ACT) && M3_QUAD_ALIGNED(dQ_mid, float)
         && M3_QUAD_ALIGNED(dK_mid, float) && M3_QUAD_ALIGNED(dQ_pre, float)
         && M3_QUAD_ALIGNED(dK_pre, float);
+    // A quad's loads go out while the quad before it is turned, so a row
+    // waits one round trip at its start rather than one a quad.
+    float4 q, k, dq, dk;
+    if (ds > 0) {
+        const int v0 = min(4, ds);
+        q = m3_load_quad(Q_raw + base, v0, vec);
+        k = m3_load_quad(K_raw + base, v0, vec);
+        dq = m3_load_quad(dQ_mid + base, v0, vec);
+        dk = m3_load_quad(dK_mid + base, v0, vec);
+    }
     for (int n = 0; n < ds; n += 4) {
         const int valid = min(4, ds - n);
-        const float4 q = m3_load_quad(Q_raw + base + n, valid, vec);
-        const float4 k = m3_load_quad(K_raw + base + n, valid, vec);
-        const float4 dq = m3_load_quad(dQ_mid + base + n, valid, vec);
-        const float4 dk = m3_load_quad(dK_mid + base + n, valid, vec);
+        float4 qn = q, kn = k, dqn = dq, dkn = dk;
+        if (n + 4 < ds) {
+            const int vn = min(4, ds - n - 4);
+            qn = m3_load_quad(Q_raw + base + n + 4, vn, vec);
+            kn = m3_load_quad(K_raw + base + n + 4, vn, vec);
+            dqn = m3_load_quad(dQ_mid + base + n + 4, vn, vec);
+            dkn = m3_load_quad(dK_mid + base + n + 4, vn, vec);
+        }
         float4 oq = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         float4 ok = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         // A row of odd length ends in one plain state: 2 n_angles <= ds.
@@ -1730,6 +1748,10 @@ __device__ __forceinline__ void m3_dqktheta_row(
         }
         m3_store_quad(dQ_pre + base + n, oq, valid, vec);
         m3_store_quad(dK_pre + base + n, ok, valid, vec);
+        q = qn;
+        k = kn;
+        dq = dqn;
+        dk = dkn;
     }
     dScale[row] = r.d_scale;
     dGamma[row] = __fmul_rn(dqk, r.qk);
@@ -1904,7 +1926,7 @@ DEFINE_M3_FINAL_GRADS(m3_final_grads_i64, long long)
  * the pre-round f32. x stages through to_f exactly as the standalone
  * reads it. */
 #define DEFINE_M3_CHUNK_PRE_STATE_FUSED(NAME, IDX, T_ACT, FROM_F)             \
-extern "C" __global__ void NAME(                                              \
+extern "C" __global__ void __launch_bounds__(M3_PRE_STATE_THREADS) NAME(      \
     T_ACT* __restrict__ K_scaled,                                             \
     float* __restrict__ qk_dot,                                               \
     float* __restrict__ scale_out,                                            \
@@ -2564,7 +2586,8 @@ DEFINE_M3_CHUNK_SCAN_FWD_COOP(m3_chunk_scan_fwd_coop_f16_i64, long long, __half,
 // operand it reads from shared memory serves four chains.
 //
 // The tile depends on neither the head nor the state width: M3SS_FLOATS
-// floats, 26 KB, so three blocks share an SM on every supported part.
+// floats, 26 KB, so three blocks share an SM on every supported part; a
+// slice's loads go out while the slice before it is summed.
 // Grid: (B * n_chunks, nh, ceil(hd / M3SS_PB)). Block: 256.
 #define M3SS_NS 16
 #define M3SS_PB 64
@@ -2669,34 +2692,39 @@ extern "C" __global__ __launch_bounds__(256, 3) void NAME(                    \
             acc_off[i][j] = 0.0f;                                             \
         }                                                                     \
     }                                                                         \
-    bool vec = (ds & 3) == 0 && M3_QUAD_ALIGNED(Q, T_ACT)                        \
-               && M3_QUAD_ALIGNED(K_scaled, T_ACT)                               \
-               && M3_QUAD_ALIGNED(prev_states, float);                           \
+    bool vec = (ds & 3) == 0 && M3_QUAD_ALIGNED(Q, T_ACT)                     \
+               && M3_QUAD_ALIGNED(K_scaled, T_ACT)                            \
+               && M3_QUAD_ALIGNED(prev_states, float);                        \
+    /* A slice's values a thread, row tid / 4, quad tid % 4: the next */      \
+    /* slice's go out while the slice before it is summed, so a block waits */ \
+    /* on memory once rather than once a slice. */                            \
+    const int srow = tid >> 2;                                                \
+    const int sqd = tid & 3;                                                  \
+    auto load_quads = [&](int n0, float4& qv, float4& kv, float4& pv) {       \
+        int valid = min(ds - n0, M3SS_NS) - 4 * sqd;                          \
+        qv = make_float4(0.0f, 0.0f, 0.0f, 0.0f);                             \
+        kv = qv;                                                              \
+        pv = qv;                                                              \
+        if (valid > 0 && srow < chunk_len) {                                  \
+            IDX base = ((b * T + chunk_start + srow) * nh + h) * ds + n0 + 4 * sqd; \
+            qv = m3_load_quad_ro(Q + base, valid, vec);                       \
+            kv = m3_load_quad_ro(K_scaled + base, valid, vec);                \
+        }                                                                     \
+        if (valid > 0 && srow < p_len) {                                      \
+            pv = m3_load_quad_ro(prev_states + state_head                     \
+                               + (IDX)(p_lo + srow) * ds + n0 + 4 * sqd,      \
+                           valid, vec);                                       \
+        }                                                                     \
+    };                                                                        \
+    float4 qn, kn, pn;                                                        \
+    load_quads(0, qn, kn, pn);                                                \
     for (int n0 = 0; n0 < ds; n0 += M3SS_NS) {                                \
         int width = min(ds - n0, M3SS_NS);                                    \
         __syncthreads();                                                      \
-        {                                                                     \
-            /* Four values a thread: row tid / 4, quad tid % 4. */            \
-            int row = tid >> 2;                                               \
-            int qd = tid & 3;                                                 \
-            int valid = width - 4 * qd;                                       \
-            float4 qv = make_float4(0.0f, 0.0f, 0.0f, 0.0f);                  \
-            float4 kv = qv;                                                   \
-            float4 pv = qv;                                                   \
-            if (valid > 0 && row < chunk_len) {                               \
-                IDX base = ((b * T + chunk_start + row) * nh + h) * ds + n0 + 4 * qd; \
-                qv = m3_load_quad_ro(Q + base, valid, vec);                   \
-                kv = m3_load_quad_ro(K_scaled + base, valid, vec);            \
-            }                                                                 \
-            if (valid > 0 && row < p_len) {                                   \
-                pv = m3_load_quad_ro(prev_states + state_head                 \
-                                   + (IDX)(p_lo + row) * ds + n0 + 4 * qd,    \
-                               valid, vec);                                   \
-            }                                                                 \
-            *reinterpret_cast<float4*>(sm_q + row * M3SS_LD + 4 * qd) = qv;   \
-            *reinterpret_cast<float4*>(sm_k + row * M3SS_LD + 4 * qd) = kv;   \
-            *reinterpret_cast<float4*>(sm_ps + row * M3SS_LD + 4 * qd) = pv;  \
-        }                                                                     \
+        *reinterpret_cast<float4*>(sm_q + srow * M3SS_LD + 4 * sqd) = qn;     \
+        *reinterpret_cast<float4*>(sm_k + srow * M3SS_LD + 4 * sqd) = kn;     \
+        *reinterpret_cast<float4*>(sm_ps + srow * M3SS_LD + 4 * sqd) = pn;    \
+        if (n0 + M3SS_NS < ds) load_quads(n0 + M3SS_NS, qn, kn, pn);          \
         __syncthreads();                                                      \
         int full = width >> 2;                                                \
         for (int qd = 0; qd < full; qd++) {                                   \
@@ -2783,7 +2811,7 @@ extern "C" __global__ __launch_bounds__(256, 3) void NAME(                    \
         }                                                                     \
     }                                                                         \
     /* The value rows of the block's channels, in the slices' place. */       \
-    bool vec_v = (hd & 3) == 0 && M3_QUAD_ALIGNED(x, T_ACT);                     \
+    bool vec_v = (hd & 3) == 0 && M3_QUAD_ALIGNED(x, T_ACT);                  \
     for (int i = tid; i < chunk_len * (M3SS_PB / 4); i += blockDim.x) {       \
         int s = i / (M3SS_PB / 4);                                            \
         int pq = i - s * (M3SS_PB / 4);                                       \
@@ -2801,7 +2829,7 @@ extern "C" __global__ __launch_bounds__(256, 3) void NAME(                    \
     /* Outputs: the diagonal chain, then the static-tile kernel's sum */      \
     /* y_diag + y_off + skip * v as its compiler contracts it. */             \
     float d_skip = D[h];                                                      \
-    bool vec_y = (hd & 3) == 0 && M3_QUAD_ALIGNED(y_out, T_ACT);                 \
+    bool vec_y = (hd & 3) == 0 && M3_QUAD_ALIGNED(y_out, T_ACT);              \
     _Pragma("unroll")                                                         \
     for (int i = 0; i < 4; i++) {                                             \
         int t = 4 * tr + i;                                                   \
@@ -2810,23 +2838,23 @@ extern "C" __global__ __launch_bounds__(256, 3) void NAME(                    \
         bool on = t < cont;                                                   \
         float yd0 = 0.0f, yd1 = 0.0f, yd2 = 0.0f, yd3 = 0.0f;                 \
         int tri_row = t * (t - 1) / 2;                                        \
-        /* Four rows' reads together ahead of their arithmetic; each chain */  \
-        /* takes the same products in the same order as one row at a time. */  \
-        int sr = sm_lo[t];                                                     \
-        for (; sr + 4 <= t; sr += 4) {                                         \
-            float w4[4];                                                       \
-            float4 v4[4];                                                      \
-            lds_f32_row4(sm_tri + tri_row + sr, w4);                           \
-            lds_f32x4_rows4(sm_v + sr * M3SS_V_LD + 4 * tc, M3SS_V_LD, v4);    \
-            _Pragma("unroll")                                                  \
-            for (int j = 0; j < 4; j++) {                                      \
-                yd0 = __fmaf_rn(w4[j], v4[j].x, yd0);                          \
-                yd1 = __fmaf_rn(w4[j], v4[j].y, yd1);                          \
-                yd2 = __fmaf_rn(w4[j], v4[j].z, yd2);                          \
-                yd3 = __fmaf_rn(w4[j], v4[j].w, yd3);                          \
-            }                                                                  \
-        }                                                                      \
-        for (int s = sr; s < t; s++) {                                  \
+        /* Four rows' reads together ahead of their arithmetic; each chain */ \
+        /* takes the same products in the same order as one row at a time. */ \
+        int sr = sm_lo[t];                                                    \
+        for (; sr + 4 <= t; sr += 4) {                                        \
+            float w4[4];                                                      \
+            float4 v4[4];                                                     \
+            lds_f32_row4(sm_tri + tri_row + sr, w4);                          \
+            lds_f32x4_rows4(sm_v + sr * M3SS_V_LD + 4 * tc, M3SS_V_LD, v4);   \
+            _Pragma("unroll")                                                 \
+            for (int j = 0; j < 4; j++) {                                     \
+                yd0 = __fmaf_rn(w4[j], v4[j].x, yd0);                         \
+                yd1 = __fmaf_rn(w4[j], v4[j].y, yd1);                         \
+                yd2 = __fmaf_rn(w4[j], v4[j].z, yd2);                         \
+                yd3 = __fmaf_rn(w4[j], v4[j].w, yd3);                         \
+            }                                                                 \
+        }                                                                     \
+        for (int s = sr; s < t; s++) {                                        \
             float w = sm_tri[tri_row + s];                                    \
             float4 v = lds_f32x4(sm_v + s * M3SS_V_LD + 4 * tc);              \
             yd0 = __fmaf_rn(w, v.x, yd0);                                     \
@@ -2847,7 +2875,7 @@ extern "C" __global__ __launch_bounds__(256, 3) void NAME(                    \
                          M3SS_STATE_TERM(on ? acc_off[i][3] : 0.0f, state_decay, yd3)); \
         int valid = p_len - 4 * tc;                                           \
         if (valid > 0) {                                                      \
-            m3_store_quad(y_out + (b * T + chunk_start + t) * d_inner + h * hd     \
+            m3_store_quad(y_out + (b * T + chunk_start + t) * d_inner + h * hd \
                          + p_lo + 4 * tc,                                     \
                      yv, valid, vec_y);                                       \
         }                                                                     \

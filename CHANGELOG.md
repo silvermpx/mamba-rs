@@ -33,6 +33,15 @@
   ran on a sixth of the warp's steps. On an RTX 6000 Ada (4 layers of 768,
   heads of 64 x 128, rank 4) a 4096-token prompt is 6 to 9 percent faster
   in f32, tf32, bf16 and f16. Bits unchanged.
+- Mamba-3 SISO prompts and training: the fused pre-state kernel runs 512
+  threads a block instead of one thread a chunk position (its tile fills a
+  multiprocessor's shared memory, so 64 threads had left it two warps); the
+  sliced scan loads the next slice of the state while it sums the current
+  one; the angle backward loads a row's next quad while it turns the
+  current one. On an RTX 6000 Ada (4 layers of 768, heads of 64 x 128) a
+  4096-token prompt is 5 percent faster in f32 and tf32, 7 in f16 and 10 in
+  bf16, and a training step about 2 percent faster in all four. Bits
+  unchanged.
 
 ## 0.8.3 (2026-11-09)
 

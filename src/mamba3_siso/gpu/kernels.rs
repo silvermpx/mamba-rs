@@ -1393,10 +1393,15 @@ pub const SCAN_SLICED_FLOATS: usize = {
     tri + arena + 5 * 64
 };
 
+/// Threads of a block of the fused pre-state kernel
+/// (`M3_PRE_STATE_THREADS`): its tile of whole rows takes an SM's shared
+/// memory, so one block has to keep the SM's schedulers busy alone.
+pub const PRE_STATE_THREADS: usize = 512;
+
 /// Launch geometry for the fused pre-state kernel, or None when its tile of
 /// whole rows passes the `smem` bytes a block may stage
 /// ([`Mamba3Kernels::smem_optin`]), its state width is not a whole number of
-/// quads, or the chunk is wider than a block.
+/// quads, or the chunk passes 1024 steps.
 pub fn chunk_fused_cfg(
     batch: usize,
     n_chunks: usize,
@@ -1413,7 +1418,7 @@ pub fn chunk_fused_cfg(
     }
     Some(cudarc::driver::LaunchConfig {
         grid_dim: ((batch * n_chunks) as u32, nh as u32, 1),
-        block_dim: (chunk_size as u32, 1, 1),
+        block_dim: (PRE_STATE_THREADS as u32, 1, 1),
         shared_mem_bytes: smem_bytes as u32,
     })
 }
