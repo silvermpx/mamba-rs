@@ -61,6 +61,13 @@
   of 64 x 128, rank 4) a training step is 2 to 4 percent faster and a
   4096-token prompt 3 to 5 percent, in f32, tf32, bf16 and f16. Bits
   unchanged.
+- Mamba-3 MIMO prompts and training in TF32, bf16 and f16: the chunked
+  scan forms its products on the tensor cores (TF32 with f32 sums, as the
+  backward's pair terms do) instead of the CUDA cores. On an RTX 6000 Ada
+  (4 layers of 768, heads of 64 x 128, rank 4) a 4096-token prompt is 13
+  to 14 percent faster and a training step 2.5 to 3 percent. The typed
+  forward's bits change within TF32 rounding; f32 keeps its CUDA-core
+  path and its bits.
 
 ## 0.8.3 (2026-11-09)
 

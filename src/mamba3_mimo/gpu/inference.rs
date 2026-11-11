@@ -14,8 +14,8 @@ use crate::bidi::{mlps_after, opens_pair, reads_reversed};
 use crate::gpu::bidi::{WindowRows, reverse_rows, zero_bytes};
 
 use super::kernels::{
-    ChunkedGeom, Mamba3MimoKernels, ScanGeom, chunk_scan_tiles_cfg, chunked_geom, prep_cfgs,
-    scan_geom,
+    ChunkedGeom, Mamba3MimoKernels, SCAN_TC_CHANNELS, SCAN_TC_THREADS, ScanGeom,
+    chunk_scan_tiles_cfg, chunked_geom, prep_cfgs, scan_geom, scan_tc_bytes, scan_tensor_cores,
 };
 use crate::config::ScanMode;
 use crate::gpu::blas::{TypedPtr, gpu_gemm_f32_forward_ptrs, gpu_gemm_typed_forward_raw};
@@ -172,6 +172,9 @@ pub struct Mamba3MimoGpuEngine {
     batch: usize,
     input_dim: usize,
     act: WeightDtype,
+    /// The storage precision the engine was built for (`act` holds f32 for
+    /// both the f32 and the TF32 lanes).
+    precision: WeightDtype,
     layers: Vec<GpuMimoLayer>,
     input_proj: Option<(GpuBuffer, GpuBuffer)>,
     norm_f_weight: GpuBuffer,
@@ -370,6 +373,7 @@ impl Mamba3MimoGpuEngine {
             batch,
             input_dim,
             act,
+            precision: dtype,
             layers,
             input_proj,
             norm_f_weight,
@@ -786,6 +790,7 @@ impl Mamba3MimoGpuEngine {
             kernels: &self.kernels,
             cfg: &self.cfg,
             act: self.act,
+            precision: self.precision,
         };
         let geom = self
             .chunked
@@ -1105,6 +1110,9 @@ pub(crate) struct MimoExec<'a> {
     pub kernels: &'a Mamba3MimoKernels,
     pub cfg: &'a Mamba3MimoConfig,
     pub act: WeightDtype,
+    /// The storage precision: it picks the tensor-core scan for the TF32
+    /// lane, whose activations are f32.
+    pub precision: WeightDtype,
 }
 
 /// One layer's chunked scan, as device pointers: its rows, its scratch,
@@ -1239,7 +1247,48 @@ pub(crate) fn launch_chunked_scan(
         unsafe { bld.launch(sincos_cfg) }.map_err(err("angle sines"))?;
     }
     launch_chunk_entries(x, ptrs, geom, (b, t_len), l)?;
-    if geom.scan_tiles.0 > 0 {
+    let tensor_scan = x
+        .kernels
+        .chunk_scan_tc
+        .as_ref()
+        .filter(|_| scan_tensor_cores(x.precision, x.kernels.chunk, r));
+    if let Some(scan) = tensor_scan {
+        let w = [b_bias, c_bias, d, mimo_x, mimo_z, mimo_o];
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: (
+                (b * nc) as u32,
+                nh as u32,
+                hd.div_ceil(SCAN_TC_CHANNELS) as u32,
+            ),
+            block_dim: (SCAN_TC_THREADS as u32, 1, 1),
+            shared_mem_bytes: scan_tc_bytes() as u32,
+        };
+        for (y_first, cfg) in y_runs(cfg) {
+            let mut bld = stream.launch_builder(scan.get(x.act));
+            bld.arg(&gated);
+            bld.arg(&y_out);
+            bld.arg(&proj);
+            bld.arg(&ld_proj);
+            bld.arg(&bn);
+            bld.arg(&cn);
+            bld.arg(&coef);
+            bld.arg(&sn);
+            bld.arg(&cs);
+            bld.arg(&enter);
+            for p in &w {
+                bld.arg(p);
+            }
+            bld.arg(&seq_i);
+            bld.arg(&nh_i);
+            bld.arg(&ng_i);
+            bld.arg(&hd_i);
+            bld.arg(&ds_i);
+            bld.arg(&na_i);
+            bld.arg(&y_first);
+            bld.arg(&seq_idx);
+            unsafe { bld.launch(cfg) }.map_err(err("tensor-core scan"))?;
+        }
+    } else if geom.scan_tiles.0 > 0 {
         let (tq, kt, nk, smem) = geom.scan_tiles;
         let w = [b_bias, c_bias, d, mimo_x, mimo_z, mimo_o];
         let (tq_i, kt_i, nk_i) = (tq as i32, kt as i32, nk as i32);

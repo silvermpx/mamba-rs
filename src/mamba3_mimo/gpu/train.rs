@@ -2128,6 +2128,7 @@ impl Mamba3MimoGpuTrainer {
                     kernels: &self.kernels,
                     cfg: &self.cfg,
                     act: self.act,
+                    precision: self.dtype,
                 };
                 launch_chunked_scan(x, &ptrs, &geom, (b, t_len), l)?;
             } else {
@@ -2894,6 +2895,7 @@ impl Mamba3MimoGpuTrainer {
                 kernels: k,
                 cfg: &self.cfg,
                 act,
+                precision: self.dtype,
             };
             launch_chunk_entries(x, &entries, &geom, (b, t_len), l)?;
             let cbuf = &s.cb;

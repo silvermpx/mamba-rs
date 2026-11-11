@@ -1388,3 +1388,335 @@ extern "C" __global__ void NAME(                                               \
 DEFINE_M3M_WRITEBACK(m3m_writeback, float)
 DEFINE_M3M_WRITEBACK(m3m_writeback_bf16, __nv_bfloat16)
 DEFINE_M3M_WRITEBACK(m3m_writeback_f16, __half)
+
+// ============================================================================
+// The chunk scan on the tensor cores, for the TF32, bf16 and f16 forwards.
+// ============================================================================
+// m3m_chunk_scan_tiles' outputs from TF32 products with f32 accumulation
+// (m16n8k8), each operand rounded to TF32 to nearest, ties away, as it
+// enters, as the backward's pair terms take theirs; the f32 forward keeps
+// the CUDA-core kernels and their f32 sums. A block takes all of a chunk's
+// rows, at most M3MS_ROWS (the rank's own chunk of 64 / R tokens), and a
+// group of M3MS_P channels of the head:
+//   inter: Y = Q S_enter^T over the state indices, M3MS_SL at a time, then
+//     each row times e^Acs_t where it continues the sequence the entering
+//     state holds, zero elsewhere;
+//   G = Q K^T over the same slices, then Gw = G w(t, s) for s <= t within
+//     the row's own sequence, zero elsewhere;
+//   Y += Gw U, U = Psi_r' x_s, over one packed sequence's columns at a time,
+//     their groups of eight counted from the sequence's first column, each
+//     row keeping only its own sequence's pass (the zero weights of another
+//     sequence would carry its infinities and NaNs in);
+//   then y = fma(D, u_t, Y), the readouts and the gate over the ranks per
+//   (token, channel), as the CUDA-core kernel forms them.
+// Every sum keeps one order, so the bits repeat run to run, and an output
+// depends only on its own row's and column's operands: a sequence gives the
+// same bits wherever a packing puts it in the chunk. A warp holds 16 rows
+// by 32 columns of G and of Y. Shared memory (floats): the slices q and k
+// [ROWS][SL + 4] and s [P][SL + 4], then Gw [ROWS][ROWS + 8] and U
+// [ROWS][P + 8] in their place, the gate's rows [ROWS][P + 4] in Gw's; the
+// chunk's Acs, scale, gamma, sequence ids and continuations [ROWS] each and
+// its sequences' first tokens (scan_tc_bytes on the host). Grid (B * nc,
+// H, ceil(P / M3MS_P)), block M3MS_THREADS.
+#define M3MS_THREADS 256
+#define M3MS_ROWS 64
+#define M3MS_P 64
+#define M3MS_SL 32
+#define M3MS_SLD (M3MS_SL + 4)
+#define M3MS_GLD (M3MS_ROWS + 8)
+#define M3MS_ULD (M3MS_P + 8)
+#define M3MS_YLD (M3MS_P + 4)
+
+#if M3M_CHUNK * MIMO_RANK <= M3MS_ROWS
+
+__device__ __forceinline__ unsigned m3ms_tf32(float v) {
+    unsigned r;
+    asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r) : "f"(v));
+    return r;
+}
+
+__device__ __forceinline__ void m3ms_mma(
+    float (&d)[4], const unsigned (&a)[4], const unsigned (&b)[2]) {
+    asm volatile(
+        "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 "
+        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+        : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
+}
+
+template <typename TI>
+__device__ __forceinline__ void m3m_chunk_scan_tc_body(
+    TI* __restrict__ out, float* __restrict__ y_out,
+    const TI* __restrict__ proj, long long ld_proj,
+    const float* __restrict__ bn, const float* __restrict__ cn,
+    const float* __restrict__ coef,
+    const float* __restrict__ sn, const float* __restrict__ cs,
+    const float* __restrict__ enter,
+    const float* __restrict__ b_bias, const float* __restrict__ c_bias,
+    const float* __restrict__ D,
+    const float* __restrict__ mimo_x, const float* __restrict__ mimo_z,
+    const float* __restrict__ mimo_o,
+    int seq, int nh, int ng, int hd, int ds, int na,
+    int y_first, /* this run's first y block */
+    const int* __restrict__ seq_idx
+) {
+    constexpr int RK = MIMO_RANK;
+    extern __shared__ float4 m3ms_sm4[];
+    float* arena = reinterpret_cast<float*>(m3ms_sm4);
+    float* qs = arena;                                  // [ROWS][SLD]
+    float* ks = qs + M3MS_ROWS * M3MS_SLD;              // [ROWS][SLD]
+    float* ss = ks + M3MS_ROWS * M3MS_SLD;              // [P][SLD]
+    float* gw = arena;                                  // [ROWS][GLD]
+    float* us = gw + M3MS_ROWS * M3MS_GLD;              // [ROWS][ULD]
+    float* yg = gw;                                     // [ROWS][YLD]
+    float* acs = us + M3MS_ROWS * M3MS_ULD;             // [ROWS]
+    float* scl = acs + M3MS_ROWS;
+    float* gam = scl + M3MS_ROWS;
+    int* sid = reinterpret_cast<int*>(gam + M3MS_ROWS);
+    int* cont = sid + M3MS_ROWS;
+    int* segs = cont + M3MS_ROWS;                       // [ROWS + 1]
+    int* nseg_s = segs + M3MS_ROWS + 1;
+    const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
+    const long long bc = blockIdx.x;
+    const int h = y_first + blockIdx.y;
+    const int pb = blockIdx.z * M3MS_P;
+    const int c = (int)(bc % nc);
+    const long long b = bc / nc;
+    const int t0 = c * M3M_CHUNK;
+    const int lc = min(M3M_CHUNK, seq - t0);
+    const int rows = lc * RK;
+    const int pw = min(M3MS_P, hd - pb);
+    const int g = h / (nh / ng);
+    const int di = nh * hd;
+    const int rgn = RK * ng * ds;
+    const int half = ds / 2;
+    const long long row0 = b * seq + t0;
+    const int tid = threadIdx.x;
+    const int lane = tid & 31, warp = tid >> 5;
+    const int gid = lane >> 2, tig = lane & 3;
+    for (int t = tid; t < M3MS_ROWS; t += blockDim.x) {
+        if (t < lc) {
+            const float* cf = coef + ((row0 + t) * nh + h) * 4;
+            acs[t] = cf[3];
+            scl[t] = cf[2];
+            gam[t] = cf[1];
+            sid[t] = vl_id(seq_idx, b, seq, t0 + t);
+            cont[t] = vl_span(seq_idx, b, seq, t0, lc, t).from_before ? 1 : 0;
+        } else {
+            acs[t] = scl[t] = gam[t] = 0.0f;
+            sid[t] = -1;
+            cont[t] = 0;
+        }
+    }
+    __syncthreads();
+    // The first token of each sequence in the chunk, then the chunk's end.
+    if (tid == 0) {
+        int n = 0;
+        for (int t = 0; t < lc; t++)
+            if (t == 0 || sid[t] != sid[t - 1]) segs[n++] = t;
+        segs[n] = lc;
+        *nseg_s = n;
+    }
+    // A slice of rotated rank rows into dst[a * M3MS_SLD + n]: rows a below
+    // M3MS_ROWS at the state indices n0 + n for n below M3MS_SL, m3m_rot's
+    // value and zero past the chunk or the state width, a thread's elements
+    // four at a time with every load in flight before any is turned.
+    auto rot_slice = [&](const float* base, const float* bias_base, int n0, float* dst) {
+        for (int e0 = tid; e0 < M3MS_ROWS * M3MS_SL; e0 += 4 * blockDim.x) {
+            M3mRotIn in[4];
+#pragma unroll
+            for (int u = 0; u < 4; u++) {
+                const int e = e0 + u * (int)blockDim.x;
+                const int a = e / M3MS_SL, n = n0 + e % M3MS_SL;
+                in[u] = M3mRotIn{0.0f, 0.0f, 0.0f, 0.0f};
+                if (e < M3MS_ROWS * M3MS_SL && a < rows && n < ds) {
+                    const int r = a % RK;
+                    const long long row = row0 + a / RK;
+                    in[u] = m3m_rot_load(base + row * rgn + ((long long)r * ng + g) * ds,
+                                         bias_base + ((long long)h * RK + r) * ds, n, half, na,
+                                         sn + (row * nh + h) * na, cs + (row * nh + h) * na);
+                }
+            }
+#pragma unroll
+            for (int u = 0; u < 4; u++) {
+                const int e = e0 + u * (int)blockDim.x;
+                if (e >= M3MS_ROWS * M3MS_SL) continue;
+                const int a = e / M3MS_SL, n = n0 + e % M3MS_SL;
+                dst[a * M3MS_SLD + e % M3MS_SL] =
+                    a < rows && n < ds ? m3m_rot_turn(in[u], n, half, na) : 0.0f;
+            }
+        }
+    };
+    // G and Y: a warp's 16 rows from rb and 32 columns from cb.
+    const int rb = (warp & 3) * 16, cb = (warp >> 2) * 32;
+    float gacc[4][4], yacc[4][4];
+#pragma unroll
+    for (int j = 0; j < 4; j++)
+#pragma unroll
+        for (int i = 0; i < 4; i++) gacc[j][i] = yacc[j][i] = 0.0f;
+    const float* sp = enter + (bc * nh + h) * (long long)hd * ds;
+    for (int n0 = 0; n0 < ds; n0 += M3MS_SL) {
+        __syncthreads();
+        rot_slice(cn, c_bias, n0, qs);
+        rot_slice(bn, b_bias, n0, ks);
+#pragma unroll 4
+        for (int e = tid; e < M3MS_P * M3MS_SL; e += blockDim.x) {
+            const int p = e / M3MS_SL, n = e % M3MS_SL;
+            ss[p * M3MS_SLD + n] = p < pw && n0 + n < ds ? sp[(long long)(pb + p) * ds + n0 + n] : 0.0f;
+        }
+        __syncthreads();
+#pragma unroll
+        for (int k8 = 0; k8 < M3MS_SL; k8 += 8) {
+            const unsigned a[4] = {
+                m3ms_tf32(qs[(rb + gid) * M3MS_SLD + k8 + tig]),
+                m3ms_tf32(qs[(rb + gid + 8) * M3MS_SLD + k8 + tig]),
+                m3ms_tf32(qs[(rb + gid) * M3MS_SLD + k8 + tig + 4]),
+                m3ms_tf32(qs[(rb + gid + 8) * M3MS_SLD + k8 + tig + 4])};
+#pragma unroll
+            for (int j = 0; j < 4; j++) {
+                const int col = cb + 8 * j + gid;
+                const unsigned bk[2] = {m3ms_tf32(ks[col * M3MS_SLD + k8 + tig]),
+                                        m3ms_tf32(ks[col * M3MS_SLD + k8 + tig + 4])};
+                m3ms_mma(gacc[j], a, bk);
+                const unsigned bs[2] = {m3ms_tf32(ss[col * M3MS_SLD + k8 + tig]),
+                                        m3ms_tf32(ss[col * M3MS_SLD + k8 + tig + 4])};
+                m3ms_mma(yacc[j], a, bs);
+            }
+        }
+    }
+    // The inter term carries e^Acs_t to the rows that continue the sequence
+    // the entering state holds.
+#pragma unroll
+    for (int j = 0; j < 4; j++) {
+#pragma unroll
+        for (int q = 0; q < 4; q++) {
+            const int i = rb + gid + (q >> 1) * 8;
+            const int t = i / RK;
+            yacc[j][q] = i < rows && cont[t] ? __fmul_rn(yacc[j][q], mimo_exp(acs[t])) : 0.0f;
+        }
+    }
+    __syncthreads();
+    // Gw: G times w(t, s) for s <= t in the row's own sequence, zero
+    // elsewhere; and U = Psi_r' x_s.
+#pragma unroll
+    for (int j = 0; j < 4; j++) {
+#pragma unroll
+        for (int q = 0; q < 4; q++) {
+            const int i = rb + gid + (q >> 1) * 8;
+            const int col = cb + 8 * j + 2 * tig + (q & 1);
+            const int t = i / RK, s = col / RK;
+            float v = 0.0f;
+            if (i < rows && col < rows && s <= t && sid[s] == sid[t]) {
+                const float w = s < t
+                    ? __fmul_rn(mimo_exp(fminf(__fsub_rn(acs[t], acs[s]), 0.0f)), scl[s])
+                    : gam[t];
+                v = __fmul_rn(gacc[j][q], w);
+            }
+            gw[i * M3MS_GLD + col] = v;
+        }
+    }
+    const TI* xr = proj + row0 * ld_proj + di + (long long)h * hd + pb;
+    const float* psi = mimo_x + (long long)h * RK * hd + pb;
+#pragma unroll 4
+    for (int e = tid; e < M3MS_ROWS * M3MS_P; e += blockDim.x) {
+        const int col = e / M3MS_P, p = e % M3MS_P;
+        float u = 0.0f;
+        if (col < rows && p < pw) {
+            const int s = col / RK, r = col - s * RK;
+            u = __fmul_rn(psi[r * hd + p], to_f(xr[s * ld_proj + p]));
+        }
+        us[col * M3MS_ULD + p] = u;
+    }
+    __syncthreads();
+    // Y += Gw U a packed sequence at a time.
+    const int nseg = *nseg_s;
+    for (int sg = 0; sg < nseg; sg++) {
+        const int k0 = segs[sg] * RK, k1 = segs[sg + 1] * RK;
+        float held[4][4];
+#pragma unroll
+        for (int j = 0; j < 4; j++)
+#pragma unroll
+            for (int q = 0; q < 4; q++) held[j][q] = yacc[j][q];
+        for (int k8 = k0; k8 < k1; k8 += 8) {
+            const int ka = k8 + tig, kb = ka + 4;
+            const bool va = ka < k1, vb = kb < k1;
+            const unsigned a[4] = {
+                va ? m3ms_tf32(gw[(rb + gid) * M3MS_GLD + ka]) : 0u,
+                va ? m3ms_tf32(gw[(rb + gid + 8) * M3MS_GLD + ka]) : 0u,
+                vb ? m3ms_tf32(gw[(rb + gid) * M3MS_GLD + kb]) : 0u,
+                vb ? m3ms_tf32(gw[(rb + gid + 8) * M3MS_GLD + kb]) : 0u};
+#pragma unroll
+            for (int j = 0; j < 4; j++) {
+                const int p = cb + 8 * j + gid;
+                const unsigned bu[2] = {va ? m3ms_tf32(us[ka * M3MS_ULD + p]) : 0u,
+                                        vb ? m3ms_tf32(us[kb * M3MS_ULD + p]) : 0u};
+                m3ms_mma(yacc[j], a, bu);
+            }
+        }
+#pragma unroll
+        for (int j = 0; j < 4; j++)
+#pragma unroll
+            for (int q = 0; q < 4; q++) {
+                const int i = rb + gid + (q >> 1) * 8;
+                if (i < k0 || i >= k1) yacc[j][q] = held[j][q];
+            }
+    }
+    __syncthreads();
+    // D, the readouts and the gate's rows.
+    const float dval = D[h];
+#pragma unroll
+    for (int j = 0; j < 4; j++) {
+#pragma unroll
+        for (int q = 0; q < 4; q++) {
+            const int i = rb + gid + (q >> 1) * 8;
+            const int pl = cb + 8 * j + 2 * tig + (q & 1);
+            if (i >= rows || pl >= pw) continue;
+            const int t = i / RK, r = i - t * RK;
+            const float v = __fmaf_rn(dval, us[i * M3MS_ULD + pl], yacc[j][q]);
+            if (y_out != nullptr)
+                y_out[(((row0 + t) * nh + h) * RK + r) * hd + pb + pl] = v;
+            yg[i * M3MS_YLD + pl] = v;
+        }
+    }
+    __syncthreads();
+    for (int e = tid; e < lc * pw; e += blockDim.x) {
+        const int tl = e / pw, pl = e % pw, p = pb + pl;
+        const long long row_t = row0 + tl;
+        const float z = to_f(proj[row_t * ld_proj + (long long)h * hd + p]);
+        float o = 0.0f;
+        for (int r = 0; r < RK; r++) {
+            const float v = __fmul_rn(mimo_z[((long long)h * RK + r) * hd + p], z);
+            const float sg = __fdiv_rn(v, __fadd_rn(1.0f, mimo_exp(-v)));
+            const float term = __fmul_rn(__fmul_rn(yg[(tl * RK + r) * M3MS_YLD + pl], sg),
+                                         mimo_o[((long long)h * RK + r) * hd + p]);
+            o = r == 0 ? term : __fadd_rn(o, term);
+        }
+        mimo_put(&out[row_t * di + (long long)h * hd + p], o);
+    }
+}
+
+#define DEFINE_M3M_CHUNK_SCAN_TC(NAME, TI)                                     \
+extern "C" __global__ void __launch_bounds__(M3MS_THREADS) NAME(               \
+    TI* __restrict__ out, float* __restrict__ y_out,                           \
+    const TI* __restrict__ proj, long long ld_proj,                            \
+    const float* __restrict__ bn, const float* __restrict__ cn,                \
+    const float* __restrict__ coef,                                            \
+    const float* __restrict__ sn, const float* __restrict__ cs,                \
+    const float* __restrict__ enter,                                           \
+    const float* __restrict__ b_bias, const float* __restrict__ c_bias,        \
+    const float* __restrict__ D,                                               \
+    const float* __restrict__ mimo_x, const float* __restrict__ mimo_z,        \
+    const float* __restrict__ mimo_o,                                          \
+    int seq, int nh, int ng, int hd, int ds, int na,                           \
+    int y_first, /* this run's first y block */                                \
+    const int* __restrict__ seq_idx                                            \
+) {                                                                            \
+    m3m_chunk_scan_tc_body<TI>(out, y_out, proj, ld_proj, bn, cn, coef, sn,    \
+        cs, enter, b_bias, c_bias, D, mimo_x, mimo_z, mimo_o, seq, nh, ng, hd, \
+        ds, na, y_first, seq_idx);                                             \
+}
+DEFINE_M3M_CHUNK_SCAN_TC(m3m_chunk_scan_tc, float)
+DEFINE_M3M_CHUNK_SCAN_TC(m3m_chunk_scan_tc_bf16, __nv_bfloat16)
+DEFINE_M3M_CHUNK_SCAN_TC(m3m_chunk_scan_tc_f16, __half)
+
+#endif  // M3M_CHUNK * MIMO_RANK <= M3MS_ROWS

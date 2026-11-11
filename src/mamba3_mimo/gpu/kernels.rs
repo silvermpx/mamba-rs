@@ -36,6 +36,10 @@ pub struct Mamba3MimoKernels {
     /// `m3m_chunk_scan_tiles`, one entry for each channel count a lane
     /// takes (see [`Self::chunk_scan_tiles_for`]).
     pub chunk_scan_tiles: [TypedKernel; 3],
+    /// The chunk scan on the tensor cores for the TF32, bf16 and f16
+    /// forwards ([`scan_tensor_cores`]), where a chunk holds at most
+    /// [`SCAN_TC_ROWS`] rows.
+    pub chunk_scan_tc: Option<TypedKernel>,
     pub chunk_writeback: TypedKernel,
     /// The MLP's gate, `value * silu(gate)`.
     pub mlp_gate: TypedKernel,
@@ -533,6 +537,54 @@ fn scan_ahead_forced() -> Option<bool> {
 /// mamba3_mimo_chunked_bwd.cu.
 pub const PAIRS_TC_ROWS: usize = 64;
 pub const PAIRS_TC_THREADS: usize = 256;
+
+/// Rows of a chunk, channels and threads a block of `m3m_chunk_scan_tc`
+/// holds (`M3MS_ROWS`, `M3MS_P` and `M3MS_THREADS` in
+/// `mamba3_mimo_chunked.cu`).
+pub const SCAN_TC_ROWS: usize = 64;
+pub const SCAN_TC_CHANNELS: usize = 64;
+pub const SCAN_TC_THREADS: usize = 256;
+
+/// `m3m_chunk_scan_tc`'s shared memory: G with U beside it [ROWS][ROWS + 8]
+/// and [ROWS][P + 8] (the slices of the first stage, and the gate's rows,
+/// in their room), then three scalars, a sequence id and a continuation a
+/// row, and the sequences' first tokens with their count.
+pub fn scan_tc_bytes() -> usize {
+    (SCAN_TC_ROWS * (SCAN_TC_ROWS + 8)
+        + SCAN_TC_ROWS * (SCAN_TC_CHANNELS + 8)
+        + 5 * SCAN_TC_ROWS
+        + SCAN_TC_ROWS
+        + 2)
+        * 4
+}
+
+/// Whether the chunked forward's scan runs on the tensor cores, in
+/// `m3m_chunk_scan_tc`: on the TF32, bf16 and f16 lanes wherever a chunk's
+/// rows fit its block, as the rank's own chunk of 64 / R tokens does at
+/// every rank. Its products round their operands to TF32, as the backward's
+/// pair terms do, so the f32 lane keeps the CUDA-core scans and their f32
+/// sums.
+pub fn scan_tensor_cores(precision: WeightDtype, chunk: usize, rank: usize) -> bool {
+    precision != WeightDtype::F32 && chunk * rank <= SCAN_TC_ROWS && !scan_tc_off()
+}
+
+/// `MAMBA_RS_MIMO_SCAN_TC` for tests and measurements: `off` keeps the
+/// CUDA-core scans on every lane, and unset or `auto` leaves the choice to
+/// [`scan_tensor_cores`]. Any other value is refused loudly, so a typo
+/// cannot report a run that never left the rule.
+fn scan_tc_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| match std::env::var("MAMBA_RS_MIMO_SCAN_TC") {
+        Err(_) => false,
+        Ok(v) => match v.trim() {
+            "auto" | "" => false,
+            "off" => true,
+            other => panic!(
+                "MAMBA_RS_MIMO_SCAN_TC={other:?} is not a recognized setting (use auto or off)"
+            ),
+        },
+    })
+}
 
 /// Whether the pair terms run on the tensor cores, in `m3mb_pairs_tc`: on
 /// the TF32, bf16 and f16 trainers wherever a chunk's rows fit its block,
@@ -1234,6 +1286,11 @@ impl Mamba3MimoKernels {
                 typed("m3m_chunk_scan_tiles_jp2")?,
                 typed("m3m_chunk_scan_tiles_jp4")?,
             ],
+            chunk_scan_tc: if chunk * rank <= SCAN_TC_ROWS {
+                Some(typed("m3m_chunk_scan_tc")?)
+            } else {
+                None
+            },
             chunk_writeback: typed("m3m_writeback")?,
             mlp_gate: typed("mlp_gate_fwd")?,
             gate_normed: typed("mimo_gate_normed")?,
@@ -1427,6 +1484,24 @@ mod tests {
         for na in 1..=128 {
             assert!(angle_walk_smem_bytes(na) <= 48 * 1024, "{na} angles");
         }
+    }
+
+    /// The tensor-core scan's block constants are the kernel's, and its
+    /// shared memory fits the 48 KB default window.
+    #[test]
+    fn the_tensor_core_scan_block_is_the_kernel_s() {
+        let source = include_str!("../../../kernels/mamba3_mimo_chunked.cu");
+        for (name, value) in [
+            ("M3MS_THREADS", SCAN_TC_THREADS),
+            ("M3MS_ROWS", SCAN_TC_ROWS),
+            ("M3MS_P", SCAN_TC_CHANNELS),
+        ] {
+            assert!(
+                source.contains(&format!("#define {name} {value}\n")),
+                "{name}"
+            );
+        }
+        assert!(scan_tc_bytes() <= 48 * 1024);
     }
 
     /// The chunk terms' block constants are the kernel's.
