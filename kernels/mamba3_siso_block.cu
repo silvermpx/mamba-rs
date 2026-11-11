@@ -83,7 +83,10 @@
 // back in whole contiguous runs, and each element then walks its row there
 // (the row stride is odd, so the lanes' rows fall in distinct banks). Each
 // element's arithmetic is the plain path's, value for value and in the
-// same order, so both paths give the same bits.
+// same order, so both paths give the same bits. Only the plain build
+// stages: the engine takes the prefetching build exactly where it does
+// not stage (step_head_cfg), so that build compiles the plain path alone
+// and keeps its registers for a single sequence's step.
 //
 // The previous K is staged by every thread before the barrier, so the
 // head's new K may overwrite k_state right after it: no thread reads
@@ -118,7 +121,7 @@ extern "C" __global__ void NAME(                                              \
     unsigned smem_bytes;                                                      \
     asm("mov.u32 %0, %%dynamic_smem_size;" : "=r"(smem_bytes));               \
     int hs_stride = M3_STEP_ROW_STRIDE(ds);                                   \
-    bool staged = (unsigned long long)smem_bytes >=                           \
+    bool staged = PF == 0 && (unsigned long long)smem_bytes >=                \
         (unsigned long long)M3_STEP_STAGED_FLOATS(hd, ds) * sizeof(float);    \
     int d_inner = nh * hd;                                                    \
     IDX row = b * nh * ds + h * ds;                                           \
