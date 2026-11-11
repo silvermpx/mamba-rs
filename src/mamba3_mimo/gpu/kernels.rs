@@ -30,7 +30,10 @@ pub struct Mamba3MimoKernels {
     pub chunk_prep_chain: CudaFunction,
     pub chunk_prep_sincos: CudaFunction,
     pub chunk_state: TypedKernel,
-    pub chunk_state_tiles: TypedKernel,
+    /// The chunk states and their passing in one launch, where the
+    /// register tiles fit ([`state_chain`]); `chunk_state` and `state_pass`
+    /// elsewhere.
+    pub chunk_state_chain: TypedKernel,
     pub state_pass: CudaFunction,
     pub chunk_scan: TypedKernel,
     /// `m3m_chunk_scan_tiles`, one entry for each channel count a lane
@@ -40,6 +43,13 @@ pub struct Mamba3MimoKernels {
     /// forwards ([`scan_tensor_cores`]), where a chunk holds at most
     /// [`SCAN_TC_ROWS`] rows.
     pub chunk_scan_tc: Option<TypedKernel>,
+    /// The state chain and the tensor-core scan in one launch, where one
+    /// chain tile holds the head ([`chain_scan_plan`]), the entering states
+    /// handed between neighbouring chunks through two slots a head.
+    pub chunk_chain_scan_tc: Option<TypedKernel>,
+    /// The widest block `m3m_chain_scan_tc` launches, from its registers;
+    /// zero where the device's opt-in shared memory does not hold its block.
+    pub chain_scan_threads: usize,
     pub chunk_writeback: TypedKernel,
     /// The MLP's gate, `value * silu(gate)`.
     pub mlp_gate: TypedKernel,
@@ -106,9 +116,9 @@ pub struct MimoChunkedBwd {
     /// ([`ChunkedGeom::terms`]).
     pub state_terms_tiles: TypedKernel,
     pub dsloc: CudaFunction,
-    /// `m3mb_dsloc` as register tiles, when [`ChunkedGeom::dsloc_tiles`]
-    /// fits.
-    pub dsloc_tiles: CudaFunction,
+    /// `m3mb_dsloc` and `m3mb_pass` in one launch as register tiles, where
+    /// [`ChunkedGeom::dsloc_tiles`] fits ([`state_chain`]).
+    pub dsloc_chain: CudaFunction,
     pub pass: CudaFunction,
     pub chunk_dot: CudaFunction,
     /// The pair terms split by owner: dq per t-tile, then dk, du and dw per
@@ -132,9 +142,10 @@ pub struct MimoChunkedBwd {
     pub sum_inner: CudaFunction,
     /// Per-row partials summed over the rows, 64-bit indexed.
     pub reduce_rows: CudaFunction,
-    /// The inter-chunk part of dq and the state terms of a chunk and head in
-    /// one block (`m3mb_inter_tiles` and `m3mb_state_terms_tiles` in one,
-    /// their chains), where a chunk holds at most [`TERMS_ROWS`] rows.
+    /// The inter-chunk part of dq, the state terms and the chunk dot of a
+    /// chunk and head in one block (`m3mb_inter_tiles`,
+    /// `m3mb_state_terms_tiles` and `m3mb_chunk_dot` in one, their chains),
+    /// where a chunk holds at most [`TERMS_ROWS`] rows.
     pub chunk_terms: Option<TypedKernel>,
 }
 
@@ -148,7 +159,7 @@ pub struct ChunkedGeom {
     /// `m3m_chunk_state`: state indices per block, tokens staged per pass,
     /// bytes.
     pub state: (usize, usize, usize),
-    /// `m3m_chunk_state_tiles`: key columns per lane (1, 2 or 4; 0 when no
+    /// `m3m_chunk_state_chain`: key columns per lane (1, 2 or 4; 0 when no
     /// pass fits the shared memory and `m3m_chunk_state` serves), tokens
     /// staged per pass, channels per block, bytes.
     pub state_tiles: (usize, usize, usize, usize),
@@ -161,7 +172,7 @@ pub struct ChunkedGeom {
     pub scan_tiles: (usize, usize, usize, usize),
     /// `m3mb_dsloc`: state indices per block, bytes.
     pub dsloc: (usize, usize),
-    /// `m3mb_dsloc_tiles`: key columns per lane (0 when no pass fits the
+    /// `m3mb_dsloc_chain`: key columns per lane (0 when no pass fits the
     /// shared memory and `m3mb_dsloc` serves), tokens staged per pass,
     /// channels per block, bytes.
     pub dsloc_tiles: (usize, usize, usize, usize),
@@ -209,9 +220,9 @@ pub struct ChunkThreads {
     /// The channel-parallel kernels: the chunk state and scan, the local
     /// state gradient and the lead.
     pub generic: usize,
-    /// The register-tile chunk state, `m3m_chunk_state_tiles`.
+    /// The register-tile chunk state, `m3m_chunk_state_chain`.
     pub state_tiles: usize,
-    /// The register-tile local state gradient, `m3mb_dsloc_tiles`.
+    /// The register-tile local state gradient, `m3mb_dsloc_chain`.
     pub dsloc_tiles: usize,
 }
 
@@ -544,6 +555,48 @@ pub const PAIRS_TC_THREADS: usize = 256;
 pub const SCAN_TC_ROWS: usize = 64;
 pub const SCAN_TC_CHANNELS: usize = 64;
 pub const SCAN_TC_THREADS: usize = 256;
+
+/// `m3m_chain_scan_tc`'s threads and its shared memory: the entering state
+/// [P][128 + 4] (`M3MCS_NLD` in mamba3_mimo_chunked.cu), then the scan's.
+pub const CHAIN_SCAN_THREADS: usize = 512;
+pub fn chain_scan_bytes() -> usize {
+    SCAN_TC_CHANNELS * (128 + 4) * 4 + scan_tc_bytes()
+}
+
+/// The chain tile `m3m_chain_scan_tc` runs a head of `hd` channels and
+/// `ds` state indices at rank `rank` in chunks of `chunk` tokens with (key
+/// columns per lane and tokens staged per pass), or `None` where the chain
+/// does not run (`state_tiles` is the chain kernel's geometry), the head
+/// passes one tile of [`SCAN_TC_CHANNELS`] channels and 128 state indices,
+/// the chunk's rows pass [`SCAN_TC_ROWS`] or the kernel's registers do not
+/// hold a block of [`CHAIN_SCAN_THREADS`]. The tokens staged per pass are
+/// the most whose staging fits the kernel's shared memory; neither moves a
+/// chain.
+pub fn chain_scan_plan(
+    (hd, ds, rank, chunk): (usize, usize, usize, usize),
+    state_tiles: (usize, usize, usize, usize),
+    threads: usize,
+) -> Option<(usize, usize)> {
+    if !state_chain(state_tiles)
+        || !(1..=SCAN_TC_CHANNELS).contains(&hd)
+        || !(1..=128).contains(&ds)
+        || rank == 0
+        || chunk * rank > SCAN_TC_ROWS
+        || threads < CHAIN_SCAN_THREADS
+    {
+        return None;
+    }
+    let jc = match ds.div_ceil(32) {
+        1 => 1,
+        2 => 2,
+        _ => 4,
+    };
+    let bytes = |sl: usize| (sl * rank * (SCAN_TC_CHANNELS + 32 * jc) + sl) * 4;
+    [64usize, 32, 16, 8, 4, 2, 1]
+        .into_iter()
+        .find(|&sl| sl <= chunk && bytes(sl) <= chain_scan_bytes())
+        .map(|sl| (jc, sl))
+}
 
 /// `m3m_chunk_scan_tc`'s shared memory: G with U beside it [ROWS][ROWS + 8]
 /// and [ROWS][P + 8] (the slices of the first stage, and the gate's rows,
@@ -1002,7 +1055,7 @@ pub fn angle_walk_smem_bytes(na: usize) -> usize {
 pub const TERMS_ROWS: usize = 64;
 pub const TERMS_CHANNELS: usize = 64;
 pub const TERMS_STATES: usize = 128;
-pub const TERMS_THREADS: usize = 256;
+pub const TERMS_THREADS: usize = 512;
 
 /// `m3mb_chunk_terms`' shared memory at chunks of `chunk` tokens: the
 /// entering state and then the passed gradient [P][N + 4], dy and then u
@@ -1045,6 +1098,51 @@ fn terms_off() -> bool {
             ),
         },
     })
+}
+
+/// Whether the chunk states and the local state gradients pass along a
+/// chain of blocks (`m3m_chunk_state_chain`, `m3mb_dsloc_chain`) under the
+/// register-tile geometry `tiles` ([`ChunkedGeom::state_tiles`] or
+/// [`ChunkedGeom::dsloc_tiles`]): wherever it fits, unless
+/// `MAMBA_RS_MIMO_STATE_CHAIN` keeps the separate kernels. Either way every
+/// value keeps its chain, so the bits are the same.
+pub fn state_chain(tiles: (usize, usize, usize, usize)) -> bool {
+    tiles.0 > 0 && !state_chain_off()
+}
+
+/// `MAMBA_RS_MIMO_STATE_CHAIN` for tests and measurements: `off` keeps the
+/// channel-parallel chunk state and local state gradient with their
+/// separate passing kernels, and unset or `auto` leaves the choice to
+/// [`state_chain`]. Any other value is refused loudly, so a typo cannot
+/// report a run that never left the rule.
+fn state_chain_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| match std::env::var("MAMBA_RS_MIMO_STATE_CHAIN") {
+        Err(_) => false,
+        Ok(v) => match v.trim() {
+            "auto" | "" => false,
+            "off" => true,
+            other => panic!(
+                "MAMBA_RS_MIMO_STATE_CHAIN={other:?} is not a recognized setting (use auto or off)"
+            ),
+        },
+    })
+}
+
+/// The 32-bit words a state chain's launch takes for `b` rows of `nc`
+/// chunks and `nh` heads of `hd` channels and `ds` states under the
+/// register-tile geometry `tiles`: its ticket, then a flag per chunk and
+/// tile, one block each. Zero when the tiles do not fit.
+pub fn chain_words(
+    (b, nc, nh): (usize, usize, usize),
+    (hd, ds): (usize, usize),
+    tiles: (usize, usize, usize, usize),
+) -> usize {
+    let (jc, _, pg, _) = tiles;
+    if jc == 0 {
+        return 0;
+    }
+    1 + b * nc * nh * ds.div_ceil(32 * jc) * hd.div_ceil(pg)
 }
 
 /// One token's record in the backward's replay buffer, in floats.
@@ -1262,14 +1360,19 @@ impl Mamba3MimoKernels {
         let chunk_scan = typed("m3m_chunk_scan")?;
         let dsloc = get("m3mb_dsloc")?;
         let lead = get("m3mb_lead")?;
-        let chunk_state_tiles = typed("m3m_chunk_state_tiles")?;
-        let dsloc_tiles = get("m3mb_dsloc_tiles")?;
+        let chunk_state_chain = typed("m3m_chunk_state_chain")?;
+        let chain_scan_tc = if chunk * rank <= SCAN_TC_ROWS {
+            Some(typed("m3m_chain_scan_tc")?)
+        } else {
+            None
+        };
+        let dsloc_chain = get("m3mb_dsloc_chain")?;
         let chunk_threads = ChunkThreads {
             generic: max_block(&chunk_state, "chunk state")?
                 .min(max_block(&chunk_scan, "chunk scan")?)
                 .min(max_block_of(&[&dsloc, &lead], "chunked backward")?),
-            state_tiles: max_block(&chunk_state_tiles, "chunk state tiles")?,
-            dsloc_tiles: max_block_of(&[&dsloc_tiles], "local state gradient tiles")?,
+            state_tiles: max_block(&chunk_state_chain, "chunk state chain")?,
+            dsloc_tiles: max_block_of(&[&dsloc_chain], "local state gradient chain")?,
         };
         let mut kernels = Self {
             bc_norm: typed("mimo_bc_norm")?,
@@ -1278,7 +1381,7 @@ impl Mamba3MimoKernels {
             chunk_prep_chain: get("m3m_prep_chain")?,
             chunk_prep_sincos: get("m3m_prep_sincos")?,
             chunk_state,
-            chunk_state_tiles,
+            chunk_state_chain,
             state_pass: get("m3m_state_pass")?,
             chunk_scan,
             chunk_scan_tiles: [
@@ -1291,6 +1394,8 @@ impl Mamba3MimoKernels {
             } else {
                 None
             },
+            chunk_chain_scan_tc: chain_scan_tc,
+            chain_scan_threads: 0,
             chunk_writeback: typed("m3m_writeback")?,
             mlp_gate: typed("mlp_gate_fwd")?,
             gate_normed: typed("mimo_gate_normed")?,
@@ -1313,7 +1418,7 @@ impl Mamba3MimoKernels {
                 inter_tiles: get("m3mb_inter_tiles")?,
                 state_terms_tiles: typed("m3mb_state_terms_tiles")?,
                 dsloc,
-                dsloc_tiles,
+                dsloc_chain,
                 pass: get("m3mb_pass")?,
                 chunk_dot: get("m3mb_chunk_dot")?,
                 pairs_dq: typed("m3mb_pairs_dq")?,
@@ -1343,6 +1448,28 @@ impl Mamba3MimoKernels {
             artifact_identity,
             _modules: CudaModuleAnchors::new(vec![module.clone()]),
         };
+        // The fused chain and scan opt in apart: its shared memory is its own
+        // and plans no other kernel's tiles. A device whose opt-in does not
+        // reach it leaves the separate kernels.
+        kernels.chain_scan_threads = match &kernels.chunk_chain_scan_tc {
+            Some(k) => {
+                let optin = kernels.smem_optin;
+                let mut budget = optin;
+                for (f, name) in [
+                    (&k.f32, "chain scan"),
+                    (&k.bf16, "chain scan bf16"),
+                    (&k.f16, "chain scan f16"),
+                ] {
+                    budget = budget.min(opt_in_dynamic_smem(f, optin, name)?);
+                }
+                if budget >= chain_scan_bytes() {
+                    max_block(k, "chain scan")?
+                } else {
+                    0
+                }
+            }
+            None => 0,
+        };
         kernels.terms_optin = match &kernels.cb.chunk_terms {
             Some(k) => {
                 let optin = kernels.smem_optin;
@@ -1369,7 +1496,7 @@ impl Mamba3MimoKernels {
                 (&kernels.scan_bwd, "scan_bwd"),
                 (&kernels.scan_bwd_global, "scan_bwd_global"),
                 (&kernels.chunk_state, "chunk_state"),
-                (&kernels.chunk_state_tiles, "chunk_state_tiles"),
+                (&kernels.chunk_state_chain, "chunk_state_chain"),
                 (&kernels.chunk_scan, "chunk_scan"),
                 (&kernels.chunk_scan_tiles[0], "chunk_scan_tiles"),
                 (&kernels.chunk_scan_tiles[1], "chunk_scan_tiles"),
@@ -1401,9 +1528,9 @@ impl Mamba3MimoKernels {
                 "inter tiles",
             )?);
             smem_budget(budget.min(opt_in_dynamic_smem(
-                &kernels.cb.dsloc_tiles,
+                &kernels.cb.dsloc_chain,
                 optin,
-                "dsloc tiles",
+                "dsloc chain",
             )?))
         };
         Ok(kernels)

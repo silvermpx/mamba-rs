@@ -41,13 +41,13 @@ use crate::varlen::Varlen;
 use cudarc::driver::{LaunchConfig, PushKernelArg};
 
 use super::inference::{
-    MimoChunkedPtrs, MimoExec, launch_chunk_entries, launch_chunked_scan, row_pieces,
+    MimoChunkedPtrs, MimoExec, launch_chunk_entries, launch_chunked_scan, row_pieces, zero_chain,
 };
 use super::kernels::{
     ChunkedGeom, Mamba3MimoKernels, PAIRS_TC_THREADS, PairsPlan, ScanBwdGlobalGeom, ScanGeom,
-    TERMS_THREADS, TermsPlan, angle_walk_smem_bytes, chunk_terms_bytes, chunk_terms_fit,
-    chunked_geom, pairs_tensor_cores, scan_bwd_global_geom, scan_bwd_record_floats,
-    scan_bwd_smem_bytes, scan_bwd_threads, scan_geom,
+    TERMS_THREADS, TermsPlan, angle_walk_smem_bytes, chain_words, chunk_terms_bytes,
+    chunk_terms_fit, chunked_geom, pairs_tensor_cores, scan_bwd_global_geom,
+    scan_bwd_record_floats, scan_bwd_smem_bytes, scan_bwd_threads, scan_geom, state_chain,
 };
 use crate::config::ScanMode;
 use crate::gpu::adamw::{
@@ -538,8 +538,12 @@ pub struct Mamba3MimoGpuTrainer {
     /// head does not fit the shared one.
     seq_bwd: Option<ScanBwdGlobalGeom>,
     scan_done: GpuByteBuffer,
-    /// The chunked forward's chunk contributions, one layer's worth.
+    /// The chunked forward's chunk contributions, one layer's worth (one
+    /// element where the state chain passes the states).
     contrib: GpuBuffer,
+    /// The state chains' ticket and flags, the forward's and the
+    /// backward's in turn (one element where neither chain runs).
+    chain: GpuBuffer,
     /// The states entering the chunks, one layer's worth: the forward's
     /// scan reads them, and the backward recomputes them before each layer,
     /// so no layer keeps its own. Kept per layer at the rank's chunk of
@@ -884,7 +888,19 @@ impl Mamba3MimoGpuTrainer {
             Some(DtypedBuf::zeros(s, copy_at.max(1), act)?)
         };
         let per_layer = |n: usize| z(c.n_layers * batch * nh * n);
-        let contrib = z(ch_n(state_n))?;
+        let words = |tiles| {
+            if state_chain(tiles) {
+                chain_words((batch, nc, nh), (hd, ds), tiles)
+            } else {
+                1
+            }
+        };
+        let state_chained = chunked.is_some_and(|g| state_chain(g.state_tiles));
+        let contrib = z(ch_n(if state_chained { 1 } else { state_n }))?;
+        let chain =
+            z(ch_n(chunked.map_or(1, |g| {
+                words(g.state_tiles).max(words(g.dsloc_tiles))
+            })))?;
         let enter = z(ch_n(state_n))?;
         let s_init = z(ch_n(batch * nh * hd * ds))?;
         let trainer = Self {
@@ -936,6 +952,7 @@ impl Mamba3MimoGpuTrainer {
             scan_done,
             seq_bwd,
             contrib,
+            chain,
             enter,
             s_init,
             dtype,
@@ -2110,6 +2127,7 @@ impl Mamba3MimoGpuTrainer {
                     e0: a.e0.cached_ptr(),
                     contrib: self.contrib.cached_ptr(),
                     enter: self.enter.cached_ptr(),
+                    chain: self.chain.cached_ptr(),
                     ssm,
                     kst,
                     vst,
@@ -2877,6 +2895,7 @@ impl Mamba3MimoGpuTrainer {
                 e0: a.e0.cached_ptr(),
                 contrib: self.contrib.cached_ptr(),
                 enter: self.enter.cached_ptr(),
+                chain: self.chain.cached_ptr(),
                 ssm: self.s_init.cached_ptr(),
                 kst: a.k0.cached_ptr(),
                 vst: a.v0.cached_ptr(),
@@ -3040,24 +3059,31 @@ impl Mamba3MimoGpuTrainer {
                     [seq_idx]
                 );
             }
-            if geom.dsloc_tiles.0 > 0 {
+            if state_chain(geom.dsloc_tiles) {
+                // The local state gradients and their passing back along
+                // the chain.
                 let (jc, sl, pg, smem) = geom.dsloc_tiles;
+                let words = chain_words((b, nc, nh), (hd, ds), geom.dsloc_tiles);
+                let blocks = u32::try_from(words - 1)
+                    .ok()
+                    .filter(|&n| n <= i32::MAX as u32)
+                    .ok_or_else(|| {
+                        format!(
+                            "MIMO chunked backward state chain L{l}: {} blocks",
+                            words - 1
+                        )
+                    })?;
+                let chain = self.chain.cached_ptr();
+                zero_chain(&self.ctx, chain, words)?;
                 let (jc_i, sl_i, pg_i) = (jc as i32, sl as i32, pg as i32);
-                go_yz!(
-                    &k.cb.dsloc_tiles,
-                    cfg3(
-                        b * nc,
-                        nh,
-                        ds.div_ceil(32 * jc) * hd.div_ceil(pg),
-                        8 * pg,
-                        smem
-                    ),
-                    "local state gradient",
+                go!(
+                    &k.cb.dsloc_chain,
+                    cfg3(blocks as usize, 1, 1, 8 * pg, smem),
+                    "local state gradient chain",
                     [
-                        dsl, dy, cn, w_cb, coef, sn, cs, t_i, nh_i, ng_i, hd_i, ds_i, r_i, na_i,
-                        jc_i, sl_i, pg_i
-                    ],
-                    [seq_idx]
+                        dsl, d_init, chain, dy, cn, w_cb, coef, sn, cs, b_i, t_i, nh_i, ng_i, hd_i,
+                        ds_i, r_i, na_i, jc_i, sl_i, pg_i, seq_idx
+                    ]
                 );
             } else {
                 let (nt, dsloc_smem) = geom.dsloc;
@@ -3078,33 +3104,34 @@ impl Mamba3MimoGpuTrainer {
                     ],
                     [seq_idx]
                 );
+                go_y!(
+                    &k.cb.pass,
+                    cfg3(b * nh, (hd * ds).div_ceil(256), 1, 256, 0),
+                    "state passing",
+                    [dsl, d_init, coef, b_i, t_i, nh_i, hd_i, ds_i],
+                    [seq_idx]
+                );
             }
-            go_y!(
-                &k.cb.pass,
-                cfg3(b * nh, (hd * ds).div_ceil(256), 1, 256, 0),
-                "state passing",
-                [dsl, d_init, coef, b_i, t_i, nh_i, hd_i, ds_i],
-                [seq_idx]
-            );
-            let (count, pn_i) = ((b * nc * nh) as i64, (hd * ds) as i32);
-            go!(
-                &k.cb.chunk_dot,
-                cfg3(b * nc * nh, 1, 1, 256, 0),
-                "chunk dot",
-                [dot, enter, dsl, count, pn_i]
-            );
             if let Some(terms) = terms {
+                // The chunk terms take the chunk dot with them.
                 go_y!(
                     terms.get(act),
                     cfg3(b * nc, nh, 1, TERMS_THREADS, chunk_terms_bytes(k.chunk)),
                     "chunk terms",
                     [
-                        dq, inter, dk, du, dcs, dy, enter, dsl, proj, ld_proj, bn, w_bb, cn, w_cb,
-                        coef, sn, cs, w_x, t_i, nh_i, ng_i, hd_i, ds_i, na_i
+                        dq, inter, dk, du, dcs, dot, dy, enter, dsl, proj, ld_proj, bn, w_bb, cn,
+                        w_cb, coef, sn, cs, w_x, t_i, nh_i, ng_i, hd_i, ds_i, na_i
                     ],
                     [seq_idx]
                 );
             } else {
+                let (count, pn_i) = ((b * nc * nh) as i64, (hd * ds) as i32);
+                go!(
+                    &k.cb.chunk_dot,
+                    cfg3(b * nc * nh, 1, 1, 256, 0),
+                    "chunk dot",
+                    [dot, enter, dsl, count, pn_i]
+                );
                 // The state terms a tile of tokens at once: the chunk's dS, u and
                 // the keys whole where they fit, else a slice at a time, the ste
                 // rows in a global scratch where they do not fit beside them.

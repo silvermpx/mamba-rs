@@ -14,8 +14,9 @@ use crate::bidi::{mlps_after, opens_pair, reads_reversed};
 use crate::gpu::bidi::{WindowRows, reverse_rows, zero_bytes};
 
 use super::kernels::{
-    ChunkedGeom, Mamba3MimoKernels, SCAN_TC_CHANNELS, SCAN_TC_THREADS, ScanGeom,
-    chunk_scan_tiles_cfg, chunked_geom, prep_cfgs, scan_geom, scan_tc_bytes, scan_tensor_cores,
+    CHAIN_SCAN_THREADS, ChunkedGeom, Mamba3MimoKernels, SCAN_TC_CHANNELS, SCAN_TC_THREADS,
+    ScanGeom, chain_scan_bytes, chain_scan_plan, chain_words, chunk_scan_tiles_cfg, chunked_geom,
+    prep_cfgs, scan_geom, scan_tc_bytes, scan_tensor_cores, state_chain,
 };
 use crate::config::ScanMode;
 use crate::gpu::blas::{TypedPtr, gpu_gemm_f32_forward_ptrs, gpu_gemm_typed_forward_raw};
@@ -119,14 +120,17 @@ pub struct Mamba3MimoGpuWindow {
     final_rows: GpuBuffer,
     /// The chunked path's per-token scalars `[B, T, H, 4]`, angle sines and
     /// cosines `[B, T, H, na]`, first-token lead `[B, H]`, chunk
-    /// contributions and entering states `[B, nc, H, P, N]` (one element
-    /// each when the window runs the recurrence).
+    /// contributions and entering states `[B, nc, H, P, N]` and the state
+    /// chain's ticket and flags (one element each when the window runs the
+    /// recurrence; the contributions one element as well where the chain
+    /// passes the states, the chain one where it does not).
     coef: GpuBuffer,
     sn: GpuBuffer,
     cs: GpuBuffer,
     e0: GpuBuffer,
     contrib: GpuBuffer,
     enter: GpuBuffer,
+    chain: GpuBuffer,
     /// A bidirectional pair's input rows, reversed for its second layer
     /// (one element without pairs).
     pair_in: GpuBuffer,
@@ -474,6 +478,14 @@ impl Mamba3MimoGpuEngine {
         let ch = |n: usize| if chunked { n } else { 1 };
         let (nh, na) = (c.nheads(), c.num_rope_angles());
         let nc = seq_len.div_ceil(self.kernels.chunk);
+        let states = self.batch * nc * nh * c.headdim * c.d_state;
+        let tiles = self
+            .chunked
+            .map(|g| g.state_tiles)
+            .filter(|&t| state_chain(t));
+        let chain = tiles.map_or(1, |t| {
+            chain_words((self.batch, nc, nh), (c.headdim, c.d_state), t)
+        });
         Ok(Mamba3MimoGpuWindow {
             graph: None,
             eager_gemm_manifest: None,
@@ -500,8 +512,9 @@ impl Mamba3MimoGpuEngine {
             sn: z(ch(rows * nh * na))?,
             cs: z(ch(rows * nh * na))?,
             e0: z(ch(self.batch * nh))?,
-            contrib: z(ch(self.batch * nc * nh * c.headdim * c.d_state))?,
-            enter: z(ch(self.batch * nc * nh * c.headdim * c.d_state))?,
+            contrib: z(ch(if tiles.is_some() { 1 } else { states }))?,
+            enter: z(ch(states))?,
+            chain: z(ch(chain))?,
         })
     }
 
@@ -772,6 +785,7 @@ impl Mamba3MimoGpuEngine {
             e0: win.e0.cached_ptr(),
             contrib: win.contrib.cached_ptr(),
             enter: win.enter.cached_ptr(),
+            chain: win.chain.cached_ptr(),
             ssm,
             kst,
             vst,
@@ -1131,6 +1145,9 @@ pub(crate) struct MimoChunkedPtrs {
     pub e0: u64,
     pub contrib: u64,
     pub enter: u64,
+    /// The state chain's ticket and flags ([`chain_words`] of them), where
+    /// the chain passes the states.
+    pub chain: u64,
     pub ssm: u64,
     pub kst: u64,
     pub vst: u64,
@@ -1150,7 +1167,10 @@ pub(crate) struct MimoChunkedPtrs {
 /// chunked path: the step scalars and angles, each chunk's state, the
 /// state passing (from the carried state with the first token's lead
 /// term), the outputs and the gate into `ptrs.out`, the carried keys and
-/// input.
+/// input. Where the scan runs on the tensor cores and one chain tile holds
+/// the head, the chunk states, their passing and the outputs run in one
+/// launch whose blocks hand the states on through the first two chunks'
+/// room of `ptrs.enter`, which then holds no chunk's entering state.
 pub(crate) fn launch_chunked_scan(
     x: MimoExec<'_>,
     ptrs: &MimoChunkedPtrs,
@@ -1184,6 +1204,8 @@ pub(crate) fn launch_chunked_scan(
         cs,
         e0,
         enter,
+        chain,
+        ssm,
         kst,
         vst,
         ang,
@@ -1246,13 +1268,69 @@ pub(crate) fn launch_chunked_scan(
         bld.arg(&values);
         unsafe { bld.launch(sincos_cfg) }.map_err(err("angle sines"))?;
     }
-    launch_chunk_entries(x, ptrs, geom, (b, t_len), l)?;
     let tensor_scan = x
         .kernels
         .chunk_scan_tc
         .as_ref()
         .filter(|_| scan_tensor_cores(x.precision, x.kernels.chunk, r));
-    if let Some(scan) = tensor_scan {
+    let fused = x
+        .kernels
+        .chunk_chain_scan_tc
+        .as_ref()
+        .filter(|_| tensor_scan.is_some())
+        .and_then(|k| {
+            chain_scan_plan(
+                (hd, ds, r, x.kernels.chunk),
+                geom.state_tiles,
+                x.kernels.chain_scan_threads,
+            )
+            .map(|plan| (k, plan))
+        });
+    if fused.is_none() {
+        launch_chunk_entries(x, ptrs, geom, (b, t_len), l)?;
+    }
+    if let Some((fk, (jc, sl))) = fused {
+        let blocks = b * nc * nh;
+        let grid = u32::try_from(blocks)
+            .ok()
+            .filter(|&n| n <= i32::MAX as u32)
+            .ok_or_else(|| format!("MIMO chunked chain scan L{l}: {blocks} blocks"))?;
+        zero_chain(x.ctx, chain, blocks + 1)?;
+        let w = [b_bias, c_bias, d, mimo_x, mimo_z, mimo_o, e0, kst, vst];
+        let (b_i, jc_i, sl_i) = (b as i32, jc as i32, sl as i32);
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: (grid, 1, 1),
+            block_dim: (CHAIN_SCAN_THREADS as u32, 1, 1),
+            shared_mem_bytes: chain_scan_bytes() as u32,
+        };
+        let mut bld = stream.launch_builder(fk.get(x.act));
+        bld.arg(&gated);
+        bld.arg(&y_out);
+        bld.arg(&enter);
+        bld.arg(&ssm);
+        bld.arg(&chain);
+        bld.arg(&proj);
+        bld.arg(&ld_proj);
+        bld.arg(&bn);
+        bld.arg(&cn);
+        bld.arg(&coef);
+        bld.arg(&sn);
+        bld.arg(&cs);
+        for p in &w {
+            bld.arg(p);
+        }
+        bld.arg(&b_i);
+        bld.arg(&seq_i);
+        bld.arg(&nh_i);
+        bld.arg(&ng_i);
+        bld.arg(&hd_i);
+        bld.arg(&ds_i);
+        bld.arg(&na_i);
+        bld.arg(&jc_i);
+        bld.arg(&sl_i);
+        bld.arg(&seq_idx);
+        unsafe { bld.launch(cfg) }.map_err(err("chain scan"))?;
+    } else if let Some(scan) = tensor_scan {
         let w = [b_bias, c_bias, d, mimo_x, mimo_z, mimo_o];
         let cfg = cudarc::driver::LaunchConfig {
             grid_dim: (
@@ -1402,14 +1480,15 @@ pub(crate) fn launch_chunked_scan(
 }
 
 /// One layer's chunk states over a window of `t_len` tokens of `b`
-/// sequences: each chunk's own contribution into `ptrs.contrib`, then the
-/// state passing from the carried state `ptrs.ssm`, with the first token's
-/// lead term over the carried keys and input `ptrs.kst` and `ptrs.vst`,
-/// into the states entering the chunks, `ptrs.enter`. The state after the
-/// window is left in `ptrs.ssm`. It reads the step scalars and angles the
-/// prep wrote. The training backward runs it again on a copy of the
-/// window's carried state, so no layer keeps its chunk states between the
-/// passes.
+/// sequences: each chunk's own contribution, then the state passing from
+/// the carried state `ptrs.ssm`, with the first token's lead term over the
+/// carried keys and input `ptrs.kst` and `ptrs.vst`, into the states
+/// entering the chunks, `ptrs.enter`, in one launch along the state chain
+/// (`ptrs.chain`) where the register tiles fit, else through
+/// `ptrs.contrib` and the passing kernel. The state after the window is
+/// left in `ptrs.ssm`. It reads the step scalars and angles the prep wrote.
+/// The training backward runs it again on a copy of the window's carried
+/// state, so no layer keeps its chunk states between the passes.
 pub(crate) fn launch_chunk_entries(
     x: MimoExec<'_>,
     ptrs: &MimoChunkedPtrs,
@@ -1438,6 +1517,7 @@ pub(crate) fn launch_chunk_entries(
         e0,
         contrib,
         enter,
+        chain,
         ssm,
         kst,
         vst,
@@ -1457,46 +1537,52 @@ pub(crate) fn launch_chunk_entries(
     );
     let b_i = b as i32;
     let err = |what: &'static str| move |e| format!("MIMO chunked {what} L{l}: {e:?}");
-    if geom.state_tiles.0 > 0 {
+    if state_chain(geom.state_tiles) {
         let (jc, sl, pg, smem) = geom.state_tiles;
+        let words = chain_words((b, nc, nh), (hd, ds), geom.state_tiles);
+        let blocks = u32::try_from(words - 1)
+            .ok()
+            .filter(|&n| n <= i32::MAX as u32)
+            .ok_or_else(|| format!("MIMO chunked chunk state L{l}: {} blocks", words - 1))?;
+        zero_chain(x.ctx, chain, words)?;
         let (bb, px) = (b_bias, mimo_x);
         let (jc_i, sl_i, pg_i) = (jc as i32, sl as i32, pg as i32);
         let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (
-                (b * nc) as u32,
-                nh as u32,
-                (ds.div_ceil(32 * jc) * hd.div_ceil(pg)) as u32,
-            ),
+            grid_dim: (blocks, 1, 1),
             block_dim: ((8 * pg) as u32, 1, 1),
             shared_mem_bytes: smem as u32,
         };
-        for (y_first, z_first, cfg) in yz_runs(cfg) {
-            let mut bld = stream.launch_builder(x.kernels.chunk_state_tiles.get(x.act));
-            bld.arg(&contrib);
-            bld.arg(&proj);
-            bld.arg(&ld_proj);
-            bld.arg(&bn);
-            bld.arg(&coef);
-            bld.arg(&sn);
-            bld.arg(&cs);
-            bld.arg(&bb);
-            bld.arg(&px);
-            bld.arg(&seq_i);
-            bld.arg(&nh_i);
-            bld.arg(&ng_i);
-            bld.arg(&hd_i);
-            bld.arg(&ds_i);
-            bld.arg(&r_i);
-            bld.arg(&na_i);
-            bld.arg(&jc_i);
-            bld.arg(&sl_i);
-            bld.arg(&pg_i);
-            bld.arg(&y_first);
-            bld.arg(&z_first);
-            bld.arg(&seq_idx);
-            unsafe { bld.launch(cfg) }.map_err(err("chunk state"))?;
-        }
-    } else {
+        let mut bld = stream.launch_builder(x.kernels.chunk_state_chain.get(x.act));
+        bld.arg(&enter);
+        bld.arg(&ssm);
+        bld.arg(&chain);
+        bld.arg(&proj);
+        bld.arg(&ld_proj);
+        bld.arg(&bn);
+        bld.arg(&coef);
+        bld.arg(&sn);
+        bld.arg(&cs);
+        bld.arg(&bb);
+        bld.arg(&px);
+        bld.arg(&e0);
+        bld.arg(&kst);
+        bld.arg(&vst);
+        bld.arg(&b_i);
+        bld.arg(&seq_i);
+        bld.arg(&nh_i);
+        bld.arg(&ng_i);
+        bld.arg(&hd_i);
+        bld.arg(&ds_i);
+        bld.arg(&r_i);
+        bld.arg(&na_i);
+        bld.arg(&jc_i);
+        bld.arg(&sl_i);
+        bld.arg(&pg_i);
+        bld.arg(&seq_idx);
+        unsafe { bld.launch(cfg) }.map_err(err("chunk state chain"))?;
+        return Ok(());
+    }
+    {
         let (nt, sl, smem) = geom.state;
         let (bb, px, nt_i, sl_i) = (b_bias, mimo_x, nt as i32, sl as i32);
         let pt_i = geom.pt as i32;
@@ -1563,6 +1649,20 @@ pub(crate) fn launch_chunk_entries(
             bld.arg(&seq_idx);
             unsafe { bld.launch(cfg) }.map_err(err("state passing"))?;
         }
+    }
+    Ok(())
+}
+
+/// Zero a state chain's `words` (its ticket and flags) on the context's
+/// stream before the chain's launch: a memset node in a captured graph, so
+/// every replay starts from a fresh ticket too.
+pub(crate) fn zero_chain(ctx: &GpuCtx, chain: u64, words: usize) -> Result<(), String> {
+    // SAFETY: the caller hands a device allocation of at least `words`
+    // 32-bit words (`chain_words` sized it), used on this stream only.
+    let r =
+        unsafe { cudarc::driver::sys::cuMemsetD32Async(chain, 0, words, ctx.stream.cu_stream()) };
+    if r != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
+        return Err(format!("zero the state chain: {r:?}"));
     }
     Ok(())
 }

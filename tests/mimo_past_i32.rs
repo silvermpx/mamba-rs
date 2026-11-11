@@ -21,7 +21,7 @@ use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::launch::{y_runs, yz_runs};
 use mamba_rs::mamba3_mimo::gpu::kernels::{
-    ChunkedGeom, Mamba3MimoKernels, chunk_scan_tiles_cfg, chunked_geom, prep_cfgs,
+    ChunkedGeom, Mamba3MimoKernels, chain_words, chunk_scan_tiles_cfg, chunked_geom, prep_cfgs,
 };
 
 const CHUNK: usize = 64;
@@ -308,45 +308,72 @@ fn run(ctx: &GpuCtx, k: &Mamba3MimoKernels, geom: &ChunkedGeom, s: Shape, p: &Po
             Arg::L((b * s.t * s.nh * s.na) as i64),
         ],
     );
-    let state_in = [
-        Arg::P(at(Slot::Contrib)),
-        Arg::P(at(Slot::Proj)),
-        ld,
-        Arg::P(at(Slot::Bn)),
-        Arg::P(at(Slot::Coef)),
-        Arg::P(at(Slot::Sn)),
-        Arg::P(at(Slot::Cs)),
-        Arg::P(w.b_bias.cached_ptr()),
-        Arg::P(w.mimo_x.cached_ptr()),
-        seq,
-        nh,
-        ng,
-        hd,
-        ds,
-        r,
-        na,
-    ];
+    // The chain's ticket and flags, alive until the launches finish.
+    let chain = zeros(
+        ctx,
+        chain_words((b, nc, s.nh), (s.hd, s.ds), geom.state_tiles).max(1),
+    );
     if geom.state_tiles.0 > 0 {
+        // The chunk states and their passing along the chain.
         let (jc, sl, pg, smem) = geom.state_tiles;
-        let mut args = state_in.to_vec();
-        args.extend([Arg::I(jc as i32), Arg::I(sl as i32), Arg::I(pg as i32)]);
-        launch_yz_runs(
+        let words = chain_words((b, nc, s.nh), (s.hd, s.ds), geom.state_tiles);
+        launch(
             ctx,
-            k.chunk_state_tiles.get(ACT),
+            k.chunk_state_chain.get(ACT),
             LaunchConfig {
-                grid_dim: (
-                    (b * nc) as u32,
-                    s.nh as u32,
-                    (s.ds.div_ceil(32 * jc) * s.hd.div_ceil(pg)) as u32,
-                ),
+                grid_dim: ((words - 1) as u32, 1, 1),
                 block_dim: ((8 * pg) as u32, 1, 1),
                 shared_mem_bytes: smem as u32,
             },
-            &args,
+            &[
+                Arg::P(at(Slot::Enter)),
+                Arg::P(at(Slot::Ssm)),
+                Arg::P(chain.cached_ptr()),
+                Arg::P(at(Slot::Proj)),
+                ld,
+                Arg::P(at(Slot::Bn)),
+                Arg::P(at(Slot::Coef)),
+                Arg::P(at(Slot::Sn)),
+                Arg::P(at(Slot::Cs)),
+                Arg::P(w.b_bias.cached_ptr()),
+                Arg::P(w.mimo_x.cached_ptr()),
+                Arg::P(at(Slot::E0)),
+                Arg::P(at(Slot::Kst)),
+                Arg::P(at(Slot::Vst)),
+                Arg::I(b as i32),
+                seq,
+                nh,
+                ng,
+                hd,
+                ds,
+                r,
+                na,
+                Arg::I(jc as i32),
+                Arg::I(sl as i32),
+                Arg::I(pg as i32),
+                Arg::P(0),
+            ],
         );
     } else {
         let (nt, sl, smem) = geom.state;
-        let mut args = state_in.to_vec();
+        let mut args = vec![
+            Arg::P(at(Slot::Contrib)),
+            Arg::P(at(Slot::Proj)),
+            ld,
+            Arg::P(at(Slot::Bn)),
+            Arg::P(at(Slot::Coef)),
+            Arg::P(at(Slot::Sn)),
+            Arg::P(at(Slot::Cs)),
+            Arg::P(w.b_bias.cached_ptr()),
+            Arg::P(w.mimo_x.cached_ptr()),
+            seq,
+            nh,
+            ng,
+            hd,
+            ds,
+            r,
+            na,
+        ];
         args.extend([Arg::I(nt as i32), Arg::I(sl as i32), Arg::I(geom.pt as i32)]);
         launch_yz_runs(
             ctx,
@@ -362,33 +389,33 @@ fn run(ctx: &GpuCtx, k: &Mamba3MimoKernels, geom: &ChunkedGeom, s: Shape, p: &Po
             },
             &args,
         );
+        launch_runs(
+            ctx,
+            &k.state_pass,
+            LaunchConfig {
+                grid_dim: ((b * s.nh) as u32, (s.hd * s.ds).div_ceil(256) as u32, 1),
+                block_dim: (256, 1, 1),
+                shared_mem_bytes: 0,
+            },
+            &[
+                Arg::P(at(Slot::Enter)),
+                Arg::P(at(Slot::Ssm)),
+                Arg::P(at(Slot::Contrib)),
+                Arg::P(at(Slot::Coef)),
+                Arg::P(at(Slot::E0)),
+                Arg::P(at(Slot::Kst)),
+                Arg::P(at(Slot::Vst)),
+                Arg::P(w.mimo_x.cached_ptr()),
+                Arg::I(b as i32),
+                seq,
+                nh,
+                hd,
+                ds,
+                r,
+            ],
+            &[Arg::P(0)],
+        );
     }
-    launch_runs(
-        ctx,
-        &k.state_pass,
-        LaunchConfig {
-            grid_dim: ((b * s.nh) as u32, (s.hd * s.ds).div_ceil(256) as u32, 1),
-            block_dim: (256, 1, 1),
-            shared_mem_bytes: 0,
-        },
-        &[
-            Arg::P(at(Slot::Enter)),
-            Arg::P(at(Slot::Ssm)),
-            Arg::P(at(Slot::Contrib)),
-            Arg::P(at(Slot::Coef)),
-            Arg::P(at(Slot::E0)),
-            Arg::P(at(Slot::Kst)),
-            Arg::P(at(Slot::Vst)),
-            Arg::P(w.mimo_x.cached_ptr()),
-            Arg::I(b as i32),
-            seq,
-            nh,
-            hd,
-            ds,
-            r,
-        ],
-        &[Arg::P(0)],
-    );
     let scan_in = [
         Arg::P(at(Slot::Gated)),
         Arg::P(0),
@@ -476,8 +503,8 @@ fn run(ctx: &GpuCtx, k: &Mamba3MimoKernels, geom: &ChunkedGeom, s: Shape, p: &Po
 /// Past 2^31 elements of the projection rows the chunked scan writes the
 /// last sequence of a batch, whose rows lie wholly past the range, what it
 /// writes that sequence alone: the step scalars, the angles, every chunk's
-/// contribution and entering state, the gated outputs and the carried
-/// state.
+/// entering state (and its contribution where the separate kernels run),
+/// the gated outputs and the carried state.
 #[test]
 #[ignore = "20 GiB of projection and B and C rows; run on a 32 GB card"]
 fn the_chunked_scan_gives_a_sequence_past_i32_max_its_own_bits() {

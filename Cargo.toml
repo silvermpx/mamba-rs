@@ -739,6 +739,11 @@ path = "tests/mimo_scan_tc.rs"
 required-features = ["cuda"]
 
 [[test]]
+name = "mimo_state_chain_bits"
+path = "tests/mimo_state_chain_bits.rs"
+required-features = ["cuda"]
+
+[[test]]
 name = "tf32_slab_training"
 path = "tests/tf32_slab_training.rs"
 required-features = ["cuda"]

@@ -10,17 +10,30 @@ fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
 }
 
-/// Atomics that order no arithmetic: a completion counter whose result
-/// only picks which block stores values every block computed alike. The
+/// Atomics that order no arithmetic. A completion counter whose result
+/// only picks which block stores values every block computed alike: the
 /// MIMO scan's tiles of one head all build the same carried keys and
 /// angles, and the last tile to finish stores them, after every tile has
-/// read the incoming ones; which tile that is never changes a value. Each
+/// read the incoming ones; which tile that is never changes a value. And
+/// the MIMO state chains' ticket, whose result only picks which chunk a
+/// block takes: a chunk's values are the same whichever block forms them,
+/// and the states pass from chunk to chunk in the chunks' order. Each
 /// entry names the file and the exact source line; an entry that matches
 /// nothing fails, so the list can only shrink with the code it excuses.
-const COMPLETION_COUNTERS: &[(&str, &str)] = &[(
-    "kernels/mamba3_mimo.cu",
-    "const bool last = atomicAdd(&done[bh], 1u) == (unsigned int)tiles - 1u;",
-)];
+const ORDERLESS_ATOMICS: &[(&str, &str)] = &[
+    (
+        "kernels/mamba3_mimo.cu",
+        "const bool last = atomicAdd(&done[bh], 1u) == (unsigned int)tiles - 1u;",
+    ),
+    (
+        "kernels/mamba3_mimo_chunked.cu",
+        "if (tid == 0) place = atomicAdd(chain, 1U);",
+    ),
+    (
+        "kernels/mamba3_mimo_chunked_bwd.cu",
+        "if (tid == 0) place = atomicAdd(chain, 1U);",
+    ),
+];
 
 /// The one law with no other enforcement: no numeric atomics anywhere
 /// in the kernel tree. Every reduction is a fixed-order tree or a
@@ -30,7 +43,7 @@ const COMPLETION_COUNTERS: &[(&str, &str)] = &[(
 fn kernels_contain_no_numeric_atomics() {
     let dir = root().join("kernels");
     let mut offenders = Vec::new();
-    let mut used = vec![false; COMPLETION_COUNTERS.len()];
+    let mut used = vec![false; ORDERLESS_ATOMICS.len()];
     let mut stack = vec![dir];
     while let Some(d) = stack.pop() {
         for entry in std::fs::read_dir(&d).expect("kernel dir") {
@@ -69,7 +82,7 @@ fn kernels_contain_no_numeric_atomics() {
                     .unwrap()
                     .to_string_lossy()
                     .replace('\\', "/");
-                let counter = COMPLETION_COUNTERS
+                let counter = ORDERLESS_ATOMICS
                     .iter()
                     .position(|(f, l)| *f == file && *l == raw.trim());
                 match (hit, counter) {
@@ -80,7 +93,7 @@ fn kernels_contain_no_numeric_atomics() {
             }
         }
     }
-    let stale: Vec<_> = COMPLETION_COUNTERS
+    let stale: Vec<_> = ORDERLESS_ATOMICS
         .iter()
         .zip(&used)
         .filter(|(_, used)| !**used)
@@ -88,7 +101,7 @@ fn kernels_contain_no_numeric_atomics() {
         .collect();
     assert!(
         stale.is_empty(),
-        "completion counters that match no kernel line: {stale:?}"
+        "orderless atomics that match no kernel line: {stale:?}"
     );
     assert!(
         offenders.is_empty(),

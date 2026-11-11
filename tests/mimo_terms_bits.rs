@@ -1,13 +1,14 @@
-//! The inter-chunk part of dq and the state terms of the MIMO chunked
-//! backward in one block per chunk and head (`m3mb_chunk_terms`) against the
-//! separate kernels it replaces (`m3mb_inter_tiles` and
-//! `m3mb_state_terms_tiles`): every chain and tree is theirs, so the
-//! training forward's rows, every weight gradient and the input gradient
-//! keep their bits in every storage. `MAMBA_RS_MIMO_TERMS` is read once per
-//! process, so a child process runs the same steps on the separate kernels
-//! (`off`). The cases: every rank's own chunk, heads and states off the
-//! tiles, partial last chunks, groups, a full rope, the released head over a
-//! long window and packings whose sequences start inside a chunk.
+//! The inter-chunk part of dq, the state terms and the chunk dot of the MIMO
+//! chunked backward in one block per chunk and head (`m3mb_chunk_terms`)
+//! against the separate kernels it replaces (`m3mb_inter_tiles`,
+//! `m3mb_state_terms_tiles` and `m3mb_chunk_dot`): every chain and tree is
+//! theirs, so the training forward's rows, every weight gradient and the
+//! input gradient keep their bits in every storage. `MAMBA_RS_MIMO_TERMS` is
+//! read once per process, so a child process runs the same steps on the
+//! separate kernels (`off`). The cases: every rank's own chunk, heads and
+//! states off the tiles, partial last chunks, groups, a full rope, the
+//! released head over a long window and packings whose sequences start
+//! inside a chunk.
 //!
 //! Run on a GPU box (without `MAMBA_RS_MIMO_TERMS` set):
 //!   cargo test --release --features cuda --test mimo_terms_bits -- --test-threads=1
