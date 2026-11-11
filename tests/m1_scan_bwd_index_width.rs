@@ -16,10 +16,10 @@ use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::launch::{
-    IndexWidth, SCAN_BWD_DGROUP, SCAN_CHUNK, grid_1d_cover, grid_parallel_scan_bwd,
-    grid_parallel_scan_bwd_fold, grid_seq, scan_bwd_fold_carry_len, scan_bwd_index_width,
-    seq_lanes, y_runs,
+    IndexWidth, SCAN_BWD_DGROUP, SCAN_CHUNK, grid_parallel_scan_bwd, grid_parallel_scan_bwd_fold,
+    grid_seq, scan_bwd_fold_carry_len, scan_bwd_index_width, seq_lanes, y_runs,
 };
+use mamba_rs::mamba1::gpu::inference::step_cfg;
 
 const DTYPES: [WeightDtype; 3] = [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16];
 const WIDTHS: [IndexWidth; 2] = [IndexWidth::I32, IndexWidth::I64];
@@ -131,7 +131,6 @@ fn both_builds_of_the_sequential_scans_give_the_same_bits() {
     let (b, t, di, ds) = (3usize, 40usize, 24usize, 13usize);
     let (bt, st) = (b * t, b * di * ds);
     let [bi, ti, dii, dsi] = [b, t, di, ds].map(|v| v as i32);
-    let grid = || grid_1d_cover(b * di).expect("grid");
     let seq_grid = || grid_seq(b, di, ds).expect("grid");
     let lanes = seq_lanes(ds) as i32;
     for dt in DTYPES {
@@ -254,7 +253,7 @@ fn both_builds_of_the_sequential_scans_give_the_same_bits() {
             launch(
                 &ctx,
                 k.ssm_step_fwd_fused_typed.get(w).get(dt),
-                grid(),
+                step_cfg(b, di, ds).expect("step grid"),
                 &args,
             );
             bytes_of(

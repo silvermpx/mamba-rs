@@ -24,6 +24,42 @@ use crate::gpu::graph_capture::{
 };
 use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
 use crate::gpu::launch::{conv_index_width, grid_1d_cover, grid_1d_wide, seq_scan_index_width};
+use cudarc::driver::LaunchConfig;
+
+/// The lanes of a warp the decode step gives one channel: a power of two,
+/// at most 16, enough that a lane holds at most four states up to 64
+/// states (at most 16 at the capacity of 256). Spelled as
+/// `m1_step_lanes` in kernels/mamba_ssm.cu, which reads it from the state
+/// size; the two must agree for [`step_cfg`] to cover the channels.
+pub fn step_lanes(d_state: usize) -> usize {
+    let want = d_state.div_ceil(4);
+    let mut lanes = 1;
+    while lanes < want && lanes < 16 {
+        lanes <<= 1;
+    }
+    lanes
+}
+
+/// Launch geometry for the fused decode step (`ssm_step_forward_fused_*`):
+/// [`step_lanes`] lanes per channel in blocks of four warps, so a channel's
+/// lanes share a warp and the step of a single sequence spreads over the card
+/// instead of a handful of blocks.
+pub fn step_cfg(batch: usize, d_inner: usize, d_state: usize) -> Result<LaunchConfig, String> {
+    const THREADS: usize = 128;
+    let threads = batch
+        .checked_mul(d_inner)
+        .and_then(|rows| rows.checked_mul(step_lanes(d_state)))
+        .ok_or("decode step thread count overflows")?;
+    let blocks = u32::try_from(threads.div_ceil(THREADS).max(1))
+        .ok()
+        .filter(|&b| b <= i32::MAX as u32)
+        .ok_or_else(|| format!("{threads} decode step threads exceed the grid's x extent"))?;
+    Ok(LaunchConfig {
+        grid_dim: (blocks, 1, 1),
+        block_dim: (THREADS as u32, 1, 1),
+        shared_mem_bytes: 0,
+    })
+}
 use crate::gpu::options::GpuOptions;
 use crate::gpu::train::RowSource;
 use crate::mamba1::config::MambaConfig;
@@ -1502,7 +1538,7 @@ impl MambaGpuEngine {
                 bld.arg(&xdbl_stride_i);
                 bld.arg(&b_off);
                 bld.arg(&c_off);
-                unsafe { bld.launch(grid_1d_cover(b * di)?) }
+                unsafe { bld.launch(step_cfg(b, di, ds)?) }
                     .map_err(|e| format!("ssm_step fused L{layer_idx}: {e:?}"))?;
             }
 
@@ -2187,7 +2223,7 @@ impl MambaGpuEngineMixed {
                 bld.arg(&xdbl_stride_i);
                 bld.arg(&b_off);
                 bld.arg(&c_off);
-                unsafe { bld.launch(grid_1d_cover(b * di)?) }
+                unsafe { bld.launch(step_cfg(b, di, ds)?) }
                     .map_err(|e| format!("ssm_step fused L{layer_idx}: {e:?}"))?;
             }
 

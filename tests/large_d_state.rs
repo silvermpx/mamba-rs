@@ -23,7 +23,7 @@ use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::launch::IndexWidth;
 use mamba_rs::mamba1::MambaConfig;
 use mamba_rs::mamba1::MambaWeights;
-use mamba_rs::mamba1::gpu::inference::MambaGpuBackbone;
+use mamba_rs::mamba1::gpu::inference::{MambaGpuBackbone, step_cfg};
 
 fn det(n: usize, seed: u32) -> Vec<f32> {
     let mut s = seed;
@@ -152,7 +152,15 @@ fn m1_step_keeps_the_bits_of_its_released_form() {
                 let released = frozen
                     .load_function(&format!("m1_reference_step_{suffix}{wide}"))
                     .unwrap();
-                let run = |f: &CudaFunction| {
+                // The released kernel ran one thread per channel; the current
+                // one takes the engine's geometry, several lanes per channel.
+                let released_cfg = LaunchConfig {
+                    grid_dim: ((batch * di).div_ceil(128) as u32, 1, 1),
+                    block_dim: (128, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                let current_cfg = step_cfg(batch, di, ds).unwrap();
+                let run = |f: &CudaFunction, cfg: LaunchConfig| {
                     let h = f32_buf(&h0);
                     let y = typed(&vec![0.0; batch * di], dt);
                     let ints = [gate_stride as i32];
@@ -183,11 +191,6 @@ fn m1_step_keeps_the_bits_of_its_released_form() {
                     for v in &tail {
                         b.arg(v);
                     }
-                    let cfg = LaunchConfig {
-                        grid_dim: ((batch * di).div_ceil(128) as u32, 1, 1),
-                        block_dim: (128, 1, 1),
-                        shared_mem_bytes: 0,
-                    };
                     unsafe { b.launch(cfg) }.unwrap();
                     ctx.stream.synchronize().unwrap();
                     let hs: Vec<u32> = h
@@ -200,8 +203,11 @@ fn m1_step_keeps_the_bits_of_its_released_form() {
                     y.download_f32(&ctx.stream, &mut ys).unwrap();
                     (hs, ys.iter().map(|v| v.to_bits()).collect::<Vec<u32>>())
                 };
-                let want = run(&released);
-                let got = run(ctx.kernels.ssm_step_fwd_fused_typed.get(width).get(dt));
+                let want = run(&released, released_cfg);
+                let got = run(
+                    ctx.kernels.ssm_step_fwd_fused_typed.get(width).get(dt),
+                    current_cfg,
+                );
                 assert!(want.0 == got.0, "{dt:?} {width:?} d_state {ds}: states");
                 assert!(want.1 == got.1, "{dt:?} {width:?} d_state {ds}: outputs");
                 cases += 1;

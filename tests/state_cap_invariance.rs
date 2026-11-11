@@ -12,7 +12,8 @@ use cudarc::driver::PushKernelArg;
 use mamba_rs::gpu::buffers::GpuBuffer;
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
-use mamba_rs::gpu::launch::{grid_1d, grid_seq, seq_lanes};
+use mamba_rs::gpu::launch::{grid_seq, seq_lanes};
+use mamba_rs::mamba1::gpu::inference::step_cfg;
 
 type SequentialFamilyOutputs = (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>);
 
@@ -161,7 +162,7 @@ fn sequential_family_is_state_cap_invariant() {
             bld.arg(&xs_i);
             bld.arg(&b_off);
             bld.arg(&c_off);
-            unsafe { bld.launch(grid_1d(b * di)) }.unwrap();
+            unsafe { bld.launch(step_cfg(b, di, ds).unwrap()) }.unwrap();
         }
         ctx.stream.synchronize().unwrap();
 

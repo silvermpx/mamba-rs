@@ -10,6 +10,13 @@
   16 sequences on an RTX 6000 Ada (4 layers of 768, heads of 64 x 128):
   bf16 438 -> 246 us a step, f16 447 -> 257, f32 and tf32 505 -> 414.
   Bits unchanged.
+- Mamba decode: the fused SSM step gives a channel several lanes of a
+  warp, each lane a few states, and hands the output's chain from lane to
+  lane in state order. One thread per channel had left a single
+  sequence's step a few dozen warps on the whole card. On an RTX 6000 Ada
+  (4 layers of 768, 16 states) a decode step is 7 to 12 percent faster in
+  f32, tf32, bf16 and f16 at batch 1 and 16, and a 128-state step's SSM
+  kernel about 5 times faster. Bits unchanged.
 
 ## 0.8.3 (2026-11-09)
 

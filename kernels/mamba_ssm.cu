@@ -66,14 +66,29 @@ __device__ __forceinline__ float ssm_update_input_fused(float da, float h,
 // spelled as the kernel it replaces spelled it, including the rounding
 // each deleted store applied (the to_f(FROM_F(..)) round trips), so the
 // outputs keep their bits; for f32 those round trips are identities.
-// The states go M1_STEP_SLICE at a time (their h and A loaded together,
-// updated, stored), the output's chain running on across the slices in
-// state order, so the registers hold one slice whatever d_state and no
-// state spills to local memory.
+//
+// A channel takes m1_step_lanes(d_state) neighbouring lanes of one warp
+// (a power of two, at most 16, giving each lane at most four states up to
+// 64 states and at most M1_STEP_SLICE up to the capacity of 256), and lane
+// k the states from k * ceil(d_state / lanes) on: one thread per channel
+// left the step of a single sequence a few dozen warps on the whole card, each
+// warp waiting out its states one after the other. The lanes update their
+// states side by side; the output's chain then runs over the states in
+// order, lane after lane, each lane adding its states and the warp handing
+// the running value to the next, so it keeps the one-thread chain's bits.
+// Every lane of the warp takes part in the hand-offs, a lane past the last
+// channel with nothing to add.
 //
 // proj_gate points at the in_proj output [batch, gate_stride]; the gate of
-// channel d sits at column d_inner + d.
+// channel d sits at column d_inner + d. The launch geometry is
+// mamba1::gpu::inference::step_cfg, whose lane count is this one.
 #define M1_STEP_SLICE 16
+__device__ __forceinline__ int m1_step_lanes(int d_state) {
+    int want = (d_state + 3) / 4;
+    int lanes = 1;
+    while (lanes < want && lanes < 16) lanes <<= 1;
+    return lanes;
+}
 #define DEFINE_SSM_STEP_FWD_FUSED(NAME, IDX, T, FROM_F, UPDATE)            \
 extern "C" __global__ void NAME(                                           \
     float* h,                                                              \
@@ -88,42 +103,48 @@ extern "C" __global__ void NAME(                                           \
     int batch, int d_inner, int d_state,                                   \
     int xdbl_stride, int b_offset, int c_offset                            \
 ) {                                                                        \
-    IDX idx = (IDX)blockIdx.x * blockDim.x + threadIdx.x;                  \
+    int lanes = m1_step_lanes(d_state);                                    \
+    int lane = threadIdx.x & 31;                                           \
+    int sub = lane & (lanes - 1);                                          \
+    IDX idx = ((IDX)blockIdx.x * blockDim.x + threadIdx.x) / lanes;        \
     IDX total = (IDX)batch * d_inner;                                      \
-    if (idx >= total) return;                                              \
-    IDX b = idx / d_inner;                                                 \
-    int d = (int)(idx % d_inner);                                          \
+    bool live = idx < total && d_state <= MAMBA_RS_STATE_CAP;              \
+    IDX b = live ? idx / d_inner : 0;                                      \
+    int d = live ? (int)(idx % d_inner) : 0;                               \
+    int span = (d_state + lanes - 1) / lanes;                              \
+    int n_lo = sub * span;                                                 \
+    int n_hi = min(n_lo + span, d_state);                                  \
     IDX h_base = (b * d_inner + d) * d_state;                              \
     IDX xdbl_base = b * xdbl_stride;                                       \
-    if (d_state > MAMBA_RS_STATE_CAP) return;                              \
     /* Softplus as the standalone kernel spelled it, then its store. */    \
-    float raw = to_f(delta_raw[idx]);                                      \
+    float raw = live ? to_f(delta_raw[idx]) : 0.0f;                        \
     float sp = (raw > 20.0f) ? raw : log1pf(exp2f(raw * LOG2E));           \
     float delta_d = to_f(FROM_F(sp));                                      \
-    float u_d = to_f(u[idx]);                                              \
+    float u_d = live ? to_f(u[idx]) : 0.0f;                                \
     float delta_u_d = delta_d * u_d;                                       \
-    float y_d = D[d] * u_d;                                                \
-    for (int n0 = 0; n0 < d_state; n0 += M1_STEP_SLICE) {                  \
-        float h_local[M1_STEP_SLICE];                                      \
-        float a_local[M1_STEP_SLICE];                                      \
-        _Pragma("unroll")                                                  \
-        for (int k = 0; k < M1_STEP_SLICE; k++) if (n0 + k >= d_state) break; else { \
-            h_local[k] = h[h_base + n0 + k];                               \
-            a_local[k] = a_neg[(IDX)d * d_state + n0 + k];                 \
-        }                                                                  \
-        _Pragma("unroll")                                                  \
-        for (int k = 0; k < M1_STEP_SLICE; k++) if (n0 + k >= d_state) break; else { \
-            const int n = n0 + k;                                          \
-            float da = exp2f(delta_d * a_local[k] * LOG2E);                \
+    float h_local[M1_STEP_SLICE];                                          \
+    float c_local[M1_STEP_SLICE];                                          \
+    _Pragma("unroll")                                                      \
+    for (int k = 0; k < M1_STEP_SLICE; k++) {                              \
+        const int n = n_lo + k;                                            \
+        if (live && n < n_hi) {                                            \
+            float da = exp2f(delta_d * a_neg[(IDX)d * d_state + n] * LOG2E); \
             float B_n = to_f(xdbl[xdbl_base + b_offset + n]);              \
-            float C_n = to_f(xdbl[xdbl_base + c_offset + n]);              \
-            h_local[k] = UPDATE(da, h_local[k], delta_u_d, B_n);           \
-            y_d = __fmaf_rn(h_local[k], C_n, y_d);                         \
+            c_local[k] = to_f(xdbl[xdbl_base + c_offset + n]);             \
+            h_local[k] = UPDATE(da, h[h_base + n], delta_u_d, B_n);        \
+            h[h_base + n] = h_local[k];                                    \
         }                                                                  \
-        _Pragma("unroll")                                                  \
-        for (int k = 0; k < M1_STEP_SLICE; k++) if (n0 + k >= d_state) break; else      \
-            h[h_base + n0 + k] = h_local[k];                               \
     }                                                                      \
+    float y_d = live ? D[d] * u_d : 0.0f;                                  \
+    for (int r = 0; r < lanes; r++) {                                      \
+        if (sub == r) {                                                    \
+            _Pragma("unroll")                                              \
+            for (int k = 0; k < M1_STEP_SLICE; k++)                        \
+                if (n_lo + k < n_hi) y_d = __fmaf_rn(h_local[k], c_local[k], y_d); \
+        }                                                                  \
+        y_d = __shfl_sync(0xffffffffu, y_d, (lane & ~(lanes - 1)) + r);    \
+    }                                                                      \
+    if (!live || sub != 0) return;                                         \
     /* The gate's SiLU as the split kernel spelled it, then its store. */  \
     float g = to_f(proj_gate[b * gate_stride + d_inner + d]);              \
     float gp = to_f(FROM_F(g / (1.0f + exp2f(-g * LOG2E))));               \
