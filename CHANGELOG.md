@@ -49,6 +49,18 @@
   apart, one waiting on the next. On an RTX 6000 Ada (4 layers of 768, 16
   states) a training step is 4 percent faster in f32, 7 in tf32, 8 in f16
   and 9 in bf16. Bits unchanged.
+- Mamba-3 MIMO training and prompts: the inter-chunk part of dq and the
+  state terms run in one block per chunk and head where the head's state
+  fits it; the tensor-core pair kernel stages its rotated rows with every
+  load in flight before any is turned; the rotation backward spreads its
+  pairs over the block; the angle walk stages up to 64 tokens a batch; the
+  row reduction keeps four rows of loads in flight. In prompts the angle
+  chains walk two to a block, so the double-precision wrap of one chain no
+  longer stalls 31 others, and the chunk state stages its keys and inputs
+  with their loads in flight. On an RTX 6000 Ada (4 layers of 768, heads
+  of 64 x 128, rank 4) a training step is 2 to 4 percent faster and a
+  4096-token prompt 3 to 5 percent, in f32, tf32, bf16 and f16. Bits
+  unchanged.
 
 ## 0.8.3 (2026-11-09)
 

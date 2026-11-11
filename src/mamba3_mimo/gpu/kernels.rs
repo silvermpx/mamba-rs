@@ -79,6 +79,10 @@ pub struct Mamba3MimoKernels {
     /// Tokens per chunk of the chunked path this module was compiled for
     /// ([`chunk_len`]).
     pub chunk: usize,
+    /// The dynamic shared memory `m3mb_chunk_terms` may use, opted in apart
+    /// from [`Self::smem_optin`] so its tile never moves that budget; zero
+    /// where the kernel does not exist.
+    pub terms_optin: usize,
     pub compiler_identity: ki::CompilerIdentity,
     pub artifact_identity: ki::ArtifactIdentity,
     /// The loaded module, held by every graph that launches these kernels
@@ -124,6 +128,10 @@ pub struct MimoChunkedBwd {
     pub sum_inner: CudaFunction,
     /// Per-row partials summed over the rows, 64-bit indexed.
     pub reduce_rows: CudaFunction,
+    /// The inter-chunk part of dq and the state terms of a chunk and head in
+    /// one block (`m3mb_inter_tiles` and `m3mb_state_terms_tiles` in one,
+    /// their chains), where a chunk holds at most [`TERMS_ROWS`] rows.
+    pub chunk_terms: Option<TypedKernel>,
 }
 
 /// The chunked path's launch geometry for one head shape, chosen to fit
@@ -877,12 +885,18 @@ pub const PREP_TILE: usize = 64;
 /// grid depends on the shape alone.
 const PREP_SINCOS_BLOCKS: usize = 1 << 16;
 
+/// The angle chains a block of `m3m_prep_chain` walks: its warp walks them
+/// in lockstep and takes the double-precision wrap whenever one of them
+/// needs it, so the fewer to a warp the rarer that step; two keep a warp's
+/// loads and stores of neighbouring angles in one sector.
+const PREP_CHAIN_LANES: usize = 2;
+
 /// The launches of the chunked path's step scalars and angles for `b` rows
 /// of `seq` tokens, `nh` heads and `na` angles, in order: `m3m_prep_tok`
 /// over tiles of [`PREP_TILE`] tokens of each row, the heads on the y axis
 /// (launched in `y_runs`); `m3m_prep_chain`, a thread per (row, head,
-/// angle) chain; `m3m_prep_sincos`, striding over every angle of the
-/// window.
+/// angle) chain, [`PREP_CHAIN_LANES`] chains a block; `m3m_prep_sincos`,
+/// striding over every angle of the window.
 pub fn prep_cfgs(b: usize, seq: usize, nh: usize, na: usize) -> [LaunchConfig; 3] {
     let values = b * seq * nh * na;
     [
@@ -892,8 +906,8 @@ pub fn prep_cfgs(b: usize, seq: usize, nh: usize, na: usize) -> [LaunchConfig; 3
             shared_mem_bytes: 0,
         },
         LaunchConfig {
-            grid_dim: ((b * nh * na).div_ceil(32).max(1) as u32, 1, 1),
-            block_dim: (32, 1, 1),
+            grid_dim: ((b * nh * na).div_ceil(PREP_CHAIN_LANES).max(1) as u32, 1, 1),
+            block_dim: (PREP_CHAIN_LANES as u32, 1, 1),
             shared_mem_bytes: 0,
         },
         LaunchConfig {
@@ -908,16 +922,77 @@ pub fn prep_cfgs(b: usize, seq: usize, nh: usize, na: usize) -> [LaunchConfig; 3
     ]
 }
 
-/// The tokens the chunked backward's angle walk stages at a time
-/// (`M3MB_ANG_STEPS` in `mamba3_mimo_chunked_bwd.cu`).
-pub const ANGLE_WALK_STEPS: usize = 16;
+/// The tokens the chunked backward's angle walk stages at a time for `na`
+/// angles (`m3mb_ang_steps` in `mamba3_mimo_chunked_bwd.cu`): the most, from
+/// 64 down to 16, whose tiles stay within the 48 KB default window. A batch
+/// waits one round trip for its loads, so the released head's 32 angles
+/// take 64 tokens a batch where 16 had waited four times as often.
+pub fn angle_walk_steps(na: usize) -> usize {
+    let mut steps = 64;
+    while steps > 16 && steps * (na + 1) > 4096 {
+        steps >>= 1;
+    }
+    steps
+}
 
 /// The angle walk's shared memory for `na` angles: the staged angle
 /// gradients and tanh_pi values, the products with rows padded by one
 /// float, and the tokens' dt and sequence starts.
 pub fn angle_walk_smem_bytes(na: usize) -> usize {
-    let steps = ANGLE_WALK_STEPS;
+    let steps = angle_walk_steps(na);
     (2 * steps * na + steps * (na + 1) + 2 * steps) * 4
+}
+
+/// Rows (token, rank) of a chunk, channels and state indices a block of
+/// `m3mb_chunk_terms` holds at most, and its threads (`M3MB_TERMS_ROWS`,
+/// `M3MB_TERMS_P`, `M3MB_TERMS_N` and `M3MB_TERMS_THREADS` in
+/// `mamba3_mimo_chunked_bwd.cu`).
+pub const TERMS_ROWS: usize = 64;
+pub const TERMS_CHANNELS: usize = 64;
+pub const TERMS_STATES: usize = 128;
+pub const TERMS_THREADS: usize = 256;
+
+/// `m3mb_chunk_terms`' shared memory at chunks of `chunk` tokens: the
+/// entering state and then the passed gradient [P][N + 4], dy and then u
+/// transposed [P][rows + 4], the dq values and then the keys [rows][N + 4],
+/// and two scalars a token.
+pub fn chunk_terms_bytes(chunk: usize) -> usize {
+    (TERMS_CHANNELS * (TERMS_STATES + 4)
+        + TERMS_CHANNELS * (TERMS_ROWS + 4)
+        + TERMS_ROWS * (TERMS_STATES + 4)
+        + 2 * chunk)
+        * 4
+}
+
+/// Whether a head of `hd` channels and `ds` state indices at rank `rank`
+/// in chunks of `chunk` tokens takes `m3mb_chunk_terms` within `optin`
+/// bytes of shared memory, or the separate inter-chunk and state term
+/// kernels: the block must hold the chunk's rows and the head's state.
+pub fn chunk_terms_fit((hd, ds, rank, chunk): (usize, usize, usize, usize), optin: usize) -> bool {
+    !terms_off()
+        && (1..=TERMS_CHANNELS).contains(&hd)
+        && (1..=TERMS_STATES).contains(&ds)
+        && rank >= 1
+        && chunk * rank <= TERMS_ROWS
+        && chunk_terms_bytes(chunk) <= optin
+}
+
+/// `MAMBA_RS_MIMO_TERMS` for tests and measurements: `off` keeps the
+/// separate inter-chunk and state term kernels, and unset or `auto` leaves
+/// the choice to [`chunk_terms_fit`]. Any other value is refused loudly, so
+/// a typo cannot report a run that never left the rule.
+fn terms_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| match std::env::var("MAMBA_RS_MIMO_TERMS") {
+        Err(_) => false,
+        Ok(v) => match v.trim() {
+            "auto" | "" => false,
+            "off" => true,
+            other => panic!(
+                "MAMBA_RS_MIMO_TERMS={other:?} is not a recognized setting (use auto or off)"
+            ),
+        },
+    })
 }
 
 /// One token's record in the backward's replay buffer, in floats.
@@ -1197,13 +1272,34 @@ impl Mamba3MimoKernels {
                 u_bwd: typed("m3mb_u_bwd")?,
                 sum_inner: get("m3mb_sum_inner")?,
                 reduce_rows: get("m3mb_reduce_rows")?,
+                chunk_terms: if chunk * rank <= TERMS_ROWS {
+                    Some(typed("m3mb_chunk_terms")?)
+                } else {
+                    None
+                },
             },
             smem_optin,
             chunk_threads,
             chunk,
+            terms_optin: 0,
             compiler_identity,
             artifact_identity,
             _modules: CudaModuleAnchors::new(vec![module.clone()]),
+        };
+        kernels.terms_optin = match &kernels.cb.chunk_terms {
+            Some(k) => {
+                let optin = kernels.smem_optin;
+                let mut budget = optin;
+                for (f, name) in [
+                    (&k.f32, "chunk terms"),
+                    (&k.bf16, "chunk terms bf16"),
+                    (&k.f16, "chunk terms f16"),
+                ] {
+                    budget = budget.min(opt_in_dynamic_smem(f, optin, name)?);
+                }
+                budget
+            }
+            None => 0,
         };
         kernels.smem_optin = {
             let optin = kernels.smem_optin;
@@ -1316,16 +1412,38 @@ fn max_block_of(fs: &[&CudaFunction], what: &str) -> Result<usize, String> {
 mod tests {
     use super::*;
 
-    /// The angle walk's step count is the kernel's, and its shared memory
-    /// at the most angles a model has (d_state 256 at rope fraction 1)
-    /// stays under the 48 KB default window.
+    /// The angle walk's step rule is the kernel's, and its shared memory
+    /// stays under the 48 KB default window up to the most angles a model
+    /// has (d_state 256 at rope fraction 1).
     #[test]
     fn the_angle_walk_stages_the_kernel_s_steps() {
         let source = include_str!("../../../kernels/mamba3_mimo_chunked_bwd.cu");
-        assert!(source.contains("#define M3MB_ANG_STEPS 16"));
-        assert_eq!(ANGLE_WALK_STEPS, 16);
+        assert!(source.contains("#define M3MB_ANG_STEPS_MAX 64"));
+        assert!(source.contains("while (s > 16 && s * (na + 1) > 4096) s >>= 1;"));
+        assert_eq!(angle_walk_steps(32), 64);
+        assert_eq!(angle_walk_steps(64), 32);
+        assert_eq!(angle_walk_steps(128), 16);
         assert_eq!(angle_walk_smem_bytes(128), 24_768);
-        assert!(angle_walk_smem_bytes(128) <= 48 * 1024);
+        for na in 1..=128 {
+            assert!(angle_walk_smem_bytes(na) <= 48 * 1024, "{na} angles");
+        }
+    }
+
+    /// The chunk terms' block constants are the kernel's.
+    #[test]
+    fn the_chunk_terms_block_is_the_kernel_s() {
+        let source = include_str!("../../../kernels/mamba3_mimo_chunked_bwd.cu");
+        for (name, value) in [
+            ("M3MB_TERMS_THREADS", TERMS_THREADS),
+            ("M3MB_TERMS_ROWS", TERMS_ROWS),
+            ("M3MB_TERMS_P", TERMS_CHANNELS),
+            ("M3MB_TERMS_N", TERMS_STATES),
+        ] {
+            assert!(
+                source.contains(&format!("#define {name} {value}\n")),
+                "{name}"
+            );
+        }
     }
 
     /// The released head keeps the full tiles, a wide rank shrinks the

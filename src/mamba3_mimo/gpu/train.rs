@@ -45,8 +45,9 @@ use super::inference::{
 };
 use super::kernels::{
     ChunkedGeom, Mamba3MimoKernels, PAIRS_TC_THREADS, PairsPlan, ScanBwdGlobalGeom, ScanGeom,
-    TermsPlan, angle_walk_smem_bytes, chunked_geom, pairs_tensor_cores, scan_bwd_global_geom,
-    scan_bwd_record_floats, scan_bwd_smem_bytes, scan_bwd_threads, scan_geom,
+    TERMS_THREADS, TermsPlan, angle_walk_smem_bytes, chunk_terms_bytes, chunk_terms_fit,
+    chunked_geom, pairs_tensor_cores, scan_bwd_global_geom, scan_bwd_record_floats,
+    scan_bwd_smem_bytes, scan_bwd_threads, scan_geom,
 };
 use crate::config::ScanMode;
 use crate::gpu::adamw::{
@@ -3010,24 +3011,33 @@ impl Mamba3MimoGpuTrainer {
                     ]
                 );
             }
-            let (tt, ps, smem) = geom.inter_tiles;
-            let (tt_i, ps_i) = (tt as i32, ps as i32);
-            go_y!(
-                &k.cb.inter_tiles,
-                cfg3(
-                    b * nc,
-                    nh,
-                    k.chunk.div_ceil(tt),
-                    8 * (tt * rank).next_multiple_of(4),
-                    smem
-                ),
-                "inter-chunk term",
-                [
-                    dq, inter, dy, enter, cn, w_cb, coef, sn, cs, t_i, nh_i, ng_i, hd_i, ds_i, r_i,
-                    na_i, tt_i, ps_i
-                ],
-                [seq_idx]
-            );
+            // The inter-chunk part of dq and the state terms in one block per
+            // chunk and head where it holds them, after the passing back that
+            // the state terms read; the separate kernels elsewhere.
+            let terms =
+                k.cb.chunk_terms
+                    .as_ref()
+                    .filter(|_| chunk_terms_fit((hd, ds, rank, k.chunk), k.terms_optin));
+            if terms.is_none() {
+                let (tt, ps, smem) = geom.inter_tiles;
+                let (tt_i, ps_i) = (tt as i32, ps as i32);
+                go_y!(
+                    &k.cb.inter_tiles,
+                    cfg3(
+                        b * nc,
+                        nh,
+                        k.chunk.div_ceil(tt),
+                        8 * (tt * rank).next_multiple_of(4),
+                        smem
+                    ),
+                    "inter-chunk term",
+                    [
+                        dq, inter, dy, enter, cn, w_cb, coef, sn, cs, t_i, nh_i, ng_i, hd_i, ds_i,
+                        r_i, na_i, tt_i, ps_i
+                    ],
+                    [seq_idx]
+                );
+            }
             if geom.dsloc_tiles.0 > 0 {
                 let (jc, sl, pg, smem) = geom.dsloc_tiles;
                 let (jc_i, sl_i, pg_i) = (jc as i32, sl as i32, pg as i32);
@@ -3081,39 +3091,53 @@ impl Mamba3MimoGpuTrainer {
                 "chunk dot",
                 [dot, enter, dsl, count, pn_i]
             );
-            // The state terms a tile of tokens at once: the chunk's dS, u and
-            // the keys whole where they fit, else a slice at a time, the ste
-            // rows in a global scratch where they do not fit beside them.
-            let TermsPlan {
-                tt,
-                whole,
-                ps,
-                ns,
-                steb_global,
-                bytes: terms_bytes,
-            } = geom.terms;
-            let steb = if steb_global {
-                s.cb.terms_steb.cached_ptr()
+            if let Some(terms) = terms {
+                go_y!(
+                    terms.get(act),
+                    cfg3(b * nc, nh, 1, TERMS_THREADS, chunk_terms_bytes(k.chunk)),
+                    "chunk terms",
+                    [
+                        dq, inter, dk, du, dcs, dy, enter, dsl, proj, ld_proj, bn, w_bb, cn, w_cb,
+                        coef, sn, cs, w_x, t_i, nh_i, ng_i, hd_i, ds_i, na_i
+                    ],
+                    [seq_idx]
+                );
             } else {
-                0u64
-            };
-            let (tt_i, whole_i, ps_i, ns_i) = (tt as i32, i32::from(whole), ps as i32, ns as i32);
-            go_y!(
-                k.cb.state_terms_tiles.get(act),
-                cfg3(
-                    b * nc,
-                    nh,
-                    k.chunk.div_ceil(tt),
-                    8 * (tt * rank).next_multiple_of(4),
-                    terms_bytes
-                ),
-                "state terms",
-                [
-                    dk, du, dcs, dsl, proj, ld_proj, bn, w_bb, coef, sn, cs, w_x, steb, t_i, nh_i,
-                    ng_i, hd_i, ds_i, r_i, na_i, tt_i, whole_i, ps_i, ns_i
-                ],
-                [seq_idx]
-            );
+                // The state terms a tile of tokens at once: the chunk's dS, u and
+                // the keys whole where they fit, else a slice at a time, the ste
+                // rows in a global scratch where they do not fit beside them.
+                let TermsPlan {
+                    tt,
+                    whole,
+                    ps,
+                    ns,
+                    steb_global,
+                    bytes: terms_bytes,
+                } = geom.terms;
+                let steb = if steb_global {
+                    s.cb.terms_steb.cached_ptr()
+                } else {
+                    0u64
+                };
+                let (tt_i, whole_i, ps_i, ns_i) =
+                    (tt as i32, i32::from(whole), ps as i32, ns as i32);
+                go_y!(
+                    k.cb.state_terms_tiles.get(act),
+                    cfg3(
+                        b * nc,
+                        nh,
+                        k.chunk.div_ceil(tt),
+                        8 * (tt * rank).next_multiple_of(4),
+                        terms_bytes
+                    ),
+                    "state terms",
+                    [
+                        dk, du, dcs, dsl, proj, ld_proj, bn, w_bb, coef, sn, cs, w_x, steb, t_i,
+                        nh_i, ng_i, hd_i, ds_i, r_i, na_i, tt_i, whole_i, ps_i, ns_i
+                    ],
+                    [seq_idx]
+                );
+            }
             if pairs_tensor_cores(dtype, k.chunk, rank) {
                 // The pair terms of a chunk and head in one block on the
                 // tensor cores.
@@ -3213,7 +3237,7 @@ impl Mamba3MimoGpuTrainer {
             );
             go_y!(
                 &k.cb.rot_bwd,
-                cfg3(rows, nh, 1, 128, 0),
+                cfg3(rows, nh, 1, 128, 2 * rank * na * 4),
                 "rotation",
                 [
                     d_bn_h, d_cn_h, dth, dq, dk, bn, cn, w_bb, w_cb, sn, cs, nh_i, ng_i, ds_i, r_i,

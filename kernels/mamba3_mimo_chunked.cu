@@ -353,10 +353,10 @@ DEFINE_M3M_PREP_TOK(m3m_prep_tok_f16, __half)
 // row carries in is `theta` and the one it carries out is returned. The
 // chain loads the next AB increments while it walks the current ones, so a
 // step waits on one add, not on memory; a whole batch walks without bounds
-// checks and with its stores' addresses stepped rather than recomputed,
-// since a thread walking alone issues every instruction of the chain in
-// turn. PACKED restarts the angle from zero at every token that starts a
-// sequence.
+// checks, keeping its angles in the batch's registers and storing them after
+// it, so a step of a thread walking alone holds the add, the two compares
+// and the branch. PACKED restarts the angle from zero at every token that
+// starts a sequence.
 template <bool PACKED>
 __device__ __forceinline__ float m3m_angle_chain(
     float theta, float* col, long long astr, int seq,
@@ -391,16 +391,16 @@ __device__ __forceinline__ float m3m_angle_chain(
 #pragma unroll
             for (int i = 0; i < AB; i++) {
                 theta = mimo_wrap_add(PACKED && fcur[i] ? 0.0f : theta, cur[i]);
-                *out = theta;
-                out += astr;
+                cur[i] = theta;
             }
+#pragma unroll
+            for (int i = 0; i < AB; i++) out[i * astr] = cur[i];
         } else {
 #pragma unroll
             for (int i = 0; i < AB; i++) {
                 if (t0 + i < seq) {
                     theta = mimo_wrap_add(PACKED && fcur[i] ? 0.0f : theta, cur[i]);
-                    *out = theta;
-                    out += astr;
+                    out[i * astr] = theta;
                 }
             }
         }
@@ -416,8 +416,12 @@ __device__ __forceinline__ float m3m_angle_chain(
 // The serial wrap chains of the window, a thread per (sequence, head,
 // angle) over `chains` = B H na of them: the angle the row carries in from
 // `ang`, the increments m3m_prep_tok parked in sn turned into the angles,
-// and the angle carried out back into `ang`. Grid ceil(chains / 32),
-// block 32.
+// and the angle carried out back into `ang`. A warp walks its chains in
+// lockstep and takes a step's double-precision wrap whenever any of them
+// needs it, so a block holds few chains (the host's PREP_CHAIN_LANES): the
+// chains are serial however they are laid out, and with 32 to a warp the
+// wrap of one or another had cost half the steps of every chain. Grid
+// ceil(chains / block).
 extern "C" __global__ void __launch_bounds__(32) m3m_prep_chain(
     float* __restrict__ sn, float* __restrict__ ang,
     int seq, int nh, int na, long long chains,
@@ -621,33 +625,77 @@ __device__ __forceinline__ void m3m_chunk_state_tiles_body(
             const float* cf = coef + ((b * seq + t0 + s0 + s) * nh + h) * 4;
             wt[s] = __fmul_rn(mimo_exp(fminf(__fsub_rn(acs_last, cf[3]), 0.0f)), cf[2]);
         }
-        for (int sr = warp; sr < sn_ * rank; sr += nw) {
-            const int r = sr % rank;
-            const long long row = b * seq + t0 + s0 + sr / rank;
-            const float* src = bn + row * rgn + ((long long)r * ng + g) * ds;
-            const float* bias = b_bias + ((long long)h * rank + r) * ds;
-            const float* sr_ = sn + (row * nh + h) * na;
-            const float* cr_ = cs + (row * nh + h) * na;
-#pragma unroll 4
-            for (int ni = lane; ni < NT; ni += 32) {
-                const int n = n0 + ni;
-                kt[sr * NT + ni] = n < ds ? m3m_rot(src, bias, n, half, na, sr_, cr_) : 0.0f;
+        const int kd = sn_ * rank;
+        // The keys, rotated: a warp's rows two at a time, every load of the
+        // pair in flight before any value is turned.
+        for (int sr0 = warp; sr0 < kd; sr0 += 2 * nw) {
+            M3mRotIn in[2][JC];
+#pragma unroll
+            for (int u = 0; u < 2; u++) {
+                const int sr = sr0 + u * nw;
+                const int r = sr % rank;
+                const long long row = b * seq + t0 + s0 + sr / rank;
+                const float* src = bn + row * rgn + ((long long)r * ng + g) * ds;
+                const float* bias = b_bias + ((long long)h * rank + r) * ds;
+                const float* sr_ = sn + (row * nh + h) * na;
+                const float* cr_ = cs + (row * nh + h) * na;
+#pragma unroll
+                for (int j = 0; j < JC; j++) {
+                    const int n = n0 + lane + 32 * j;
+                    in[u][j] = sr < kd && n < ds
+                        ? m3m_rot_load(src, bias, n, half, na, sr_, cr_)
+                        : M3mRotIn{0.0f, 0.0f, 0.0f, 0.0f};
+                }
+            }
+#pragma unroll
+            for (int u = 0; u < 2; u++) {
+                const int sr = sr0 + u * nw;
+                if (sr >= kd) continue;
+#pragma unroll
+                for (int j = 0; j < JC; j++) {
+                    const int n = n0 + lane + 32 * j;
+                    kt[sr * NT + lane + 32 * j] = n < ds ? m3m_rot_turn(in[u][j], n, half, na) : 0.0f;
+                }
             }
         }
         __syncthreads();
-        for (int sr = warp; sr < sn_ * rank; sr += nw) {
-            const int s = sr / rank, r = sr % rank;
-            const TI* xr =
-                proj + (b * seq + t0 + s0 + s) * ld_proj + di + (long long)h * hd + pb;
-            const float* mx = mimo_x + ((long long)h * rank + r) * hd + pb;
-            const float w = wt[s];
-            const int pn = hd - pb;
-#pragma unroll 4
-            for (int pp = lane; pp < pg; pp += 32)
-                ut[sr * pg + pp] = pp < pn ? __fmul_rn(__fmul_rn(w, to_f(xr[pp])), mx[pp]) : 0.0f;
+        // The rank inputs, four of a warp's rows at a time, their loads in
+        // flight together.
+        const int pn = hd - pb;
+        for (int sr0 = warp; sr0 < kd; sr0 += 4 * nw) {
+            for (int p0s = 0; p0s < pg; p0s += 64) {
+                float xv[4][2], mv[4][2];
+#pragma unroll
+                for (int u = 0; u < 4; u++) {
+                    const int sr = sr0 + u * nw;
+                    const int s = sr / rank, r = sr % rank;
+                    const TI* xr =
+                        proj + (b * seq + t0 + s0 + s) * ld_proj + di + (long long)h * hd + pb;
+                    const float* mx = mimo_x + ((long long)h * rank + r) * hd + pb;
+#pragma unroll
+                    for (int v = 0; v < 2; v++) {
+                        const int pp = p0s + lane + 32 * v;
+                        const bool on = sr < kd && pp < pg && pp < pn;
+                        xv[u][v] = on ? to_f(xr[pp]) : 0.0f;
+                        mv[u][v] = on ? mx[pp] : 0.0f;
+                    }
+                }
+#pragma unroll
+                for (int u = 0; u < 4; u++) {
+                    const int sr = sr0 + u * nw;
+                    if (sr >= kd) continue;
+                    const float w = wt[sr / rank];
+#pragma unroll
+                    for (int v = 0; v < 2; v++) {
+                        const int pp = p0s + lane + 32 * v;
+                        if (pp < pg)
+                            ut[sr * pg + pp] =
+                                pp < pn ? __fmul_rn(__fmul_rn(w, xv[u][v]), mv[u][v]) : 0.0f;
+                    }
+                }
+            }
         }
         __syncthreads();
-        const int kd = sn_ * rank;
         for (int k = 0; k < kd; k++) {
             const float4 lv = lds_f32x4(ut + k * pg + p0);
             float rv[JC];
