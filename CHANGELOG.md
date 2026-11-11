@@ -42,6 +42,13 @@
   4096-token prompt is 5 percent faster in f32 and tf32, 7 in f16 and 10 in
   bf16, and a training step about 2 percent faster in all four. Bits
   unchanged.
+- Mamba training: the grouped scan backward brings its channels' dt, u and
+  dy rows in, and sends their gradients out, a step of every channel at a
+  time through shared memory laid out so that no access meets a bank twice,
+  where each channel's steps had been read and written a row of channels
+  apart, one waiting on the next. On an RTX 6000 Ada (4 layers of 768, 16
+  states) a training step is 4 percent faster in f32, 7 in tf32, 8 in f16
+  and 9 in bf16. Bits unchanged.
 
 ## 0.8.3 (2026-11-09)
 

@@ -879,7 +879,8 @@ impl ScanBwdRoute {
 /// [`y_runs`]. Shared memory: the two scans' warp rows and raw totals, the
 /// next-decay and replayed-state hand-off rows, a reduction row, and per
 /// channel of the block its dB and dC factor rows and its dt, u and dy
-/// rows. Mirrors DEFINE_SSM_PARALLEL_SCAN_BWD_GROUPS.
+/// rows, each padded by a thread's steps. Mirrors
+/// DEFINE_SSM_PARALLEL_SCAN_BWD_GROUPS.
 pub fn grid_parallel_scan_bwd_groups(
     batch: usize,
     seq_len: usize,
@@ -891,7 +892,7 @@ pub fn grid_parallel_scan_bwd_groups(
     let lanes = (SCAN_NTHREADS / width).max(fold);
     let folds = lanes / fold;
     let span = width * SCAN_NITEMS;
-    let floats = 10 * NWARPS + SCAN_NTHREADS + 5 * lanes * span;
+    let floats = 10 * NWARPS + SCAN_NTHREADS + 5 * lanes * (span + SCAN_NITEMS);
     LaunchConfig {
         grid_dim: (batch as u32, (d_inner / fold).div_ceil(folds) as u32, 1),
         block_dim: (SCAN_NTHREADS as u32, 1, 1),

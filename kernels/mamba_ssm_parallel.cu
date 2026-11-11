@@ -643,8 +643,19 @@ NAME(                                                                         \
          * them loads, and staging the chunk through shared memory only       \
          * added barriers; the groups of a block read neighbouring            \
          * channels at the same t. */                                         \
-        float delta_vals[NITEMS];                                             \
+        /* Every load of the chunk is in flight before the first softplus,    \
+           whose slow path is a call the later loads would wait behind. */    \
+        float raw_vals[NITEMS];                                               \
         float u_vals[NITEMS];                                                 \
+        _Pragma("unroll")                                                     \
+        for (int i = 0; i < NITEMS; i++) {                                    \
+            int t = chunk_start + tid * NITEMS + i;                           \
+            raw_vals[i] = (t < T) ? to_f(delta_raw[(bid * T + t) * d_inner + did]) \
+                                  : 0.0f;                                     \
+            u_vals[i] = (t < T) ? to_f(u[(bid * T + t) * d_inner + did])      \
+                                : 0.0f;                                       \
+        }                                                                     \
+        float delta_vals[NITEMS];                                             \
         float delta_u_vals[NITEMS];                                           \
         _Pragma("unroll")                                                     \
         for (int i = 0; i < NITEMS; i++) {                                    \
@@ -652,7 +663,7 @@ NAME(                                                                         \
             if (t < T) {                                                      \
                 /* The scan consumes the softplus after the rounding of       \
                    its save, the value the backward reads back. */            \
-                float raw = to_f(delta_raw[(bid * T + t) * d_inner + did]);   \
+                float raw = raw_vals[i];                                      \
                 float sp = (raw > 20.0f)                                      \
                     ? raw                                                     \
                     : log1pf(exp2f(raw * 1.4426950408889634f));               \
@@ -662,8 +673,6 @@ NAME(                                                                         \
             } else {                                                          \
                 delta_vals[i] = 0.0f;                                         \
             }                                                                 \
-            u_vals[i] = (t < T) ? to_f(u[(bid * T + t) * d_inner + did])      \
-                                : 0.0f;                                       \
             delta_u_vals[i] = delta_vals[i] * u_vals[i];                      \
         }                                                                     \
         float out_vals[NITEMS];                                               \
@@ -672,13 +681,22 @@ NAME(                                                                         \
         for (int i = 0; i < NITEMS; i++) {                                    \
             out_vals[i] = D_d * u_vals[i];                                    \
         }                                                                     \
+        /* The next state's decay rate comes in while a state's steps run,    \
+           and a state's C row and initial state before its group scan's      \
+           barriers. */                                                       \
+        float a_next = a_neg[(IDX)did * d_state];                             \
         for (int n = 0; n < d_state; n++) {                                   \
-            float a_dn = a_neg[(IDX)did * d_state + n] * LOG2E;               \
+            float a_dn = a_next * LOG2E;                                      \
+            if (n + 1 < d_state) a_next = a_neg[(IDX)did * d_state + n + 1];  \
             float thread_a[NITEMS];                                           \
             float thread_b[NITEMS];                                           \
             float b_row[NITEMS];                                              \
             load_row8(B + (bid * d_state + n) * T,                            \
                       chunk_start + tid * NITEMS, T, b_row);                  \
+            float c_row[NITEMS];                                              \
+            load_row8(C + (bid * d_state + n) * T,                            \
+                      chunk_start + tid * NITEMS, T, c_row);                  \
+            float h_0 = h[h_base + n];                                        \
             _Pragma("unroll")                                                 \
             for (int i = 0; i < NITEMS; i++) {                                \
                 int t = chunk_start + tid * NITEMS + i;                       \
@@ -748,14 +766,10 @@ NAME(                                                                         \
                 run_tape[row + 3 * chunk + 0] = run_a;                        \
                 run_tape[row + 3 * chunk + 1] = run_b;                        \
             }                                                                 \
-            float h_0 = h[h_base + n];                                        \
             if (tid == 0) {                                                   \
                 smem_run_a[n] = tot_a * run_a;                                \
                 smem_run_b[n] = tot_a * run_b + tot_b;                        \
             }                                                                 \
-            float c_row[NITEMS];                                              \
-            load_row8(C + (bid * d_state + n) * T,                            \
-                      chunk_start + tid * NITEMS, T, c_row);                  \
             _Pragma("unroll")                                                 \
             for (int i = 0; i < NITEMS; i++) {                                \
                 int t = chunk_start + tid * NITEMS + i;                       \
@@ -896,13 +910,20 @@ NAME(                                                                         \
         for (int i = 0; i < NITEMS; i++) {                                    \
             out_vals[i] = D_d * u_vals[i];                                    \
         }                                                                     \
+        /* The loads ahead of the steps, as in the saving forward. */         \
+        float a_next = a_neg[(IDX)did * d_state];                             \
         for (int n = 0; n < d_state; n++) {                                   \
-            float a_dn = a_neg[(IDX)did * d_state + n] * LOG2E;               \
+            float a_dn = a_next * LOG2E;                                      \
+            if (n + 1 < d_state) a_next = a_neg[(IDX)did * d_state + n + 1];  \
             float thread_a[NITEMS];                                           \
             float thread_b[NITEMS];                                           \
             float b_row[NITEMS];                                              \
             load_row8(B + (bid * d_state + n) * T,                            \
                       chunk_start + tid * NITEMS, T, b_row);                  \
+            float c_row[NITEMS];                                              \
+            load_row8(C + (bid * d_state + n) * T,                            \
+                      chunk_start + tid * NITEMS, T, c_row);                  \
+            float h_0 = h[h_base + n];                                        \
                                                                               \
             _Pragma("unroll")                                                 \
             for (int i = 0; i < NITEMS; i++) {                                \
@@ -955,14 +976,10 @@ NAME(                                                                         \
                 tot_a = __shfl_sync(0xffffffffu, scan_a, width - 1, width);   \
                 tot_b = __shfl_sync(0xffffffffu, scan_b, width - 1, width);   \
             }                                                                 \
-            float h_0 = h[h_base + n];                                        \
             if (tid == 0) {                                                   \
                 smem_run_a[n] = tot_a * run_a;                                \
                 smem_run_b[n] = tot_a * run_b + tot_b;                        \
             }                                                                 \
-            float c_row[NITEMS];                                              \
-            load_row8(C + (bid * d_state + n) * T,                            \
-                      chunk_start + tid * NITEMS, T, c_row);                  \
             _Pragma("unroll")                                                 \
             for (int i = 0; i < NITEMS; i++) {                                \
                 int t = chunk_start + tid * NITEMS + i;                       \
@@ -2231,6 +2248,24 @@ __device__ __forceinline__ float group_tree_sum(float v, float *red, int width) 
 }
 
 // ============================================================================
+// Where step t = tid * NITEMS + i of lane `lane` of the grouped backward
+// lives in its dt, u and dy rows and its dB and dC factor rows: the lane's
+// span padded by NITEMS, and the thread's steps turned by `rot`, its
+// owner's warp lane over four. A warp of owners at one item, 32
+// consecutive steps of one lane, and one step of four lanes each touch 32
+// different banks.
+// ============================================================================
+__device__ __forceinline__ int bwd_groups_slot(int lane, int tid, int i, int span, int rot) {
+    return lane * (span + NITEMS) + tid * NITEMS + ((i + rot) & (NITEMS - 1));
+}
+
+// The turn of the thread that owns `lane`'s steps at `tid` (the lanes of
+// a pass take the groups in order).
+__device__ __forceinline__ int bwd_groups_rot(int lane, int tid, int groups, int width) {
+    return (((lane & (groups - 1)) * width + tid) & 31) >> 2;
+}
+
+// ============================================================================
 // Parallel reverse-scan backward for windows of one chunk, a channel to a
 // group of threads.
 //
@@ -2251,7 +2286,11 @@ __device__ __forceinline__ float group_tree_sum(float v, float *red, int width) 
 // take the block reduction's tree within the group. `fold` is the channels
 // one row sums: four, as the fold kernel's rows, or one where d_inner is
 // not a multiple of four, each channel its own row. The outputs keep the
-// fold kernel's layouts, so its reducers read them as they are.
+// fold kernel's layouts, so its reducers read them as they are. The block's
+// channels are consecutive, so their dt, u and dy rows come in, and their
+// gradients go out, a step of every channel at a time through shared
+// memory: a warp's accesses then cover a few rows of consecutive channels,
+// where a channel's own steps lie a row of channels apart.
 // ============================================================================
 #define DEFINE_SSM_PARALLEL_SCAN_BWD_GROUPS(NAME, IDX, T_ACT, FROM_F)         \
 extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_BWD_GROUPS_MINB) void  \
@@ -2304,13 +2343,14 @@ NAME(                                                                         \
     float *smem_next_a    = smem_rev_raw_b + NWARPS;                          \
     float *smem_hbound    = smem_next_a + NWARPS;                             \
     float *smem_red       = smem_hbound + NWARPS;                             \
+    /* Each lane's dB and dC factor rows and its dt, u and dy rows, a step    \
+       at its bwd_groups_slot. */                                             \
+    const int lspan = span + NITEMS;                                          \
     float *tile_B         = smem_red + NTHREADS;                              \
-    float *tile_C         = tile_B + lanes * span;                            \
-    /* Each lane's dt, u and dy rows, item-major so that a warp's threads     \
-       touch consecutive words; a thread reads back only its own items. */    \
-    float *rows_delta     = tile_C + lanes * span;                            \
-    float *rows_u         = rows_delta + lanes * span;                        \
-    float *rows_dy        = rows_u + lanes * span;                            \
+    float *tile_C         = tile_B + lanes * lspan;                           \
+    float *rows_delta     = tile_C + lanes * lspan;                           \
+    float *rows_u         = rows_delta + lanes * lspan;                       \
+    float *rows_dy        = rows_u + lanes * lspan;                           \
     const unsigned warp_mask = 0xFFFFFFFFu;                                   \
     const int seg = width < 32 ? width : 32;                                  \
     /* Each pass's channel. A fold group past d_inner keeps step with the     \
@@ -2325,6 +2365,33 @@ NAME(                                                                         \
         live_p[p] = p < passes && did < d_inner;                              \
         did_p[p] = live_p[p] ? did : d_inner - 1;                             \
     }                                                                         \
+    /* The block's lanes are the consecutive channels from `base`. Their dt,  \
+       u and dy rows come in a step of every lane at a time, so that a        \
+       warp's loads cover a few rows of consecutive channels; a lane past     \
+       d_inner takes the last channel's rows, and every lane zeros past the   \
+       window. */                                                             \
+    const int base = (y_first + blockIdx.y) * lanes;                          \
+    const int rot = (threadIdx.x & 31) >> 2;                                  \
+    _Pragma("unroll 4")                                                       \
+    for (int e = threadIdx.x; e < lanes * span; e += NTHREADS) {              \
+        const int lane = e & (lanes - 1);                                     \
+        const int t = e / lanes;                                              \
+        float dv = 0.0f, uv = 0.0f, dyv = 0.0f;                               \
+        if (t < T) {                                                          \
+            const int did = min(base + lane, d_inner - 1);                    \
+            IDX row = (bid * T + t) * d_inner + did;                          \
+            dv = to_f(delta[row]);                                            \
+            uv = to_f(u[row]);                                                \
+            dyv = to_f(dy[row]);                                              \
+        }                                                                     \
+        const int st = t / NITEMS;                                            \
+        const int at = bwd_groups_slot(lane, st, t & (NITEMS - 1), span,      \
+                                       bwd_groups_rot(lane, st, groups, width)); \
+        rows_delta[at] = dv;                                                  \
+        rows_u[at] = uv;                                                      \
+        rows_dy[at] = dyv;                                                    \
+    }                                                                         \
+    __syncthreads();                                                          \
     float d_u_acc[2][NITEMS];                                                 \
     float d_delta_acc[2][NITEMS];                                             \
     float local_d_D[2];                                                       \
@@ -2337,17 +2404,10 @@ NAME(                                                                         \
         for (int i = 0; i < NITEMS; i++) {                                    \
             int t = tid * NITEMS + i;                                         \
             bool in = p < passes && t < T;                                    \
-            IDX row = (bid * T + (in ? t : 0)) * d_inner + did_p[p];          \
-            float dv = in ? to_f(delta[row]) : 0.0f;                          \
-            float uv = in ? to_f(u[row]) : 0.0f;                              \
-            float dyv = in ? to_f(dy[row]) : 0.0f;                            \
-            if (p < passes) {                                                 \
-                int at = (lane * NITEMS + i) * width + tid;                   \
-                rows_delta[at] = dv;                                          \
-                rows_u[at] = uv;                                              \
-                rows_dy[at] = dyv;                                            \
-            }                                                                 \
             if (in) {                                                         \
+                const int at = bwd_groups_slot(lane, tid, i, span, rot);      \
+                float uv = rows_u[at];                                        \
+                float dyv = rows_dy[at];                                      \
                 local_d_D[p] += dyv * uv;                                     \
                 d_u_acc[p][i] = dyv * D_d;                                    \
             } else {                                                          \
@@ -2357,6 +2417,10 @@ NAME(                                                                         \
         }                                                                     \
     }                                                                         \
     for (int n = 0; n < d_state; n++) {                                       \
+        /* Both passes' decay rates come in with the rows. */                 \
+        float a_p[2];                                                         \
+        _Pragma("unroll")                                                     \
+        for (int p = 0; p < 2; p++) a_p[p] = a_neg[(IDX)did_p[p] * d_state + n]; \
         /* The B and C rows are the sequence's, the same for every            \
            channel of the block. */                                           \
         float b_vals[NITEMS];                                                 \
@@ -2368,14 +2432,14 @@ NAME(                                                                         \
             if (p >= passes) continue;                                        \
             const int did = did_p[p];                                         \
             const int lane = p * groups + grp;                                \
-            float a_dn = a_neg[(IDX)did * d_state + n];                       \
+            float a_dn = a_p[p];                                              \
             float a_dn_log2 = a_dn * LOG2E;                                   \
             float delta_v[NITEMS];                                            \
             float u_v[NITEMS];                                                \
             float dy_v[NITEMS];                                               \
             _Pragma("unroll")                                                 \
             for (int i = 0; i < NITEMS; i++) {                                \
-                int at = (lane * NITEMS + i) * width + tid;                   \
+                int at = bwd_groups_slot(lane, tid, i, span, rot);            \
                 delta_v[i] = rows_delta[at];                                  \
                 u_v[i] = rows_u[at];                                          \
                 dy_v[i] = rows_dy[at];                                        \
@@ -2531,8 +2595,9 @@ NAME(                                                                         \
                     d_u_acc[p][i] += dh * delta_v[i] * b_vals[i];             \
                     da_acc += dh * da_vals[i] * delta_v[i] * a_dn * h_prev;   \
                 }                                                             \
-                tile_B[lane * span + t] = fold_B;                             \
-                tile_C[lane * span + t] = fold_C;                             \
+                const int at = bwd_groups_slot(lane, tid, i, span, rot);      \
+                tile_B[at] = fold_B;                                          \
+                tile_C[at] = fold_C;                                          \
             }                                                                 \
             float da_sum = group_tree_sum(da_acc, smem_red, width);           \
             if (tid == 0 && live_p[p]) {                                      \
@@ -2551,11 +2616,13 @@ NAME(                                                                         \
             if (t >= T || fg * fold >= d_inner) continue;                     \
             float acc_B = 0.0f;                                               \
             float acc_C = 0.0f;                                               \
+            const int st = t / NITEMS;                                        \
             for (int gg = 0; gg < fold; gg++) {                               \
                 int lane = f * fold + gg;                                     \
-                int at = (lane * NITEMS + (t & (NITEMS - 1))) * width + t / NITEMS; \
-                acc_B = __fmaf_rn(tile_B[lane * span + t], rows_u[at], acc_B); \
-                acc_C = __fmaf_rn(rows_dy[at], tile_C[lane * span + t], acc_C); \
+                int at = bwd_groups_slot(lane, st, t & (NITEMS - 1), span,    \
+                                         bwd_groups_rot(lane, st, groups, width)); \
+                acc_B = __fmaf_rn(tile_B[at], rows_u[at], acc_B);             \
+                acc_C = __fmaf_rn(rows_dy[at], tile_C[at], acc_C);            \
             }                                                                 \
             IDX row_bc = ((bid * d_state + n) * (d_inner / fold) + fg) * T;   \
             d_B_local[row_bc + t] = FROM_F(acc_B);                            \
@@ -2566,20 +2633,50 @@ NAME(                                                                         \
     }                                                                         \
     /* d_delta and d_u: each lane its own items. Round FIRST: the             \
        accumulator rounds to the activation dtype as the old d_delta store    \
-       did, then the softplus derivative divides the reloaded value. */       \
+       did, then the softplus derivative divides the reloaded value. The      \
+       pre-softplus dt comes in, and both gradients go out, a step of every   \
+       lane at a time through the rows, which the last state's row pass has   \
+       finished reading. */                                                   \
+    _Pragma("unroll 4")                                                       \
+    for (int e = threadIdx.x; e < lanes * span; e += NTHREADS) {              \
+        const int lane = e & (lanes - 1);                                     \
+        const int t = e / lanes;                                              \
+        const int did = base + lane;                                          \
+        if (t >= T || did >= d_inner) continue;                               \
+        const int st = t / NITEMS;                                            \
+        rows_delta[bwd_groups_slot(lane, st, t & (NITEMS - 1), span,          \
+                                   bwd_groups_rot(lane, st, groups, width))] = \
+            to_f(dt_raw[(bid * T + t) * d_inner + did]);                      \
+    }                                                                         \
+    __syncthreads();                                                          \
     _Pragma("unroll")                                                         \
     for (int p = 0; p < 2; p++) {                                             \
         if (!live_p[p]) continue;                                             \
+        const int lane = p * groups + grp;                                    \
         _Pragma("unroll")                                                     \
         for (int i = 0; i < NITEMS; i++) {                                    \
             int t = tid * NITEMS + i;                                         \
             if (t >= T) continue;                                             \
-            IDX row = (bid * T + t) * d_inner + did_p[p];                     \
+            const int at = bwd_groups_slot(lane, tid, i, span, rot);          \
             float dd = to_f(FROM_F(d_delta_acc[p][i]));                       \
-            float xr = to_f(dt_raw[row]);                                     \
-            d_delta_raw_out[row] = FROM_F(dd / (1.0f + exp2f(-xr * 1.4426950408889634f))); \
-            d_u[row] = FROM_F(d_u_acc[p][i]);                                 \
+            float xr = rows_delta[at];                                        \
+            rows_u[at] = dd / (1.0f + exp2f(-xr * 1.4426950408889634f));      \
+            rows_dy[at] = d_u_acc[p][i];                                      \
         }                                                                     \
+    }                                                                         \
+    __syncthreads();                                                          \
+    _Pragma("unroll 4")                                                       \
+    for (int e = threadIdx.x; e < lanes * span; e += NTHREADS) {              \
+        const int lane = e & (lanes - 1);                                     \
+        const int t = e / lanes;                                              \
+        const int did = base + lane;                                          \
+        if (t >= T || did >= d_inner) continue;                               \
+        const int st = t / NITEMS;                                            \
+        const int at = bwd_groups_slot(lane, st, t & (NITEMS - 1), span,      \
+                                       bwd_groups_rot(lane, st, groups, width)); \
+        IDX row = (bid * T + t) * d_inner + did;                              \
+        d_delta_raw_out[row] = FROM_F(rows_u[at]);                            \
+        d_u[row] = FROM_F(rows_dy[at]);                                       \
     }                                                                         \
     _Pragma("unroll")                                                         \
     for (int p = 0; p < 2; p++) {                                             \
