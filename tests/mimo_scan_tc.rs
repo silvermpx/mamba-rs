@@ -1,6 +1,7 @@
 //! The MIMO chunked scan on the tensor cores (`m3m_chunk_scan_tc`) against
 //! the CUDA-core scans it stands in for on the TF32, bf16 and f16 lanes. Its
-//! products round their operands to TF32, so the training forward's rows,
+//! products round their operands to TF32 (on the f16 lane in three passes
+//! that keep 22 of their 24 bits), so the training forward's rows,
 //! every weight gradient, the input gradient and a prompt's decode steps
 //! after it stay within that rounding of the CUDA-core scans', and repeat
 //! their own bits; the f32 lane keeps the CUDA-core scans and their bits.

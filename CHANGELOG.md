@@ -71,11 +71,17 @@
   unchanged.
 - Mamba-3 MIMO prompts and training in TF32, bf16 and f16: the chunked
   scan forms its products on the tensor cores (TF32 with f32 sums, as the
-  backward's pair terms do) instead of the CUDA cores. On an RTX 6000 Ada
-  (4 layers of 768, heads of 64 x 128, rank 4) a 4096-token prompt is 13
-  to 14 percent faster and a training step 2.5 to 3 percent. The typed
-  forward's bits change within TF32 rounding; f32 keeps its CUDA-core
-  path and its bits.
+  backward's pair terms do) instead of the CUDA cores. f16 storage keeps
+  the 11 bits TF32 keeps, so the f16 forward splits each operand into its
+  rounding and the rounding of the rest and takes every product in three
+  passes, small terms first, which keeps 22 of the 24 bits: in the matrix
+  census its training lands 8e-7 to 6e-6 from an f16 host, where one pass
+  landed 5e-3, past the census's 3.9e-3. On an RTX 6000 Ada (4 layers of
+  768, heads of 64 x 128, rank 4) a 4096-token prompt is 13 to 14 percent
+  faster in TF32 and bf16 and a training step 2.5 to 3 percent; the f16
+  prompt pays 10 percent and its training step 2 percent for the three
+  passes. The typed forwards' bits change within TF32 rounding; f32 keeps
+  its CUDA-core path and its bits.
 - Mamba-3 MIMO prompts and training: the chunk states and the local state
   gradients pass from block to block in the launch that forms them,
   instead of a second kernel reading every chunk's contribution back; in
@@ -86,9 +92,9 @@
   asynchronously, and the chunk terms run on more threads and take the
   chunk dot with them. On an RTX 6000 Ada (4 layers of 768, heads of
   64 x 128, rank 4) a 4096-token prompt is 26 to 30 percent faster in
-  TF32, bf16 and f16 and 7 percent in f32, and a training step 18 to 19
-  percent faster in TF32, bf16 and f16 and 10 percent in f32. Bits
-  unchanged.
+  TF32, bf16 and f16 (f16 measured with its scan in one pass) and 7
+  percent in f32, and a training step 18 to 19 percent faster in TF32,
+  bf16 and f16 and 10 percent in f32. Bits unchanged.
 
 ### Changed
 

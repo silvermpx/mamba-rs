@@ -1507,7 +1507,13 @@ DEFINE_M3M_WRITEBACK(m3m_writeback_f16, __half)
 // m3m_chunk_scan_tiles' outputs from TF32 products with f32 accumulation
 // (m16n8k8), each operand rounded to TF32 to nearest, ties away, as it
 // enters, as the backward's pair terms take theirs; the f32 forward keeps
-// the CUDA-core kernels and their f32 sums. A block takes all of a chunk's
+// the CUDA-core kernels and their f32 sums. The f16 forward's storage keeps
+// the 11 bits TF32 keeps, so one TF32 rounding would cost it as much again
+// as its storage does: it takes each operand as two TF32 values, its
+// rounding and the rounding of the rest, and each product in three passes,
+// the two small terms first, which keeps 22 of the operands' 24 bits. bf16
+// rounds eight times coarser than TF32 and the TF32 forward asks for TF32,
+// so they take one pass. A block takes all of a chunk's
 // rows, at most M3MS_ROWS (the rank's own chunk of 64 / R tokens), and a
 // group of M3MS_P channels of the head:
 //   inter: Y = Q S_enter^T over the state indices, M3MS_SL at a time, then
@@ -1557,6 +1563,36 @@ __device__ __forceinline__ void m3ms_mma(
         : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
 }
 
+// Whether a lane's scan takes its products in three TF32 passes: the f16
+// lane's (see the comment above).
+template <typename TI> struct m3ms_three { static constexpr bool value = false; };
+template <> struct m3ms_three<__half> { static constexpr bool value = true; };
+
+// A fragment's values as TF32: their roundings, and with THREE the
+// roundings of what each rounding left.
+template <bool THREE, int N>
+__device__ __forceinline__ void m3ms_frag(
+    const float (&v)[N], unsigned (&hi)[N], unsigned (&lo)[N]) {
+#pragma unroll
+    for (int i = 0; i < N; i++) {
+        hi[i] = m3ms_tf32(v[i]);
+        lo[i] = THREE ? m3ms_tf32(__fsub_rn(v[i], __uint_as_float(hi[i]))) : 0u;
+    }
+}
+
+// d += a b in one TF32 pass, or with THREE in three: a's rest times b's
+// rounding, a's rounding times b's rest, then the roundings, in that order.
+template <bool THREE>
+__device__ __forceinline__ void m3ms_mma3(
+    float (&d)[4], const unsigned (&ah)[4], const unsigned (&al)[4],
+    const unsigned (&bh)[2], const unsigned (&bl)[2]) {
+    if constexpr (THREE) {
+        m3ms_mma(d, al, bh);
+        m3ms_mma(d, ah, bl);
+    }
+    m3ms_mma(d, ah, bh);
+}
+
 // A float copied into shared memory asynchronously, or a zero where `on`
 // is false (no byte of `src` is read then), and the groups' fences.
 __device__ __forceinline__ void m3ms_cp4(float* dst, const float* src, bool on) {
@@ -1596,6 +1632,7 @@ __device__ __forceinline__ void m3m_chunk_scan_tc_core(
 ) {
     constexpr int RK = MIMO_RANK;
     constexpr int J = CW / 8;
+    constexpr bool THREE = m3ms_three<TI>::value;
     float* qs = arena;                                  // [ROWS][SLD]
     float* ks = qs + M3MS_ROWS * M3MS_SLD;              // [ROWS][SLD]
     float* ssb = ks + M3MS_ROWS * M3MS_SLD;             // 2 x [P][SLD]
@@ -1716,20 +1753,25 @@ __device__ __forceinline__ void m3m_chunk_scan_tc_core(
         const long long sld = SMEM_S ? s_ld : M3MS_SLD;
 #pragma unroll
         for (int k8 = 0; k8 < M3MS_SL; k8 += 8) {
-            const unsigned a[4] = {
-                m3ms_tf32(qs[(rb + gid) * M3MS_SLD + k8 + tig]),
-                m3ms_tf32(qs[(rb + gid + 8) * M3MS_SLD + k8 + tig]),
-                m3ms_tf32(qs[(rb + gid) * M3MS_SLD + k8 + tig + 4]),
-                m3ms_tf32(qs[(rb + gid + 8) * M3MS_SLD + k8 + tig + 4])};
+            const float qv[4] = {
+                qs[(rb + gid) * M3MS_SLD + k8 + tig],
+                qs[(rb + gid + 8) * M3MS_SLD + k8 + tig],
+                qs[(rb + gid) * M3MS_SLD + k8 + tig + 4],
+                qs[(rb + gid + 8) * M3MS_SLD + k8 + tig + 4]};
+            unsigned a[4], al[4];
+            m3ms_frag<THREE>(qv, a, al);
 #pragma unroll
             for (int j = 0; j < J; j++) {
                 const int col = cb + 8 * j + gid;
-                const unsigned bk[2] = {m3ms_tf32(ks[col * M3MS_SLD + k8 + tig]),
-                                        m3ms_tf32(ks[col * M3MS_SLD + k8 + tig + 4])};
-                m3ms_mma(gacc[j], a, bk);
-                const unsigned bs[2] = {m3ms_tf32(ss[col * sld + k8 + tig]),
-                                        m3ms_tf32(ss[col * sld + k8 + tig + 4])};
-                m3ms_mma(yacc[j], a, bs);
+                const float kv[2] = {ks[col * M3MS_SLD + k8 + tig],
+                                     ks[col * M3MS_SLD + k8 + tig + 4]};
+                unsigned bk[2], bkl[2];
+                m3ms_frag<THREE>(kv, bk, bkl);
+                m3ms_mma3<THREE>(gacc[j], a, al, bk, bkl);
+                const float sv[2] = {ss[col * sld + k8 + tig], ss[col * sld + k8 + tig + 4]};
+                unsigned bs[2], bsl[2];
+                m3ms_frag<THREE>(sv, bs, bsl);
+                m3ms_mma3<THREE>(yacc[j], a, al, bs, bsl);
             }
         }
     }
@@ -1789,17 +1831,21 @@ __device__ __forceinline__ void m3m_chunk_scan_tc_core(
         for (int k8 = k0; k8 < k1; k8 += 8) {
             const int ka = k8 + tig, kb = ka + 4;
             const bool va = ka < k1, vb = kb < k1;
-            const unsigned a[4] = {
-                va ? m3ms_tf32(gw[(rb + gid) * M3MS_GLD + ka]) : 0u,
-                va ? m3ms_tf32(gw[(rb + gid + 8) * M3MS_GLD + ka]) : 0u,
-                vb ? m3ms_tf32(gw[(rb + gid) * M3MS_GLD + kb]) : 0u,
-                vb ? m3ms_tf32(gw[(rb + gid + 8) * M3MS_GLD + kb]) : 0u};
+            const float gv[4] = {
+                va ? gw[(rb + gid) * M3MS_GLD + ka] : 0.0f,
+                va ? gw[(rb + gid + 8) * M3MS_GLD + ka] : 0.0f,
+                vb ? gw[(rb + gid) * M3MS_GLD + kb] : 0.0f,
+                vb ? gw[(rb + gid + 8) * M3MS_GLD + kb] : 0.0f};
+            unsigned a[4], al[4];
+            m3ms_frag<THREE>(gv, a, al);
 #pragma unroll
             for (int j = 0; j < J; j++) {
                 const int p = cb + 8 * j + gid;
-                const unsigned bu[2] = {va ? m3ms_tf32(us[ka * M3MS_ULD + p]) : 0u,
-                                        vb ? m3ms_tf32(us[kb * M3MS_ULD + p]) : 0u};
-                m3ms_mma(yacc[j], a, bu);
+                const float uv[2] = {va ? us[ka * M3MS_ULD + p] : 0.0f,
+                                     vb ? us[kb * M3MS_ULD + p] : 0.0f};
+                unsigned bu[2], bul[2];
+                m3ms_frag<THREE>(uv, bu, bul);
+                m3ms_mma3<THREE>(yacc[j], a, al, bu, bul);
             }
         }
 #pragma unroll

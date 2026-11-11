@@ -616,7 +616,9 @@ pub fn scan_tc_bytes() -> usize {
 /// rows fit its block, as the rank's own chunk of 64 / R tokens does at
 /// every rank. Its products round their operands to TF32, as the backward's
 /// pair terms do, so the f32 lane keeps the CUDA-core scans and their f32
-/// sums.
+/// sums. The f16 lane's storage keeps the 11 bits TF32 keeps, so its
+/// products take three TF32 passes over each operand's rounding and the
+/// rounding of the rest, which keep 22 of the 24 bits.
 pub fn scan_tensor_cores(precision: WeightDtype, chunk: usize, rank: usize) -> bool {
     precision != WeightDtype::F32 && chunk * rank <= SCAN_TC_ROWS && !scan_tc_off()
 }
