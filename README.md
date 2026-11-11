@@ -14,8 +14,8 @@ NVRTC, and cuBLAS only with the `cublas` feature.
 ## What's new in 0.8
 
 - **0.8.4: faster prompts, training and decode.** Against 0.8.3 on an
-  RTX 6000 Ada, Mamba-3 MIMO prompts run up to 1.9 times as fast and its
-  training steps up to 1.34 times, Mamba-3 SISO decodes a batch of 16 up
+  RTX 6000 Ada, Mamba-3 MIMO prompts run up to 1.95 times as fast and its
+  training steps up to 1.33 times, Mamba-3 SISO decodes a batch of 16 up
   to 1.77 times as fast, and Mamba and Mamba-2 decode 5 to 14 percent
   faster, in f32, tf32, bf16 and f16. See the [changelog](CHANGELOG.md).
 - **0.8.3: faster GEMMs on RTX 5090, RTX PRO 6000 and A100.** Their f32
