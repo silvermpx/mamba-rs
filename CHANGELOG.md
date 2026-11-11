@@ -1,105 +1,22 @@
 # Changelog
 
-## 0.8.4 (2026-11-11)
+## 0.8.4 (2026-11-12)
 
 ### Performance
 
-- Compared with 0.8.3 on an RTX 6000 Ada (the family bench, 4 layers of
-  768, medians of four runs a side): Mamba-3 MIMO prompts 1.2 times as
-  fast in f32, 1.7 times in f16, 1.8 in tf32 and 1.95 in bf16, and its
-  training steps 1.15 to 1.33 times; Mamba-3 SISO decode at batch 16 1.21
-  to 1.23 times as fast in f32 and tf32 and 1.73 to 1.77 times in bf16 and
-  f16, and its prompts 4 to 10 percent faster; Mamba and Mamba-2 decode 5
-  to 14 percent faster, and Mamba training steps 5 to 11 percent. See the
-  [family benchmarks](docs/family-benchmarks.md).
-- Mamba-3 SISO decode at headdim 64 and wider: where many heads share the
-  card, the step stages each head's state in shared memory and reads and
-  writes it in contiguous runs instead of one row per thread. A batch of
-  16 sequences on an RTX 6000 Ada (4 layers of 768, heads of 64 x 128):
-  bf16 438 -> 246 us a step, f16 447 -> 257, f32 and tf32 505 -> 414.
-  Bits unchanged.
-- Mamba decode: the fused SSM step gives a channel several lanes of a
-  warp, each lane a few states, and hands the output's chain from lane to
-  lane in state order. One thread per channel had left a single
-  sequence's step a few dozen warps on the whole card. On an RTX 6000 Ada
-  (4 layers of 768, 16 states) a decode step is 7 to 12 percent faster in
-  f32, tf32, bf16 and f16 at batch 1 and 16, and a 128-state step's SSM
-  kernel about 5 times faster. Bits unchanged.
-- Mamba-2 decode: the conv step spreads a row's channels over blocks
-  instead of walking them in one, so a single sequence no longer runs
-  its 1 792 channels on one multiprocessor. On an RTX 6000 Ada (4 layers
-  of 768, heads of 64 x 128) a decode step is 8 to 10 percent faster at
-  batch 1 and 5 to 7 percent at batch 16, in f32, tf32, bf16 and f16.
-  Bits unchanged.
-- Mamba-3 MIMO prompts: the chunked path's step scalars and angles run as
-  three kernels spread over the card (the scalars and angle increments
-  over tiles of tokens, a thread per angle's wrap chain, a thread per
-  sine) instead of one block per head, and the wrap of an angle that
-  passes 2 pi within one period takes an exact short path instead of the
-  double division. One block per head had walked each head's angle chains
-  in a single warp while the rest of the block waited, and the division
-  ran on a sixth of the warp's steps. On an RTX 6000 Ada (4 layers of 768,
-  heads of 64 x 128, rank 4) a 4096-token prompt is 6 to 9 percent faster
-  in f32, tf32, bf16 and f16. Bits unchanged.
-- Mamba-3 SISO prompts and training: the fused pre-state kernel runs 512
-  threads a block instead of one thread a chunk position (its tile fills a
-  multiprocessor's shared memory, so 64 threads had left it two warps); the
-  sliced scan loads the next slice of the state while it sums the current
-  one; the angle backward loads a row's next quad while it turns the
-  current one. On an RTX 6000 Ada (4 layers of 768, heads of 64 x 128) a
-  4096-token prompt is 5 percent faster in f32 and tf32, 7 in f16 and 10 in
-  bf16, and a training step about 2 percent faster in all four. Bits
-  unchanged.
-- Mamba training: the grouped scan backward brings its channels' dt, u and
-  dy rows in, and sends their gradients out, a step of every channel at a
-  time through shared memory laid out so that no access meets a bank twice,
-  where each channel's steps had been read and written a row of channels
-  apart, one waiting on the next. On an RTX 6000 Ada (4 layers of 768, 16
-  states) a training step is 4 percent faster in f32, 7 in tf32, 8 in f16
-  and 9 in bf16. Bits unchanged.
-- Mamba-3 MIMO training and prompts: the inter-chunk part of dq and the
-  state terms run in one block per chunk and head where the head's state
-  fits it; the tensor-core pair kernel stages its rotated rows with every
-  load in flight before any is turned; the rotation backward spreads its
-  pairs over the block; the angle walk stages up to 64 tokens a batch; the
-  row reduction keeps four rows of loads in flight. In prompts the angle
-  chains walk two to a block, so the double-precision wrap of one chain no
-  longer stalls 31 others, and the chunk state stages its keys and inputs
-  with their loads in flight. On an RTX 6000 Ada (4 layers of 768, heads
-  of 64 x 128, rank 4) a training step is 2 to 4 percent faster and a
-  4096-token prompt 3 to 5 percent, in f32, tf32, bf16 and f16. Bits
-  unchanged.
-- Mamba-3 MIMO prompts and training in TF32, bf16 and f16: the chunked
-  scan forms its products on the tensor cores (TF32 with f32 sums, as the
-  backward's pair terms do) instead of the CUDA cores. f16 storage keeps
-  the 11 bits TF32 keeps, so the f16 forward splits each operand into its
-  rounding and the rounding of the rest and takes every product in three
-  passes, small terms first, which keeps 22 of the 24 bits: in the matrix
-  census its training lands 8e-7 to 6e-6 from an f16 host, where one pass
-  landed 5e-3, past the census's 3.9e-3. On an RTX 6000 Ada (4 layers of
-  768, heads of 64 x 128, rank 4) a 4096-token prompt is 13 to 14 percent
-  faster in TF32 and bf16 and a training step 2.5 to 3 percent; the f16
-  prompt pays 10 percent and its training step 2 percent for the three
-  passes. The typed forwards' bits change within TF32 rounding; f32 keeps
-  its CUDA-core path and its bits.
-- Mamba-3 MIMO prompts and training: the chunk states and the local state
-  gradients pass from block to block in the launch that forms them,
-  instead of a second kernel reading every chunk's contribution back; in
-  TF32, bf16 and f16 the forward's state chain and scan run in one block
-  per chunk and head, so a prompt no longer writes or reads the chunks'
-  entering states at all. The tensor-core pair kernel stages each rotated
-  slice once, the tensor-core scan copies the entering state ahead
-  asynchronously, and the chunk terms run on more threads and take the
-  chunk dot with them. On an RTX 6000 Ada (4 layers of 768, heads of
-  64 x 128, rank 4) a 4096-token prompt is 26 to 30 percent faster in
-  TF32, bf16 and f16 (f16 measured with its scan in one pass) and 7
-  percent in f32, and a training step 18 to 19 percent faster in TF32,
-  bf16 and f16 and 10 percent in f32. Bits unchanged.
+- Against 0.8.3 on an RTX 6000 Ada: Mamba-3 MIMO prompts 1.2x (f32) to
+  1.95x (bf16) as fast and its training steps 1.15x to 1.33x; Mamba-3 SISO
+  decode at batch 16 1.2x (f32, tf32) to 1.77x (bf16, f16); Mamba and
+  Mamba-2 decode 5 to 14 percent faster, Mamba training 5 to 11 percent.
+  Tables in [docs/family-benchmarks.md](docs/family-benchmarks.md).
 
 ### Changed
 
-- `benches/family_compare_bench.rs` times every family in f32, tf32, bf16
-  and f16; it timed f32 and bf16.
+- Mamba-3 MIMO in TF32, bf16 and f16: the chunked scan runs on the tensor
+  cores, in f16 as three TF32 passes that keep near-f32 accuracy. These
+  outputs move within TF32 rounding; every other output keeps the bits of
+  0.8.3.
+- `benches/family_compare_bench.rs` times all four storages.
 
 ## 0.8.3 (2026-11-09)
 

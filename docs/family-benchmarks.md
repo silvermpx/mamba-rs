@@ -20,8 +20,7 @@ Measured on November 11, 2026 on an RTX 6000 Ada Generation (142 SMs, 300 W
 power limit, driver 615.71.10, CUDA 13.2 / NVRTC 13.2, Rust 1.99.1, release
 build, Intel Xeon Gold 5412U host), with nothing else on the card. The two
 trees ran in turn, four runs each, and each cell is the median of its four
-runs. The changes behind the faster rows are in the
-[changelog](../CHANGELOG.md).
+runs.
 
 f32 storage, 0.8.3 -> 0.8.4 (speedup):
 
@@ -59,14 +58,10 @@ f16 storage, 0.8.3 -> 0.8.4 (speedup):
 | Mamba-3 SISO | 155 -> 156 us (1.00x) | 449 -> 259 us (1.73x) | 0.60 -> 0.65 M tokens/s (1.10x) | 9.83 -> 9.54 ms (1.03x) |
 | Mamba-3 MIMO | 145 -> 144 us (1.00x) | 224 -> 224 us (1.00x) | 0.25 -> 0.43 M tokens/s (1.69x) | 37.84 -> 28.94 ms (1.31x) |
 
-Mamba-2's prompt and training step run the kernels of 0.8.3, and a
-prompt row moves by several percent between passes of one tree: the tf32
-prompt's passes here spread from 0.66 to 0.80 M tokens/s on 0.8.4 and from
-0.78 to 0.83 on 0.8.3, and the same Mamba-2 code gave 1.00x in a run
-earlier the same day; Mamba's tf32 prompt moved the same way. The Mamba-3
-MIMO decode in f32 and tf32 ran about 1 percent slower in every
-comparison; its decode kernels keep the registers of 0.8.3, and 0.8.3's
-angle wrap put back into them times the same.
+Mamba-2's prompt and training step run the kernels of 0.8.3; a prompt row
+varies by several percent between passes of one tree (here 0.66 to 0.80 M
+tokens/s for the 0.8.4 tf32 prompt). The Mamba-3 MIMO decode in f32 and
+tf32 is about 1 percent slower.
 
 ## 0.8.2 against 0.8.1, summary
 
