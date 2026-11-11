@@ -65,7 +65,9 @@ DEFINE_M2_CONV_PREFILL(m2_conv_prefill_f16, __half, from_f_f16)
 // The decode's conv: one token, the window state `[b][c][k]` shifted and
 // the new input appended, then the prefill's chain, bias first and taps
 // oldest first, so a decode continues a prefill bit for bit. A block's y
-// threads take sequences, its x threads the channels.
+// threads take sequences, its x threads the channels, and the grid's y
+// blocks split the channels between them, so a batch of one is not left
+// to a single block (conv_step_cfg).
 #define DEFINE_M2_CONV_STEP(NAME, TI, FROM_F)                                  \
 extern "C" __global__ void NAME(                                               \
     TI* __restrict__ out,                                                      \
@@ -76,7 +78,8 @@ extern "C" __global__ void NAME(                                               \
 ) {                                                                            \
     const long long b = (long long)blockIdx.x * blockDim.y + threadIdx.y;      \
     if (b >= batch) return;                                                    \
-    for (int c = threadIdx.x; c < conv_dim; c += blockDim.x) {                 \
+    for (int c = blockIdx.y * blockDim.x + threadIdx.x; c < conv_dim;          \
+         c += gridDim.y * blockDim.x) {                                        \
         float* st = state + (b * conv_dim + c) * d_conv;                       \
         for (int k = 0; k + 1 < d_conv; k++) st[k] = st[k + 1];                \
         st[d_conv - 1] = to_f(proj[b * ld_proj + xbc_col + c]);                \

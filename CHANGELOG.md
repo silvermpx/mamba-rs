@@ -17,6 +17,12 @@
   (4 layers of 768, 16 states) a decode step is 7 to 12 percent faster in
   f32, tf32, bf16 and f16 at batch 1 and 16, and a 128-state step's SSM
   kernel about 5 times faster. Bits unchanged.
+- Mamba-2 decode: the conv step spreads a row's channels over blocks
+  instead of walking them in one, so a single sequence no longer runs
+  its 1 792 channels on one multiprocessor. On an RTX 6000 Ada (4 layers
+  of 768, heads of 64 x 128) a decode step is 8 to 10 percent faster at
+  batch 1 and 5 to 7 percent at batch 16, in f32, tf32, bf16 and f16.
+  Bits unchanged.
 
 ## 0.8.3 (2026-11-09)
 

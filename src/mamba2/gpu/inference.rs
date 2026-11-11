@@ -36,12 +36,31 @@ use crate::gpu::graph_capture::{
 };
 use crate::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
 use crate::gpu::launch::{grid_1d_cover, grid_rows, grid_steps, launch_elems, y_runs, yz_runs};
+
 use crate::gpu::train::RowSource;
 use crate::mamba2::config::Mamba2Config;
 use crate::mamba2::weights::{Mamba2LayerWeights, Mamba2Weights};
 use crate::matrix::{Path, Request};
 use crate::mlp::GatedMlpLayerWeights;
 use crate::ops::portable_math::exp_portable;
+
+/// The decode conv step's grid: blocks of two warps over a row's channels,
+/// one block per sequence on x and the channels split over y, so a batch
+/// of one spreads its 1 792 channels (heads of 64 x 128) over 28 blocks
+/// instead of walking them in one. Each channel is still one thread's
+/// chain, so the split changes no bits.
+fn conv_step_cfg(rows: usize, cols: usize) -> cudarc::driver::LaunchConfig {
+    const WIDTH: usize = 64;
+    cudarc::driver::LaunchConfig {
+        grid_dim: (
+            rows.clamp(1, i32::MAX as usize) as u32,
+            cols.div_ceil(WIDTH).clamp(1, 65_535) as u32,
+            1,
+        ),
+        block_dim: (WIDTH as u32, 1, 1),
+        shared_mem_bytes: 0,
+    }
+}
 
 mod prefill_graph;
 
@@ -1319,7 +1338,7 @@ impl Mamba2GpuEngine {
                 bld.arg(&b_i);
                 bld.arg(&cd_i);
                 bld.arg(&dconv_i);
-                unsafe { bld.launch(grid_rows(b, cd)) }
+                unsafe { bld.launch(conv_step_cfg(b, cd)) }
                     .map_err(|e| format!("Mamba-2 conv step L{l}: {e:?}"))?;
             }
             let y = scratch.y.cached_ptr();
