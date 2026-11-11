@@ -15,8 +15,9 @@
 // reaching into the next chunk) is decayed into the next chunk's entering
 // state by the state passing.
 //
-// The pieces: m3m_prep (step scalars and angles per token, the angles in
-// the sequential path's own arithmetic), m3m_chunk_state, m3m_state_pass,
+// The pieces: m3m_prep_tok, m3m_prep_chain and m3m_prep_sincos (step
+// scalars and angles per token, the angles in the sequential path's own
+// arithmetic), m3m_chunk_state, m3m_state_pass,
 // m3m_chunk_scan (the outputs and the gate), m3m_writeback (the carried
 // keys and input). Every value is one thread's chain in a fixed order; the
 // bits do not depend on the batch or the grid.
@@ -234,21 +235,23 @@ __device__ __forceinline__ void m3m_tile_product(
     }
 }
 
-// The step scalars and angles of every token of the window, one block per
-// (sequence, head). coef [B, T, H, 4] = (dt, gamma, scale, Acs); sn, cs
+// The step scalars and angles of every token of the window, in three
+// launches. coef [B, T, H, 4] = (dt, gamma, scale, Acs); sn, cs
 // [B, T, H, na]; e0 [B, H] = dt_0 lam_c_0. The angle state ends advanced
 // over the window. Every value is the one a single thread walking the
 // tokens in order computes; only the work is spread:
-//   1. per token: dt, gamma = lam dt, scale = gamma + the next token's
-//      lead dt lam_c (recomputed rather than waited for; gamma alone when
-//      the next token starts a packed sequence) and A dt;
-//   2. per chunk: Acs, the running sum of A dt from zero at the chunk
-//      start (and at every packed sequence's start), in token order; per
-//      (token, angle): the increment tanh_pi dt, parked in sn;
-//   3. per angle: the serial wrap chain over the window (from zero at
-//      every packed sequence's start), the angles parked in sn;
-//   4. per (token, angle): the sines and cosines.
-// Block 512 threads.
+//   1. m3m_prep_tok, per token: dt, gamma = lam dt, scale = gamma + the
+//      next token's lead dt lam_c (recomputed rather than waited for; gamma
+//      alone when the next token starts a packed sequence) and A dt; per
+//      chunk: Acs, the running sum of A dt from zero at the chunk start (and
+//      at every packed sequence's start), in token order; per (token,
+//      angle): the increment tanh_pi dt, parked in sn;
+//   2. m3m_prep_chain, per angle: the serial wrap chain over the window
+//      (from zero at every packed sequence's start), the angles parked in
+//      sn;
+//   3. m3m_prep_sincos, per (token, angle): the sines and cosines.
+// The serial chains are the only part a long window cannot spread, so the
+// rest runs on blocks of its own rather than waiting at a barrier for them.
 template <typename TI>
 __device__ __forceinline__ void m3m_tok_dt_lead(
     float& dt, float& lead, const TI* pr, const float* dt_bias, int nh, int heads, int h
@@ -258,94 +261,34 @@ __device__ __forceinline__ void m3m_tok_dt_lead(
     lead = __fmul_rn(dt, mimo_sigmoid(-to_f(pr[heads + 2 * nh + h])));
 }
 
-// One angle's serial wrap chain over a row's tokens: `col` holds the
-// increments (stride `astr`) and leaves holding the angles; the angle the
-// row carries in is `theta` and the one it carries out is returned. The
-// chain loads the next AB increments while it walks the current ones, so a
-// step waits on one add, not on memory. PACKED restarts the angle from
-// zero at every token that starts a sequence.
-template <bool PACKED>
-__device__ __forceinline__ float m3m_angle_chain(
-    float theta, float* col, long long astr, int seq,
-    const int* __restrict__ seq_idx, long long b
-) {
-    constexpr int AB = 32;
-    float cur[AB], nxt[AB];
-    bool fcur[AB], fnxt[AB];
-#pragma unroll
-    for (int i = 0; i < AB; i++) {
-        cur[i] = i < seq ? col[i * astr] : 0.0f;
-        fcur[i] = PACKED && i < seq && vl_starts(seq_idx, b, seq, i);
-    }
-    for (int t0 = 0; t0 < seq; t0 += AB) {
-#pragma unroll
-        for (int i = 0; i < AB; i++) {
-            const int t = t0 + AB + i;
-            nxt[i] = t < seq ? col[t * astr] : 0.0f;
-            fnxt[i] = PACKED && t < seq && vl_starts(seq_idx, b, seq, t);
-        }
-#pragma unroll
-        for (int i = 0; i < AB; i++) {
-            if (t0 + i < seq) {
-                theta = mimo_wrap_add(PACKED && fcur[i] ? 0.0f : theta, cur[i]);
-                col[(t0 + i) * astr] = theta;
-            }
-        }
-#pragma unroll
-        for (int i = 0; i < AB; i++) {
-            cur[i] = nxt[i];
-            fcur[i] = fnxt[i];
-        }
-    }
-    return theta;
-}
+// Tokens of a block of m3m_prep_tok: a multiple of every chunk length (a
+// power of two up to 64), so a tile holds whole chunks.
+#define M3M_PREP_TILE 64
 
-// One chunk's running sum of A dt from zero at its start, in token order,
-// over the coef rows (stride `cstr`, the sum in column 3 in place). PACKED
-// restarts the sum at every token that starts a sequence, so a sequence's
-// decays never hold another's terms (an overflow there stays there).
-template <bool PACKED>
-__device__ __forceinline__ void m3m_acs_chunk(
-    float* c_bh, long long cstr, int ch, int seq, const int* __restrict__ seq_idx, long long b
-) {
-    const int t0 = ch * M3M_CHUNK;
-    const int t1 = min(seq, t0 + M3M_CHUNK);
-    float acs = 0.0f;
-    for (int t = t0; t < t1; t += 8) {
-        float v[8];
-#pragma unroll
-        for (int i = 0; i < 8; i++) v[i] = t + i < t1 ? c_bh[(t + i) * cstr + 3] : 0.0f;
-#pragma unroll
-        for (int i = 0; i < 8; i++) {
-            if (t + i < t1) {
-                const bool fresh = PACKED && vl_starts(seq_idx, b, seq, t + i);
-                acs = __fadd_rn(fresh ? 0.0f : acs, v[i]);
-                c_bh[(t + i) * cstr + 3] = acs;
-            }
-        }
-    }
-}
-
+// The step scalars, the chunks' running sums and the angle increments of a
+// tile of M3M_PREP_TILE tokens of one (sequence, head). Grid
+// (B * ceil(T / M3M_PREP_TILE), H), block 128.
 template <typename TI>
-__device__ __forceinline__ void m3m_prep_body(
-    float* __restrict__ coef, float* __restrict__ sn, float* __restrict__ cs,
-    float* __restrict__ e0, float* __restrict__ ang,
+__device__ __forceinline__ void m3m_prep_tok_body(
+    float* __restrict__ coef, float* __restrict__ sn, float* __restrict__ e0,
     const TI* __restrict__ proj, long long ld_proj, const float* __restrict__ dt_bias,
     int seq, int nh, int heads, int ang_col, int na, float a_floor,
     int y_first, /* this run's first y block */
     const int* __restrict__ seq_idx
 ) {
-    const int b = blockIdx.x;
+    __shared__ float s_dt[M3M_PREP_TILE];
+    __shared__ float s_adt[M3M_PREP_TILE];
+    const int ntile = (seq + M3M_PREP_TILE - 1) / M3M_PREP_TILE;
+    const long long b = blockIdx.x / ntile;
+    const int t0 = (int)(blockIdx.x % ntile) * M3M_PREP_TILE;
+    const int tn = min(M3M_PREP_TILE, seq - t0);
     const int h = y_first + blockIdx.y;
-    const long long bh = (long long)b * nh + h;
-    const long long row0 = (long long)b * seq;
+    const long long row0 = b * seq + t0;
     const long long cstr = (long long)nh * 4;
-    const long long astr = (long long)nh * na;
-    float* const c_bh = coef + (row0 * nh + h) * 4;
-    float* const sn_bh = sn + (row0 * nh + h) * na;
-    float* const cs_bh = cs + (row0 * nh + h) * na;
-    for (int t = threadIdx.x; t < seq; t += blockDim.x) {
-        const TI* pr = proj + (row0 + t) * ld_proj;
+    float* const c_rows = coef + (row0 * nh + h) * 4;
+    for (int i = threadIdx.x; i < tn; i += blockDim.x) {
+        const int t = t0 + i;
+        const TI* pr = proj + (row0 + i) * ld_proj;
         float dd_a = to_f(pr[heads + nh + h]);
         float ht = dd_a >= 0.0f ? __fadd_rn(1.0f, dd_a)
                                 : __fdiv_rn(1.0f, __fsub_rn(1.0f, dd_a));
@@ -360,61 +303,151 @@ __device__ __forceinline__ void m3m_prep_body(
             m3m_tok_dt_lead(dt_next, lead_next, pr + ld_proj, dt_bias, nh, heads, h);
             scale = __fadd_rn(gamma, lead_next);
         }
-        float* c = c_bh + t * cstr;
+        float* c = c_rows + i * cstr;
         c[0] = dt;
         c[1] = gamma;
         c[2] = scale;
-        c[3] = __fmul_rn(a, dt);
-        if (t == 0) e0[bh] = lead;
+        s_dt[i] = dt;
+        s_adt[i] = __fmul_rn(a, dt);
+        if (t == 0) e0[b * nh + h] = lead;
     }
     __syncthreads();
-    const int nc = (seq + M3M_CHUNK - 1) / M3M_CHUNK;
-    for (int ch = threadIdx.x; ch < nc; ch += blockDim.x) {
-        if (seq_idx != nullptr)
-            m3m_acs_chunk<true>(c_bh, cstr, ch, seq, seq_idx, b);
-        else
-            m3m_acs_chunk<false>(c_bh, cstr, ch, seq, seq_idx, b);
-    }
-    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, nw = blockDim.x >> 5;
-    for (int t = warp; t < seq; t += nw) {
-        const TI* pr = proj + (row0 + t) * ld_proj;
-        const float dt = c_bh[t * cstr];
-        for (int a = lane; a < na; a += 32)
-            sn_bh[t * astr + a] = __fmul_rn(mimo_tanh_pi(pr, ang_col, a), dt);
-    }
-    __syncthreads();
-    for (int a = threadIdx.x; a < na; a += blockDim.x) {
-        const float theta = ang[bh * na + a];
-        ang[bh * na + a] = seq_idx != nullptr
-            ? m3m_angle_chain<true>(theta, sn_bh + a, astr, seq, seq_idx, b)
-            : m3m_angle_chain<false>(theta, sn_bh + a, astr, seq, seq_idx, b);
-    }
-    __syncthreads();
-    for (int t = warp; t < seq; t += nw) {
-        for (int a = lane; a < na; a += 32) {
-            const long long at = t * astr + a;
-            const float th = sn_bh[at];
-            sincosf(th, &sn_bh[at], &cs_bh[at]);
+    for (int c0 = threadIdx.x * M3M_CHUNK; c0 < tn; c0 += blockDim.x * M3M_CHUNK) {
+        const int c1 = min(tn, c0 + M3M_CHUNK);
+        float acs = 0.0f;
+        for (int i = c0; i < c1; i++) {
+            const bool fresh = seq_idx != nullptr && vl_starts(seq_idx, b, seq, t0 + i);
+            acs = __fadd_rn(fresh ? 0.0f : acs, s_adt[i]);
+            c_rows[i * cstr + 3] = acs;
         }
+    }
+    const long long astr = (long long)nh * na;
+    float* const sn_rows = sn + (row0 * nh + h) * na;
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, nw = blockDim.x >> 5;
+#pragma unroll 4
+    for (int i = warp; i < tn; i += nw) {
+        const TI* pr = proj + (row0 + i) * ld_proj;
+        for (int a = lane; a < na; a += 32)
+            sn_rows[i * astr + a] = __fmul_rn(mimo_tanh_pi(pr, ang_col, a), s_dt[i]);
     }
 }
 
-#define DEFINE_M3M_PREP(NAME, TI)                                              \
-extern "C" __global__ void __launch_bounds__(512) NAME(                        \
-    float* __restrict__ coef, float* __restrict__ sn, float* __restrict__ cs,  \
-    float* __restrict__ e0, float* __restrict__ ang,                           \
+#define DEFINE_M3M_PREP_TOK(NAME, TI)                                          \
+extern "C" __global__ void __launch_bounds__(128) NAME(                        \
+    float* __restrict__ coef, float* __restrict__ sn, float* __restrict__ e0,  \
     const TI* __restrict__ proj, long long ld_proj,                            \
     const float* __restrict__ dt_bias,                                         \
     int seq, int nh, int heads, int ang_col, int na, float a_floor,            \
     int y_first, /* this run's first y block */                                \
     const int* __restrict__ seq_idx                                            \
 ) {                                                                            \
-    m3m_prep_body<TI>(coef, sn, cs, e0, ang, proj, ld_proj, dt_bias, seq, nh,  \
+    m3m_prep_tok_body<TI>(coef, sn, e0, proj, ld_proj, dt_bias, seq, nh,       \
         heads, ang_col, na, a_floor, y_first, seq_idx);                        \
 }
-DEFINE_M3M_PREP(m3m_prep, float)
-DEFINE_M3M_PREP(m3m_prep_bf16, __nv_bfloat16)
-DEFINE_M3M_PREP(m3m_prep_f16, __half)
+DEFINE_M3M_PREP_TOK(m3m_prep_tok, float)
+DEFINE_M3M_PREP_TOK(m3m_prep_tok_bf16, __nv_bfloat16)
+DEFINE_M3M_PREP_TOK(m3m_prep_tok_f16, __half)
+
+// One angle's serial wrap chain over a row's tokens: `col` holds the
+// increments (stride `astr`) and leaves holding the angles; the angle the
+// row carries in is `theta` and the one it carries out is returned. The
+// chain loads the next AB increments while it walks the current ones, so a
+// step waits on one add, not on memory; a whole batch walks without bounds
+// checks and with its stores' addresses stepped rather than recomputed,
+// since a thread walking alone issues every instruction of the chain in
+// turn. PACKED restarts the angle from zero at every token that starts a
+// sequence.
+template <bool PACKED>
+__device__ __forceinline__ float m3m_angle_chain(
+    float theta, float* col, long long astr, int seq,
+    const int* __restrict__ seq_idx, long long b
+) {
+    constexpr int AB = 32;
+    float cur[AB], nxt[AB];
+    bool fcur[AB], fnxt[AB];
+#pragma unroll
+    for (int i = 0; i < AB; i++) {
+        cur[i] = i < seq ? col[i * astr] : 0.0f;
+        fcur[i] = PACKED && i < seq && vl_starts(seq_idx, b, seq, i);
+    }
+    for (int t0 = 0; t0 < seq; t0 += AB) {
+        const float* nx = col + (long long)(t0 + AB) * astr;
+        if (t0 + 2 * AB <= seq) {
+#pragma unroll
+            for (int i = 0; i < AB; i++) {
+                nxt[i] = nx[i * astr];
+                fnxt[i] = PACKED && vl_starts(seq_idx, b, seq, t0 + AB + i);
+            }
+        } else {
+#pragma unroll
+            for (int i = 0; i < AB; i++) {
+                const int t = t0 + AB + i;
+                nxt[i] = t < seq ? nx[i * astr] : 0.0f;
+                fnxt[i] = PACKED && t < seq && vl_starts(seq_idx, b, seq, t);
+            }
+        }
+        float* out = col + (long long)t0 * astr;
+        if (t0 + AB <= seq) {
+#pragma unroll
+            for (int i = 0; i < AB; i++) {
+                theta = mimo_wrap_add(PACKED && fcur[i] ? 0.0f : theta, cur[i]);
+                *out = theta;
+                out += astr;
+            }
+        } else {
+#pragma unroll
+            for (int i = 0; i < AB; i++) {
+                if (t0 + i < seq) {
+                    theta = mimo_wrap_add(PACKED && fcur[i] ? 0.0f : theta, cur[i]);
+                    *out = theta;
+                    out += astr;
+                }
+            }
+        }
+#pragma unroll
+        for (int i = 0; i < AB; i++) {
+            cur[i] = nxt[i];
+            fcur[i] = fnxt[i];
+        }
+    }
+    return theta;
+}
+
+// The serial wrap chains of the window, a thread per (sequence, head,
+// angle) over `chains` = B H na of them: the angle the row carries in from
+// `ang`, the increments m3m_prep_tok parked in sn turned into the angles,
+// and the angle carried out back into `ang`. Grid ceil(chains / 32),
+// block 32.
+extern "C" __global__ void __launch_bounds__(32) m3m_prep_chain(
+    float* __restrict__ sn, float* __restrict__ ang,
+    int seq, int nh, int na, long long chains,
+    const int* __restrict__ seq_idx
+) {
+    const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= chains) return;
+    const long long bh = i / na;
+    const int a = (int)(i - bh * na);
+    const long long b = bh / nh;
+    const int h = (int)(bh - b * nh);
+    const long long astr = (long long)nh * na;
+    float* const col = sn + ((b * seq) * nh + h) * na + a;
+    const float theta = ang[i];
+    ang[i] = seq_idx != nullptr
+        ? m3m_angle_chain<true>(theta, col, astr, seq, seq_idx, b)
+        : m3m_angle_chain<false>(theta, col, astr, seq, seq_idx, b);
+}
+
+// The sines and cosines of the `n` = B T H na angles m3m_prep_chain left in
+// sn: sn keeps the sines, cs takes the cosines. Grid-stride, block 256.
+extern "C" __global__ void __launch_bounds__(256) m3m_prep_sincos(
+    float* __restrict__ sn, float* __restrict__ cs, long long n
+) {
+    const long long step = (long long)gridDim.x * blockDim.x;
+    for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += step) {
+        const float th = sn[i];
+        sincosf(th, &sn[i], &cs[i]);
+    }
+}
 
 // Each chunk's own contribution to the state, from zero:
 //   C[p][n] = sum_s sum_r (e^min(Acs_last - Acs_s, 0) scale_s) u_s[r][p] k_s[r][n]

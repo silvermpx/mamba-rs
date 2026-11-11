@@ -146,12 +146,12 @@ __device__ __forceinline__ float mimo_tanh_pi(const TI* pr, int ang_col, int a) 
     return __fmul_rn(tanhf(to_f(pr[ang_col + a])), 3.14159265358979f);
 }
 
-// The rare steps of mimo_wrap_add, out of line so the common step stays a
-// float add and two compares rather than a select over the double division.
-__device__ __noinline__ float mimo_wrap_slow(float theta, float inc, float s) {
+// The wrap of a double sum by the full formula, acc - 2 pi floor(acc / 2 pi)
+// rounded to float, out of line: only sums from 4 pi on, sums at or below
+// -6.28, a zero and non-finite values come here, and the double division
+// inline would cost every step of a chain its registers.
+__device__ __noinline__ float mimo_wrap_full(double acc) {
     const double two_pi = 6.283185307179586;
-    double acc = (double)theta + (double)inc;
-    if (s < 0.0f && s > -6.28f) return (float)(acc + two_pi);
     acc -= two_pi * floor(acc / two_pi);
     return (float)acc;
 }
@@ -162,12 +162,22 @@ __device__ __noinline__ float mimo_wrap_slow(float theta, float inc, float s) {
 // lies there too, so the floor is 0 and the double sum rounds to that same
 // float (two floats summed through a double round once: 53 >= 2 * 24 + 2).
 // A float sum in (-6.28, 0) means the floor is -1, which leaves the single
-// wrap add. Zero (whose sign the full formula settles), wider sums and
+// wrap add. A float sum from 6.28 on whose double sum lies below 4 pi (an
+// increment under 2 pi from an angle the wrap left) has a floor of 0 below
+// 2 pi and of 1 from it: the double below 2 pi is 2 pi - 2^-50, whose
+// quotient by 2 pi lies 1.27 2^-53 below 1 and so rounds to 1 - 2^-53, not
+// to 1, and the same holds one period up. The wrap is then the sum itself
+// or the sum less 2 pi, exact as the two lie within a factor of two of each
+// other. Zero (whose sign the full formula settles), wider sums and
 // non-finite values take the full formula.
 __device__ __forceinline__ float mimo_wrap_add(float theta, float inc) {
     const float s = __fadd_rn(theta, inc);
     if (s > 0.0f && s < 6.28f) return s;
-    return mimo_wrap_slow(theta, inc, s);
+    const double two_pi = 6.283185307179586;
+    const double acc = (double)theta + (double)inc;
+    if (s < 0.0f && s > -6.28f) return (float)(acc + two_pi);
+    if (s >= 6.28f && acc < 2.0 * two_pi) return (float)(acc < two_pi ? acc : acc - two_pi);
+    return mimo_wrap_full(acc);
 }
 
 // Whether three rank-row buffers of N-wide rows start on 16 bytes and keep

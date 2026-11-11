@@ -21,7 +21,7 @@ use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::gpu::launch::{y_runs, yz_runs};
 use mamba_rs::mamba3_mimo::gpu::kernels::{
-    ChunkedGeom, Mamba3MimoKernels, chunk_scan_tiles_cfg, chunked_geom,
+    ChunkedGeom, Mamba3MimoKernels, chunk_scan_tiles_cfg, chunked_geom, prep_cfgs,
 };
 
 const CHUNK: usize = 64;
@@ -263,20 +263,15 @@ fn run(ctx: &GpuCtx, k: &Mamba3MimoKernels, geom: &ChunkedGeom, s: Shape, p: &Po
     );
     let heads = 2 * s.di() + 2 * s.bc();
     let ang_col = heads + 3 * s.nh;
+    let [tok_cfg, chain_cfg, sincos_cfg] = prep_cfgs(b, s.t, s.nh, s.na);
     launch_runs(
         ctx,
-        k.chunk_prep.get(ACT),
-        LaunchConfig {
-            grid_dim: (b as u32, s.nh as u32, 1),
-            block_dim: (512, 1, 1),
-            shared_mem_bytes: 0,
-        },
+        k.chunk_prep_tok.get(ACT),
+        tok_cfg,
         &[
             Arg::P(at(Slot::Coef)),
             Arg::P(at(Slot::Sn)),
-            Arg::P(at(Slot::Cs)),
             Arg::P(at(Slot::E0)),
-            Arg::P(at(Slot::Ang)),
             Arg::P(at(Slot::Proj)),
             ld,
             Arg::P(w.dt_bias.cached_ptr()),
@@ -288,6 +283,30 @@ fn run(ctx: &GpuCtx, k: &Mamba3MimoKernels, geom: &ChunkedGeom, s: Shape, p: &Po
             Arg::F(1e-4),
         ],
         &[Arg::P(0)],
+    );
+    launch(
+        ctx,
+        &k.chunk_prep_chain,
+        chain_cfg,
+        &[
+            Arg::P(at(Slot::Sn)),
+            Arg::P(at(Slot::Ang)),
+            seq,
+            nh,
+            na,
+            Arg::L((b * s.nh * s.na) as i64),
+            Arg::P(0),
+        ],
+    );
+    launch(
+        ctx,
+        &k.chunk_prep_sincos,
+        sincos_cfg,
+        &[
+            Arg::P(at(Slot::Sn)),
+            Arg::P(at(Slot::Cs)),
+            Arg::L((b * s.t * s.nh * s.na) as i64),
+        ],
     );
     let state_in = [
         Arg::P(at(Slot::Contrib)),

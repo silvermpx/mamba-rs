@@ -25,7 +25,12 @@
 //!   without packed sequences, at ranks up to 16,
 //! - the chunked backward's angle walk, a batch of tokens staged at a time,
 //!   against the walk as it was released, a token at a time (frozen in
-//!   `fixtures/m3m_angles_reference.cu`).
+//!   `fixtures/m3m_angles_reference.cu`),
+//! - the chunked path's step scalars and angles, split over tiles of tokens,
+//!   a thread per angle chain and a thread per sine, against the one block
+//!   per head that walked them as released (frozen in
+//!   `fixtures/m3m_prep_reference.cu`), with increments that wrap within one
+//!   period, past it and below zero.
 //!
 //! Each pair runs on shapes both routes serve, at a compiled rank and a
 //! runtime one, in f32, bf16 and f16.
@@ -47,8 +52,9 @@ use mamba_rs::gpu::launch::{y_runs, yz_runs};
 use mamba_rs::mamba3_mimo::gpu::kernels::{
     Mamba3MimoKernels, PAIRS_THREADS_NARROW, RELEASED_CHUNK, ScanBwdGlobalGeom, ScanGeom,
     TermsPlan, angle_walk_smem_bytes, chunk_scan_tiles_cfg, chunked_geom, inter_tiles_bytes,
-    inter_tiles_geom, pairs_dk_bytes, pairs_dq_bytes, pairs_threads, scan_bwd_record_floats,
-    scan_bwd_smem_bytes, scan_bwd_threads, scan_smem_bytes, terms_sliced_bytes, terms_whole_bytes,
+    inter_tiles_geom, pairs_dk_bytes, pairs_dq_bytes, pairs_threads, prep_cfgs,
+    scan_bwd_record_floats, scan_bwd_smem_bytes, scan_bwd_threads, scan_smem_bytes,
+    terms_sliced_bytes, terms_whole_bytes,
 };
 
 const DTYPES: [WeightDtype; 3] = [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16];
@@ -597,6 +603,7 @@ enum Arg {
     P(u64),
     L(i64),
     I(i32),
+    F(f32),
 }
 
 fn launch(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg]) {
@@ -610,6 +617,9 @@ fn launch(ctx: &GpuCtx, f: &CudaFunction, cfg: LaunchConfig, args: &[Arg]) {
                 b.arg(v);
             }
             Arg::I(v) => {
+                b.arg(v);
+            }
+            Arg::F(v) => {
                 b.arg(v);
             }
         }
@@ -1894,4 +1904,182 @@ fn mimo_angle_walk_keeps_the_token_at_a_time_bits() {
         }
     }
     eprintln!("m3mb_angles: the token-at-a-time walk's bits on {cases} cases");
+}
+
+/// The chunked path's step scalars and angles split over three launches
+/// (the scalars, running sums and increments over tiles of tokens, a thread
+/// per angle's wrap chain, a thread per sine and cosine) give the bits of
+/// the one block per (sequence, head) that walked them as released: every
+/// coefficient, sine, cosine, lead term and carried angle, in f32, bf16 and
+/// f16, at chunks of 4, 16 and 64 tokens, at windows that are and are not
+/// whole tiles and whole batches of a chain, with one sequence a row and
+/// with rows packing several, and with increments that stay inside a
+/// period, wrap within one, wrap past several and fall below zero.
+#[test]
+fn mimo_prep_split_keeps_the_released_bits() {
+    let dev = GpuDevice::new(0).unwrap();
+    let ctx = GpuCtx::new(&dev).unwrap();
+    let mut cases = 0;
+    for chunk in [4usize, 16, 64] {
+        let k =
+            Mamba3MimoKernels::compile_with_chunk(dev.context(), arch::arch0(), 4, chunk).unwrap();
+        let frozen = frozen_module(
+            dev.context(),
+            arch::arch0(),
+            Some(64),
+            &format!(
+                "#define M3M_CHUNK {chunk}\n{}",
+                include_str!("fixtures/m3m_prep_reference.cu")
+            ),
+        );
+        for (b, seq, nh, na, packed, spread) in [
+            (1usize, 1usize, 1usize, 1usize, false, 1.0f32),
+            (2, 31, 2, 3, false, 2.0),
+            (2, 64, 3, 7, true, 4.0),
+            (1, 65, 2, 32, false, 8.0),
+            (2, 97, 1, 33, true, 3.0),
+            (1, 300, 3, 16, true, 12.0),
+            (2, 129, 2, 64, false, 0.5),
+        ] {
+            let heads = 5usize;
+            let ang_col = heads + 3 * nh;
+            let ld_proj = ang_col + na + 3;
+            let rows = b * seq;
+            // The dt column spreads to `spread` around a bias of -1, so dt
+            // runs from about 0.01 to the spread and the increments
+            // tanh(raw) pi dt reach past 4 pi either way.
+            let mut raw = det(rows * ld_proj, 0xB401 + seq as u64, 1.0);
+            for r in 0..rows {
+                for h in 0..nh {
+                    raw[r * ld_proj + heads + h] *= spread;
+                }
+                for a in 0..na {
+                    raw[r * ld_proj + ang_col + a] *= 3.0;
+                }
+            }
+            let dt_bias = f32_buf(
+                &ctx,
+                &det(nh, 0xB402, 1.0)
+                    .iter()
+                    .map(|x| x - 1.0)
+                    .collect::<Vec<_>>(),
+            );
+            let mut ang0: Vec<f32> = det(b * nh * na, 0xB403, std::f32::consts::PI)
+                .iter()
+                .map(|x| x + std::f32::consts::PI)
+                .collect();
+            ang0[0] = 0.0;
+            if ang0.len() > 1 {
+                ang0[1] = 6.283_185_5;
+            }
+            // Sequences of 7 tokens a row, their ids as the kernels read them.
+            let ids: Vec<f32> = (0..rows)
+                .map(|i| f32::from_bits(((i % seq) / 7) as u32))
+                .collect();
+            let ids = f32_buf(&ctx, &ids);
+            let seq_idx = if packed { ids.cached_ptr() } else { 0 };
+            for dtype in DTYPES {
+                let proj = typed_buf(&ctx, &raw, dtype);
+                let fresh = |poison: f32| {
+                    [
+                        f32_buf(&ctx, &vec![poison; rows * nh * 4]),
+                        f32_buf(&ctx, &vec![poison; rows * nh * na]),
+                        f32_buf(&ctx, &vec![poison; rows * nh * na]),
+                        f32_buf(&ctx, &vec![poison; b * nh]),
+                        f32_buf(&ctx, &ang0),
+                    ]
+                };
+                let suffix = match dtype {
+                    WeightDtype::Bf16 => "_bf16",
+                    WeightDtype::F16 => "_f16",
+                    _ => "",
+                };
+                let released = frozen
+                    .load_function(&format!("m3m_prep_reference{suffix}"))
+                    .unwrap();
+                let want = fresh(8192.0);
+                let [coef, sn, cs, e0, ang] = &want;
+                launch_runs(
+                    &ctx,
+                    &released,
+                    cfg((b, nh, 1), 512, 0),
+                    &[
+                        Arg::P(coef.cached_ptr()),
+                        Arg::P(sn.cached_ptr()),
+                        Arg::P(cs.cached_ptr()),
+                        Arg::P(e0.cached_ptr()),
+                        Arg::P(ang.cached_ptr()),
+                        Arg::P(proj.cached_ptr()),
+                        Arg::L(ld_proj as i64),
+                        Arg::P(dt_bias.cached_ptr()),
+                        Arg::I(seq as i32),
+                        Arg::I(nh as i32),
+                        Arg::I(heads as i32),
+                        Arg::I(ang_col as i32),
+                        Arg::I(na as i32),
+                        Arg::F(1e-4),
+                    ],
+                    &[Arg::P(seq_idx)],
+                );
+                let got = fresh(-8192.0);
+                let [coef, sn, cs, e0, ang] = &got;
+                let [tok_cfg, chain_cfg, sincos_cfg] = prep_cfgs(b, seq, nh, na);
+                launch_runs(
+                    &ctx,
+                    k.chunk_prep_tok.get(dtype),
+                    tok_cfg,
+                    &[
+                        Arg::P(coef.cached_ptr()),
+                        Arg::P(sn.cached_ptr()),
+                        Arg::P(e0.cached_ptr()),
+                        Arg::P(proj.cached_ptr()),
+                        Arg::L(ld_proj as i64),
+                        Arg::P(dt_bias.cached_ptr()),
+                        Arg::I(seq as i32),
+                        Arg::I(nh as i32),
+                        Arg::I(heads as i32),
+                        Arg::I(ang_col as i32),
+                        Arg::I(na as i32),
+                        Arg::F(1e-4),
+                    ],
+                    &[Arg::P(seq_idx)],
+                );
+                launch(
+                    &ctx,
+                    &k.chunk_prep_chain,
+                    chain_cfg,
+                    &[
+                        Arg::P(sn.cached_ptr()),
+                        Arg::P(ang.cached_ptr()),
+                        Arg::I(seq as i32),
+                        Arg::I(nh as i32),
+                        Arg::I(na as i32),
+                        Arg::L((b * nh * na) as i64),
+                        Arg::P(seq_idx),
+                    ],
+                );
+                launch(
+                    &ctx,
+                    &k.chunk_prep_sincos,
+                    sincos_cfg,
+                    &[
+                        Arg::P(sn.cached_ptr()),
+                        Arg::P(cs.cached_ptr()),
+                        Arg::L((rows * nh * na) as i64),
+                    ],
+                );
+                let label = format!(
+                    "{dtype:?} chunk {chunk} B {b} T {seq} nh {nh} na {na} packed {packed}"
+                );
+                for (name, (w, g)) in ["coef", "sin", "cos", "e0", "angle"]
+                    .iter()
+                    .zip(want.iter().zip(got.iter()))
+                {
+                    assert_eq!(bits_f32(&ctx, w), bits_f32(&ctx, g), "{label}: {name}");
+                }
+                cases += 1;
+            }
+        }
+    }
+    eprintln!("m3m_prep: the released bits on {cases} split cases");
 }

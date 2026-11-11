@@ -23,6 +23,16 @@
   of 768, heads of 64 x 128) a decode step is 8 to 10 percent faster at
   batch 1 and 5 to 7 percent at batch 16, in f32, tf32, bf16 and f16.
   Bits unchanged.
+- Mamba-3 MIMO prompts: the chunked path's step scalars and angles run as
+  three kernels spread over the card (the scalars and angle increments
+  over tiles of tokens, a thread per angle's wrap chain, a thread per
+  sine) instead of one block per head, and the wrap of an angle that
+  passes 2 pi within one period takes an exact short path instead of the
+  double division. One block per head had walked each head's angle chains
+  in a single warp while the rest of the block waited, and the division
+  ran on a sixth of the warp's steps. On an RTX 6000 Ada (4 layers of 768,
+  heads of 64 x 128, rank 4) a 4096-token prompt is 6 to 9 percent faster
+  in f32, tf32, bf16 and f16. Bits unchanged.
 
 ## 0.8.3 (2026-11-09)
 

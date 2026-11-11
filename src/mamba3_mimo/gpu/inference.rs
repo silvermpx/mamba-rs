@@ -14,7 +14,8 @@ use crate::bidi::{mlps_after, opens_pair, reads_reversed};
 use crate::gpu::bidi::{WindowRows, reverse_rows, zero_bytes};
 
 use super::kernels::{
-    ChunkedGeom, Mamba3MimoKernels, ScanGeom, chunk_scan_tiles_cfg, chunked_geom, scan_geom,
+    ChunkedGeom, Mamba3MimoKernels, ScanGeom, chunk_scan_tiles_cfg, chunked_geom, prep_cfgs,
+    scan_geom,
 };
 use crate::config::ScanMode;
 use crate::gpu::blas::{TypedPtr, gpu_gemm_f32_forward_ptrs, gpu_gemm_typed_forward_raw};
@@ -1201,22 +1202,15 @@ pub(crate) fn launch_chunked_scan(
     let a_floor = c.a_floor;
     let err = |what: &'static str| move |e| format!("MIMO chunked {what} L{l}: {e:?}");
     {
-        let dtb = dt_bias;
-        let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (b as u32, nh as u32, 1),
-            block_dim: (512, 1, 1),
-            shared_mem_bytes: 0,
-        };
-        for (y_first, cfg) in y_runs(cfg) {
-            let mut bld = stream.launch_builder(x.kernels.chunk_prep.get(x.act));
+        let [tok_cfg, chain_cfg, sincos_cfg] = prep_cfgs(b, t_len, nh, na);
+        for (y_first, cfg) in y_runs(tok_cfg) {
+            let mut bld = stream.launch_builder(x.kernels.chunk_prep_tok.get(x.act));
             bld.arg(&coef);
             bld.arg(&sn);
-            bld.arg(&cs);
             bld.arg(&e0);
-            bld.arg(&ang);
             bld.arg(&proj);
             bld.arg(&ld_proj);
-            bld.arg(&dtb);
+            bld.arg(&dt_bias);
             bld.arg(&seq_i);
             bld.arg(&nh_i);
             bld.arg(&heads_i);
@@ -1227,6 +1221,22 @@ pub(crate) fn launch_chunked_scan(
             bld.arg(&seq_idx);
             unsafe { bld.launch(cfg) }.map_err(err("prep"))?;
         }
+        let chains = (b * nh * na) as i64;
+        let mut bld = stream.launch_builder(&x.kernels.chunk_prep_chain);
+        bld.arg(&sn);
+        bld.arg(&ang);
+        bld.arg(&seq_i);
+        bld.arg(&nh_i);
+        bld.arg(&na_i);
+        bld.arg(&chains);
+        bld.arg(&seq_idx);
+        unsafe { bld.launch(chain_cfg) }.map_err(err("angle chains"))?;
+        let values = (b * t_len * nh * na) as i64;
+        let mut bld = stream.launch_builder(&x.kernels.chunk_prep_sincos);
+        bld.arg(&sn);
+        bld.arg(&cs);
+        bld.arg(&values);
+        unsafe { bld.launch(sincos_cfg) }.map_err(err("angle sines"))?;
     }
     launch_chunk_entries(x, ptrs, geom, (b, t_len), l)?;
     if geom.scan_tiles.0 > 0 {

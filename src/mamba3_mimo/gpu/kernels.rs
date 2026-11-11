@@ -22,9 +22,13 @@ pub struct Mamba3MimoKernels {
     pub bc_norm: TypedKernel,
     /// The scan of every head over a window (decode is the window of one).
     pub scan: TypedKernel,
-    /// The chunked path: step scalars and angles, each chunk's state, the
-    /// state passing, the outputs, the carried keys and input.
-    pub chunk_prep: TypedKernel,
+    /// The chunked path: step scalars and angles (the scalars and
+    /// increments over tiles of tokens, the angles' wrap chains, their
+    /// sines and cosines; launched at [`prep_cfgs`]), each chunk's
+    /// state, the state passing, the outputs, the carried keys and input.
+    pub chunk_prep_tok: TypedKernel,
+    pub chunk_prep_chain: CudaFunction,
+    pub chunk_prep_sincos: CudaFunction,
     pub chunk_state: TypedKernel,
     pub chunk_state_tiles: TypedKernel,
     pub state_pass: CudaFunction,
@@ -865,6 +869,45 @@ pub fn chunk_scan_tiles_cfg(
     }
 }
 
+/// The tokens a block of `m3m_prep_tok` takes (`M3M_PREP_TILE` in
+/// `mamba3_mimo_chunked.cu`), a multiple of every chunk length.
+pub const PREP_TILE: usize = 64;
+
+/// The blocks `m3m_prep_sincos` strides over at most, a fixed cap so the
+/// grid depends on the shape alone.
+const PREP_SINCOS_BLOCKS: usize = 1 << 16;
+
+/// The launches of the chunked path's step scalars and angles for `b` rows
+/// of `seq` tokens, `nh` heads and `na` angles, in order: `m3m_prep_tok`
+/// over tiles of [`PREP_TILE`] tokens of each row, the heads on the y axis
+/// (launched in `y_runs`); `m3m_prep_chain`, a thread per (row, head,
+/// angle) chain; `m3m_prep_sincos`, striding over every angle of the
+/// window.
+pub fn prep_cfgs(b: usize, seq: usize, nh: usize, na: usize) -> [LaunchConfig; 3] {
+    let values = b * seq * nh * na;
+    [
+        LaunchConfig {
+            grid_dim: ((b * seq.div_ceil(PREP_TILE)) as u32, nh as u32, 1),
+            block_dim: (128, 1, 1),
+            shared_mem_bytes: 0,
+        },
+        LaunchConfig {
+            grid_dim: ((b * nh * na).div_ceil(32).max(1) as u32, 1, 1),
+            block_dim: (32, 1, 1),
+            shared_mem_bytes: 0,
+        },
+        LaunchConfig {
+            grid_dim: (
+                values.div_ceil(256).clamp(1, PREP_SINCOS_BLOCKS) as u32,
+                1,
+                1,
+            ),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        },
+    ]
+}
+
 /// The tokens the chunked backward's angle walk stages at a time
 /// (`M3MB_ANG_STEPS` in `mamba3_mimo_chunked_bwd.cu`).
 pub const ANGLE_WALK_STEPS: usize = 16;
@@ -1104,7 +1147,9 @@ impl Mamba3MimoKernels {
         let mut kernels = Self {
             bc_norm: typed("mimo_bc_norm")?,
             scan,
-            chunk_prep: typed("m3m_prep")?,
+            chunk_prep_tok: typed("m3m_prep_tok")?,
+            chunk_prep_chain: get("m3m_prep_chain")?,
+            chunk_prep_sincos: get("m3m_prep_sincos")?,
             chunk_state,
             chunk_state_tiles,
             state_pass: get("m3m_state_pass")?,
