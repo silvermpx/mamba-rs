@@ -6,7 +6,8 @@
 //! mamba-130m. Each family runs through its `GpuBackbone` and `GpuTrainer`:
 //! decode steps at batch 1 and 16 through a captured graph, a prompt of 4096
 //! tokens in one pass from host rows, and a full training step (forward,
-//! backward and the AdamW update) at batch 4 by 512 tokens.
+//! backward and the AdamW update) at batch 4 by 512 tokens, in each of the
+//! four storages.
 //!
 //! Run: `cargo bench --bench family_compare_bench --features cuda`
 
@@ -208,7 +209,12 @@ fn main() {
         "--- four families, {LAYERS} layers of d_model {D_MODEL}; train B={} T={}; prompt T={PROMPT} ---",
         TRAIN.0, TRAIN.1
     );
-    for dtype in [WeightDtype::F32, WeightDtype::Bf16] {
+    for dtype in [
+        WeightDtype::F32,
+        WeightDtype::Tf32,
+        WeightDtype::Bf16,
+        WeightDtype::F16,
+    ] {
         print("M1", dtype, &mamba1(dtype));
         print("M2", dtype, &mamba2(dtype));
         print("SISO", dtype, &siso(dtype));
