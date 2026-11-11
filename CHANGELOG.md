@@ -4,9 +4,8 @@
 
 ### Performance
 
-- Against 0.8.3 on an RTX 6000 Ada: Mamba-3 MIMO prompts 1.2x (f32) to
-  1.95x (bf16) as fast and its training steps 1.15x to 1.33x; Mamba-3 SISO
-  decode at batch 16 1.2x (f32, tf32) to 1.77x (bf16, f16); Mamba and
+- Against 0.8.3: Mamba-3 MIMO prompts up to 1.95x as fast and its training
+  steps up to 1.33x; Mamba-3 SISO decode at batch 16 up to 1.77x; Mamba and
   Mamba-2 decode 5 to 14 percent faster, Mamba training 5 to 11 percent.
   Tables in [docs/family-benchmarks.md](docs/family-benchmarks.md).
 
