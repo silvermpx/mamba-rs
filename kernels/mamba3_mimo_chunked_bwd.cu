@@ -2560,23 +2560,31 @@ __device__ __forceinline__ void m3mb_chunk_terms_body(
                 if (n + u < ds) at[p * M3MB_TERMS_NS + n + u] = src[(long long)p * ds + n + u];
         }
     };
-    // A [rows][P] quantity into the transposed tile bt[p][row]: a lane takes a
-    // row of four and a channel of eight, so the stores fall in distinct banks.
-    auto stage_rows_t = [&](auto value) {
-        const int rq = M3MB_TERMS_ROWS / 4, po = (hd + 7) / 8;
-        for (int it = warp; it < rq * po; it += nw) {
-            const int rw = 4 * (it % rq) + (lane & 3);
-            const int p = 8 * (it / rq) + (lane >> 2);
-            if (p < hd) bt[p * M3MB_TERMS_RS + rw] = rw < rows ? value(rw, p) : 0.0f;
-        }
-    };
     auto out_row = [&](int rw) {
         const int t = rw / RK;
         return ((row0 + t) * nh + h) * RK + (rw - t * RK);
     };
+    // A [rows][P] quantity into the transposed tile bt[p][row], dy or (with
+    // `u`) the rank inputs u = Psi_r x: a lane takes a row of four and a
+    // channel of eight, so the stores fall in distinct banks. No lambda takes
+    // a generic parameter: NVRTC 12.8 and 13.0 refuse those in a JIT program.
+    const T* x_rows = proj + row0 * ld_proj + di + (long long)h * hd;
+    auto row_value = [&](bool u, int rw, int p) -> float {
+        if (!u) return dy[out_row(rw) * hd + p];
+        const int t = rw / RK, r = rw - t * RK;
+        return __fmul_rn(mimo_x[((long long)h * RK + r) * hd + p], to_f(x_rows[t * ld_proj + p]));
+    };
+    auto stage_rows_t = [&](bool u) {
+        const int rq = M3MB_TERMS_ROWS / 4, po = (hd + 7) / 8;
+        for (int it = warp; it < rq * po; it += nw) {
+            const int rw = 4 * (it % rq) + (lane & 3);
+            const int p = 8 * (it / rq) + (lane >> 2);
+            if (p < hd) bt[p * M3MB_TERMS_RS + rw] = rw < rows ? row_value(u, rw, p) : 0.0f;
+        }
+    };
     // Phase I: the inter-chunk part of dq and I_t.
     stage_pn(enter + (bc * nh + h) * pn);
-    stage_rows_t([&](int rw, int p) { return dy[out_row(rw) * hd + p]; });
+    stage_rows_t(false);
     for (int t = tid; t < lc; t += blockDim.x) {
         const float* cf = coef + ((row0 + t) * nh + h) * 4;
         ef[t] = mimo_exp(cf[3]);
@@ -2671,11 +2679,7 @@ __device__ __forceinline__ void m3mb_chunk_terms_body(
     }
     // Phase II: the state terms from the chunk's passed gradient.
     stage_pn(dst + (bc * nh + h) * pn);
-    const T* x_rows = proj + row0 * ld_proj + di + (long long)h * hd;
-    stage_rows_t([&](int rw, int p) {
-        const int t = rw / RK, r = rw - t * RK;
-        return __fmul_rn(mimo_x[((long long)h * RK + r) * hd + p], to_f(x_rows[t * ld_proj + p]));
-    });
+    stage_rows_t(true);
     {
         const int no = (ds + 7) / 8, rq = (rows + 3) / 4;
         for (int it0 = warp; it0 < rq * no; it0 += 4 * nw) {
