@@ -4,6 +4,14 @@
 
 ### Performance
 
+- Compared with 0.8.3 on an RTX 6000 Ada (the family bench, 4 layers of
+  768, medians of four runs a side): Mamba-3 MIMO prompts 1.2 times as
+  fast in f32 and 1.8 to 1.9 times in tf32, bf16 and f16, and its
+  training steps 1.15 to 1.34 times; Mamba-3 SISO decode at batch 16 1.22
+  times as fast in f32 and tf32 and 1.74 to 1.77 times in bf16 and f16,
+  and its prompts 4 to 12 percent faster; Mamba and Mamba-2 decode 5 to
+  14 percent faster, and Mamba training steps 4 to 10 percent. See the
+  [family benchmarks](docs/family-benchmarks.md).
 - Mamba-3 SISO decode at headdim 64 and wider: where many heads share the
   card, the step stages each head's state in shared memory and reads and
   writes it in contiguous runs instead of one row per thread. A batch of
@@ -81,6 +89,11 @@
   TF32, bf16 and f16 and 7 percent in f32, and a training step 18 to 19
   percent faster in TF32, bf16 and f16 and 10 percent in f32. Bits
   unchanged.
+
+### Changed
+
+- `benches/family_compare_bench.rs` times every family in f32, tf32, bf16
+  and f16; it timed f32 and bf16.
 
 ## 0.8.3 (2026-11-09)
 

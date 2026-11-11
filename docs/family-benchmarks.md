@@ -7,11 +7,64 @@ released mamba-130m. A decode step runs through a captured graph at batch 1
 and 16, the prompt is 4096 tokens in one pass from host rows, and a
 training step is the forward, the backward and the AdamW update at batch 4
 by 512 tokens. The default `Deterministic` GEMM mode serves every row.
-The instrument is `benches/family_compare_bench.rs`:
+The instrument is `benches/family_compare_bench.rs`, which times every
+family in f32, tf32, bf16 and f16:
 
 ```text
 cargo bench --features cuda --bench family_compare_bench
 ```
+
+## 0.8.4 against 0.8.3, RTX 6000 Ada
+
+Measured on November 11, 2026 on an RTX 6000 Ada Generation (142 SMs, 300 W
+power limit, driver 615.71.10, CUDA 13.2 / NVRTC 13.2, Rust 1.99.1, release
+build, Intel Xeon Gold 5412U host), with nothing else on the card. The two
+trees ran in turn, four runs each, and each cell is the median of its four
+runs. The changes behind the faster rows are in the
+[changelog](../CHANGELOG.md).
+
+f32 storage, 0.8.3 -> 0.8.4 (speedup):
+
+| family | decode, batch 1 | decode, batch 16 | prompt of 4096 | training step |
+|---|---:|---:|---:|---:|
+| Mamba | 136 -> 123 us (1.11x) | 178 -> 156 us (1.13x) | 0.62 -> 0.62 M tokens/s (1.00x) | 13.86 -> 13.27 ms (1.04x) |
+| Mamba-2 | 134 -> 121 us (1.10x) | 309 -> 294 us (1.05x) | 0.53 -> 0.54 M tokens/s (1.02x) | 14.33 -> 14.50 ms (0.99x) |
+| Mamba-3 SISO | 157 -> 156 us (1.00x) | 505 -> 414 us (1.22x) | 0.35 -> 0.37 M tokens/s (1.04x) | 16.77 -> 16.52 ms (1.02x) |
+| Mamba-3 MIMO | 127 -> 128 us (0.99x) | 348 -> 351 us (0.99x) | 0.20 -> 0.25 M tokens/s (1.21x) | 49.01 -> 42.80 ms (1.15x) |
+
+tf32 storage, 0.8.3 -> 0.8.4 (speedup):
+
+| family | decode, batch 1 | decode, batch 16 | prompt of 4096 | training step |
+|---|---:|---:|---:|---:|
+| Mamba | 150 -> 139 us (1.08x) | 189 -> 169 us (1.12x) | 0.98 -> 0.98 M tokens/s (1.01x) | 10.45 -> 9.74 ms (1.07x) |
+| Mamba-2 | 134 -> 123 us (1.09x) | 302 -> 287 us (1.05x) | 0.82 -> 0.77 M tokens/s (0.94x) | 10.88 -> 10.75 ms (1.01x) |
+| Mamba-3 SISO | 166 -> 163 us (1.02x) | 507 -> 415 us (1.22x) | 0.44 -> 0.47 M tokens/s (1.06x) | 13.25 -> 12.88 ms (1.03x) |
+| Mamba-3 MIMO | 140 -> 141 us (1.00x) | 344 -> 348 us (0.99x) | 0.24 -> 0.42 M tokens/s (1.78x) | 40.43 -> 31.45 ms (1.29x) |
+
+bf16 storage, 0.8.3 -> 0.8.4 (speedup):
+
+| family | decode, batch 1 | decode, batch 16 | prompt of 4096 | training step |
+|---|---:|---:|---:|---:|
+| Mamba | 156 -> 142 us (1.10x) | 196 -> 172 us (1.14x) | 1.24 -> 1.24 M tokens/s (0.99x) | 7.83 -> 7.11 ms (1.10x) |
+| Mamba-2 | 151 -> 139 us (1.09x) | 198 -> 188 us (1.06x) | 0.92 -> 0.94 M tokens/s (1.02x) | 9.70 -> 9.66 ms (1.00x) |
+| Mamba-3 SISO | 155 -> 155 us (1.00x) | 438 -> 248 us (1.77x) | 0.60 -> 0.66 M tokens/s (1.10x) | 10.13 -> 9.91 ms (1.02x) |
+| Mamba-3 MIMO | 145 -> 145 us (1.00x) | 222 -> 223 us (1.00x) | 0.25 -> 0.48 M tokens/s (1.94x) | 38.66 -> 29.24 ms (1.32x) |
+
+f16 storage, 0.8.3 -> 0.8.4 (speedup):
+
+| family | decode, batch 1 | decode, batch 16 | prompt of 4096 | training step |
+|---|---:|---:|---:|---:|
+| Mamba | 156 -> 143 us (1.10x) | 208 -> 184 us (1.13x) | 1.24 -> 1.23 M tokens/s (0.99x) | 8.62 -> 7.83 ms (1.10x) |
+| Mamba-2 | 154 -> 139 us (1.11x) | 201 -> 188 us (1.07x) | 0.93 -> 0.93 M tokens/s (1.00x) | 9.84 -> 9.82 ms (1.00x) |
+| Mamba-3 SISO | 156 -> 156 us (1.00x) | 450 -> 259 us (1.74x) | 0.58 -> 0.65 M tokens/s (1.12x) | 10.16 -> 9.55 ms (1.06x) |
+| Mamba-3 MIMO | 146 -> 145 us (1.01x) | 225 -> 225 us (1.00x) | 0.25 -> 0.47 M tokens/s (1.93x) | 38.21 -> 28.48 ms (1.34x) |
+
+Mamba-2's prompt and training step run the kernels of 0.8.3, and its
+prompt moves by several percent between runs of one tree: the same two
+Mamba-2 trees gave 1.00x earlier the same day for the tf32 prompt that
+reads 0.94x above. The Mamba-3 MIMO decode in f32 and tf32 ran about 1
+percent slower in both comparisons; its decode kernels keep the registers
+of 0.8.3, and 0.8.3's angle wrap put back into them times the same.
 
 ## 0.8.2 against 0.8.1, summary
 

@@ -13,6 +13,11 @@ NVRTC, and cuBLAS only with the `cublas` feature.
 
 ## What's new in 0.8
 
+- **0.8.4: faster prompts, training and decode.** Against 0.8.3 on an
+  RTX 6000 Ada, Mamba-3 MIMO prompts run up to 1.9 times as fast and its
+  training steps up to 1.34 times, Mamba-3 SISO decodes a batch of 16 up
+  to 1.77 times as fast, and Mamba and Mamba-2 decode 5 to 14 percent
+  faster, in f32, tf32, bf16 and f16. See the [changelog](CHANGELOG.md).
 - **0.8.3: faster GEMMs on RTX 5090, RTX PRO 6000 and A100.** Their f32
   and TF32 GEMM tables are refit with the bits of 0.8.2, a GEMM call on a
   shape it has already run costs less host time, and Mamba-3 MIMO builds
@@ -395,10 +400,11 @@ f32 storage:
 | Mamba-3 SISO | 133 us | 291 us | 0.56 M tokens/s | 10.80 ms |
 | Mamba-3 MIMO | 108 us | 227 us | 0.28 M tokens/s | 32.59 ms |
 
-The comparison with 0.8.1 on an RTX 6000 Ada, an RTX 5090 and an A100, the
-MIMO chunk lengths, the MIMO pair terms on the tensor cores and the protocol
-are on the [family page](docs/family-benchmarks.md). The Mamba and Mamba-3
-benches of the same cards are on the [Mamba](docs/mamba1-benchmarks.md) and
+The comparison of 0.8.4 with 0.8.3 on an RTX 6000 Ada, that of 0.8.2 with
+0.8.1 on an RTX 6000 Ada, an RTX 5090 and an A100, the MIMO chunk lengths,
+the MIMO pair terms on the tensor cores and the protocol are on the
+[family page](docs/family-benchmarks.md). The Mamba and Mamba-3 benches of
+the same cards are on the [Mamba](docs/mamba1-benchmarks.md) and
 [Mamba-3 SISO](docs/mamba3-benchmarks.md) pages.
 
 ### GEMM kernels
