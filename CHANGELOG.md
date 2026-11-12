@@ -13,8 +13,9 @@
 
 - Mamba-3 MIMO in TF32, bf16 and f16 runs the chunked scan on the tensor
   cores. f16 takes three TF32 passes and keeps near-f32 accuracy. These
-  outputs move within TF32 rounding. Every other output keeps the bits of
-  0.8.3.
+  outputs differ from 0.8.3 within TF32 rounding and stay deterministic:
+  the same bits on every run and at any batch size. Every other output
+  keeps the bits of 0.8.3.
 - `benches/family_compare_bench.rs` times all four storages.
 
 ## 0.8.3 (2026-11-09)
