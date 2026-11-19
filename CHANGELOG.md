@@ -1,21 +1,36 @@
 # Changelog
 
-## Unreleased
+## 0.8.5 (2026-11-19)
 
 ### Fixed
 
-- Mamba-1 keeps the scan readout in f32 through the output gate. A finite
-  gated f16 value now survives an ungated value outside the f16 range. The
-  CPU parallel prefill also honors the caller's entering recurrent state.
-- Mamba-2 and both Mamba-3 trainers bind saved activations to their sequence
-  boundaries, restore packed boundaries from checkpoints, and reject stale
-  optimizer steps. Invalid checkpoints preserve the current training window.
-  Existing dense checkpoint files still load. Rust code constructing a dense
-  `TrainerState` literal supplies `packing: None`.
-- The chunked scans preserve local decay after the incoming state underflows.
-  The SISO backward also preserves small gradients when a later pair is large.
-  Bidirectional MIMO accepts complete one-token prompts and rejects streaming
-  decode, which lacks future context.
+- Mamba-1 applies the output gate before rounding to f16. A scan value
+  above the f16 range can now produce a finite output just as it does in
+  single-token decode. Parallel CPU prefill keeps the supplied recurrent state.
+- Mamba-2 and both Mamba-3 trainers keep packed sequences separate in
+  backward and across checkpoint reloads. A second optimizer step on stale
+  activations is rejected. Loading an invalid checkpoint preserves the
+  training window already in progress.
+- Mamba-2 and Mamba-3 chunked scans preserve the influence of later inputs
+  when a large decay erases the incoming state. Mamba-3 SISO backward also
+  keeps small gradient contributions when a later term is large.
+- Bidirectional Mamba-3 MIMO accepts a complete one-token prompt. Streaming
+  decode now returns an error because it would need future tokens.
+- All four models check the input width and bias for an identity projection.
+  The Mamba-2 Hugging Face loader rejects unsupported activation functions.
+
+### Performance
+
+- Against the first corrected Mamba-3 SISO backward, the CUDA kernel for
+  32 channels and 32 states took 8% less time on ordinary inputs and 20%
+  less after a large initial decay. The complete two-layer TF32 training
+  step took 0.7% less time. The full comparison with 0.8.4 is pending.
+  [Benchmark results](docs/family-benchmarks.md).
+
+### Upgrading
+
+- Existing checkpoint files still load. Code that constructs an unpacked
+  `TrainerState` with a Rust struct literal must add `packing: None`.
 
 ## 0.8.4 (2026-11-12)
 
