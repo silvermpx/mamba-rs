@@ -178,9 +178,9 @@ pub fn forward_mamba_target_step(
             dr,
             di,
         );
-        for d in 0..di {
-            let raw = scratch.delta[d];
-            scratch.delta[d] = if raw > 20.0 {
+        for delta in &mut scratch.delta[..di] {
+            let raw = *delta;
+            *delta = if raw > 20.0 {
                 raw
             } else {
                 fast_exp_scalar(raw).ln_1p()
@@ -446,20 +446,20 @@ pub fn forward_mamba_target_sequence(
             // Conv1d with state carry
             {
                 let cs = &mut scratch.conv_states[conv_start..conv_start + conv_per_layer];
-                for d in 0..di {
+                for (d, x) in scratch.x[..di].iter_mut().enumerate() {
                     let base = d * dc;
                     // Shift + insert
                     for k in 0..dc - 1 {
                         cs[base + k] = cs[base + k + 1];
                     }
-                    cs[base + dc - 1] = scratch.x[d];
+                    cs[base + dc - 1] = *x;
                     // Dot product
                     let mut val = lw.conv1d_bias.get(d).copied().unwrap_or(0.0);
                     for k in 0..dc {
                         val += cs[base + k] * lw.conv1d_weight[base + k];
                     }
                     let sig = 1.0 / (1.0 + fast_exp_scalar(-val));
-                    scratch.x[d] = val * sig;
+                    *x = val * sig;
                 }
             }
 
@@ -485,9 +485,9 @@ pub fn forward_mamba_target_sequence(
                 dr,
                 di,
             );
-            for d in 0..di {
-                let raw = scratch.delta[d];
-                scratch.delta[d] = if raw > 20.0 {
+            for delta in &mut scratch.delta[..di] {
+                let raw = *delta;
+                *delta = if raw > 20.0 {
                     raw
                 } else {
                     fast_exp_scalar(raw).ln_1p()

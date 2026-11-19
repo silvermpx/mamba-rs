@@ -251,9 +251,9 @@ fn layer_step(
         (&lw.dt_proj_w, lp.map(|p| &p.dt_proj)),
         Some(&lw.dt_proj_b),
     );
-    for d in 0..d_inner {
-        let raw = scratch.delta[d];
-        scratch.delta[d] = if raw > 20.0 {
+    for delta in &mut scratch.delta[..d_inner] {
+        let raw = *delta;
+        *delta = if raw > 20.0 {
             raw
         } else {
             fast_exp_scalar(raw).ln_1p()

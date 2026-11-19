@@ -520,19 +520,17 @@ pub fn forward_mamba_backbone_batched(
         }
         return;
     }
-    for t in 0..seq_len {
-        let off = t * dm;
-        let mean_sq: f32 = temporal_flat[off..off + dm]
-            .iter()
-            .map(|v| v * v)
-            .sum::<f32>()
-            / dm as f32;
+    for (row, saved_rms) in temporal_flat[..seq_len * dm]
+        .chunks_exact_mut(dm)
+        .zip(&mut acts.norm_f_rms[..seq_len])
+    {
+        let mean_sq = row.iter().map(|v| v * v).sum::<f32>() / dm as f32;
         let rms = (mean_sq + dims.rms_norm_eps).sqrt();
-        acts.norm_f_rms[t] = rms;
+        *saved_rms = rms;
         let inv_rms = 1.0 / rms;
-        for d in 0..dm {
-            temporal_flat[off + d] = temporal_flat[off + d] * inv_rms * mamba_w.norm_f_weight[d];
+        for (value, &weight) in row.iter_mut().zip(&mamba_w.norm_f_weight[..dm]) {
+            *value = *value * inv_rms * weight;
         }
-        store(scratch.dtype, &mut temporal_flat[off..off + dm]);
+        store(scratch.dtype, row);
     }
 }

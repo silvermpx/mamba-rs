@@ -3,6 +3,11 @@ version = 2
 ignore = [
     # paste crate unmaintained — transitive dep via gemm. No security risk.
     "RUSTSEC-2024-0436",
+    # Only the optional Hugging Face CLI pulls these in through hf-xet.
+    # Both advisories concern maintenance. Remove each entry when hf-xet
+    # drops that dependency or RustSec withdraws its advisory.
+    { id = "RUSTSEC-2026-0542", reason = "hf-xet still uses humantime to parse durations" },
+    { id = "RUSTSEC-2026-0543", reason = "hf-xet still uses chrono for timestamps" },
 ]
 
 [licenses]

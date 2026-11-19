@@ -25,7 +25,7 @@ lint:
 	cargo run -q --locked -p xtask -- gate
 
 deny:
-	cargo deny check advisories bans sources
+	cargo deny --all-features check
 
 test:
 	cargo test --workspace --locked
