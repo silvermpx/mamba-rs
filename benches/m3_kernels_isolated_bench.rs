@@ -72,8 +72,26 @@ fn m3_kernels_isolated_bench() {
     let ks_f32 = upload_f32(&ctx, &det_rand(n_q, 0xA002));
     let v_f32 = upload_f32(&ctx, &det_rand(n_v, 0xA003));
     let do_f32 = upload_f32(&ctx, &det_rand(n_v, 0xA004));
-    let dcs_buf = upload_f32(&ctx, &det_rand(CB * n_chunks * CNH * CCS, 0xA005));
-    let dcs_sum_buf = upload_f32(&ctx, &det_rand(CB * n_chunks * CNH, 0xA006));
+    let mut prefixes = det_rand(CB * n_chunks * CNH * CCS, 0xA005);
+    let totals: Vec<_> = prefixes
+        .as_chunks_mut::<CCS>()
+        .0
+        .iter_mut()
+        .enumerate()
+        .map(|(row, tape)| {
+            let chunk = (row / CNH) % n_chunks;
+            let len = CCS.min(CT - chunk * CCS);
+            let mut sum = 0.0;
+            for step in &mut tape[..len] {
+                sum -= step.abs();
+                *step = sum;
+            }
+            tape[len..].fill(sum);
+            sum
+        })
+        .collect();
+    let dcs_buf = upload_f32(&ctx, &prefixes);
+    let dcs_sum_buf = upload_f32(&ctx, &totals);
     let qk_buf = upload_f32(&ctx, &det_rand(n_th, 0xA007));
     let ssm_buf = upload_f32(&ctx, &det_rand(CB * n_chunks * CNH * CHD * CDS, 0xA008));
     let d_buf = upload_f32(&ctx, &det_rand(CNH, 0xA009));
@@ -165,6 +183,7 @@ fn m3_kernels_isolated_bench() {
             bld.arg(&use_mats_i);
             bld.arg(&y_first);
             bld.arg(&z_first);
+            bld.arg(&0u64); // dense rows, no sequence IDs
             unsafe { bld.launch(cfg) }.unwrap();
         }
     });
@@ -209,6 +228,7 @@ fn m3_kernels_isolated_bench() {
             bld.arg(&use_mats_i);
             bld.arg(&y_first);
             bld.arg(&z_first);
+            bld.arg(&0u64);
             unsafe { bld.launch(cfg) }.unwrap();
         }
     });

@@ -14,6 +14,41 @@ family in f32, tf32, bf16 and f16:
 cargo bench --features cuda --bench family_compare_bench
 ```
 
+## Recurrent fixes on an A100, November 19, 2026
+
+The baseline was `e636375b`. Both builds used an A100 PCIe 40 GB, CUDA
+12.8 and driver 570.133.20. The complete training measurement used the
+public Mamba-3 SISO `step` with the deterministic GEMMs in TF32, including
+the host transfers, forward, backward and AdamW update. The model had two
+layers of width 128, expansion 4, head width 32, state size 32 and eight
+groups. Both builds started from seed 523 and received the same input and
+output gradients at batch 32 and sequence length 128.
+
+The isolated full-step comparison alternated which build went first over
+nine pairs of five updates after warmup. The median time went from 5.64 to
+5.73 ms. The median of the nine paired changes was +1.2%, with the middle
+half from −0.1% to +1.3%. Two earlier comparisons on the same instance,
+while other validation jobs were finishing, gave +1.3% and −2.1%.
+
+The table times individual production CUDA kernels on the idle card with
+CUDA events. Each reading is a median of eleven alternating pairs. The
+SISO backward used batch 32, 128 tokens, eight heads and chunks of 64. On
+the ordinary input each log decay was −0.125. The stress input started
+**every** chunk at −100,000,000 and then used −0.125. A zero incoming state
+still permits later inputs to influence the output.
+
+| Isolated operation | Baseline | Fixed | Paired change in time |
+|---|---:|---:|---:|
+| Mamba-3 SISO tiled backward, 32 channels × 24 states, f32 | 306.6 µs | 309.1 µs | +0.75% |
+| Mamba-3 SISO tiled backward, 32 channels × 32 states, f32 | 316.2 µs | 318.2 µs | +0.71% |
+| Same 32 × 32 backward, stress input | 317.1 µs | 392.9 µs | +24.0% |
+| Mamba-1 fused f16 decode kernel, batch 32, inner width 512, state size 32 | 14.93 µs | 14.86 µs | −0.47% |
+
+The stress baseline loses the later local decays. The optimized and the
+initial corrected backward agreed bit for bit on all six output tensors
+for the ordinary and stress inputs. The measurements cover this card and
+these shapes. The end-to-end trainer for an application has its own costs.
+
 ## 0.8.4 against 0.8.3, RTX 6000 Ada
 
 Measured on November 11, 2026 on an RTX 6000 Ada Generation (142 SMs, 300 W
