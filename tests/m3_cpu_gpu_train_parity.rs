@@ -44,6 +44,9 @@
 
 #![cfg(feature = "cuda")]
 
+#[path = "common/finite_pairs.rs"]
+mod tensor;
+
 #[path = "common/arch.rs"]
 mod arch;
 
@@ -263,7 +266,7 @@ fn cos_sim(a: &[f32], b: &[f32]) -> f32 {
 fn rel_l2(a: &[f32], b: &[f32]) -> f32 {
     let mut nd = 0.0f64;
     let mut na = 0.0f64;
-    for (&x, &y) in a.iter().zip(b.iter()) {
+    for (y, x) in tensor::pairs("relative L2", b, a) {
         nd += (x as f64 - y as f64) * (x as f64 - y as f64);
         na += x as f64 * x as f64;
     }

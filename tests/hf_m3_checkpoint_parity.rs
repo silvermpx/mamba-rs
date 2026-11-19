@@ -18,6 +18,10 @@
 //!       -- --ignored --nocapture
 #![cfg(feature = "hf")]
 
+#[path = "common/relative_peak.rs"]
+mod peak;
+use peak::relative_peak;
+
 use mamba_rs::hf::embed::lm_head_logits;
 use mamba_rs::hf::load_mamba3;
 use mamba_rs::mamba3_siso::cpu::dims::Mamba3Dims;
@@ -98,12 +102,8 @@ fn siso_187m_cpu_decode_matches_the_f64_oracle() {
         if t >= golden.last_rows_from {
             let r = t - golden.last_rows_from;
             let want = &golden.last_logits[r * vocab..(r + 1) * vocab];
-            let scale = want.iter().fold(0f64, |a, &w| a.max(w.abs()));
-            let diff = logits
-                .iter()
-                .zip(want)
-                .fold(0f64, |a, (&g, &w)| a.max((f64::from(g) - w).abs()));
-            worst_rel = worst_rel.max(diff / scale);
+            let error = relative_peak(&logits, want, 0.0);
+            worst_rel = worst_rel.max(error);
         }
     }
     eprintln!(
@@ -182,16 +182,9 @@ fn siso_187m_cpu_prefill_matches_the_f64_oracle() {
     );
     let r = last - golden.last_rows_from;
     let want = &golden.last_logits[r * vocab..(r + 1) * vocab];
-    let scale = want.iter().fold(0f64, |a, &w| a.max(w.abs()));
-    let diff = logits
-        .iter()
-        .zip(want)
-        .fold(0f64, |a, (&g, &w)| a.max((f64::from(g) - w).abs()));
-    eprintln!(
-        "siso-187m CPU prefill last row: max|dlogit|/max|logit| = {:.3e}",
-        diff / scale
-    );
-    assert!(diff / scale < 1e-4);
+    let error = relative_peak(&logits, want, 0.0);
+    eprintln!("siso-187m CPU prefill last row: max|dlogit|/max|logit| = {error:.3e}");
+    assert!(error < 1e-4);
     assert_eq!(argmax(&logits), golden.top_ids[last][0]);
 }
 
@@ -264,12 +257,8 @@ fn siso_187m_gpu_decode_matches_the_f64_oracle() {
         if t >= golden.last_rows_from {
             let r = t - golden.last_rows_from;
             let want = &golden.last_logits[r * vocab..(r + 1) * vocab];
-            let scale = want.iter().fold(0f64, |a, &w| a.max(w.abs()));
-            let diff = logits
-                .iter()
-                .zip(want)
-                .fold(0f64, |a, (&g, &w)| a.max((f64::from(g) - w).abs()));
-            worst = worst.max(diff / scale);
+            let error = relative_peak(&logits, want, 0.0);
+            worst = worst.max(error);
         }
     }
     eprintln!("siso-187m GPU f32 decode vs f64: max|dlogit|/max|logit| = {worst:.3e}");
@@ -366,16 +355,9 @@ fn siso_187m_gpu_prefill_then_decode_matches_the_f64_oracle() {
     );
     let r = t_len - 1 - golden.last_rows_from;
     let want = &golden.last_logits[r * vocab..(r + 1) * vocab];
-    let scale = want.iter().fold(0f64, |a, &w| a.max(w.abs()));
-    let diff = logits
-        .iter()
-        .zip(want)
-        .fold(0f64, |a, (&g, &w)| a.max((f64::from(g) - w).abs()));
-    eprintln!(
-        "siso-187m GPU prefill last row: max|dlogit|/max|logit| = {:.3e}",
-        diff / scale
-    );
-    assert!(diff / scale < GPU_REL_TOL);
+    let error = relative_peak(&logits, want, 0.0);
+    eprintln!("siso-187m GPU prefill last row: max|dlogit|/max|logit| = {error:.3e}");
+    assert!(error < GPU_REL_TOL);
     let mut next = argmax(&logits);
     for (i, &want) in golden.greedy.iter().enumerate() {
         if golden.greedy_margin[i] < GPU_MARGIN && next != want {

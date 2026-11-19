@@ -5,6 +5,10 @@
 //! skipped or misplaced MLP branch fails it.
 #![cfg(feature = "cuda")]
 
+#[path = "common/rel_l2.rs"]
+mod distance;
+use distance::rel_l2;
+
 use mamba_rs::gpu::buffers::GpuBuffer;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
@@ -26,15 +30,6 @@ fn det(n: usize, seed: u64, scale: f32) -> Vec<f32> {
             (((s & 0xFFFFFF) as f32 / 16777216.0) * 2.0 - 1.0) * scale
         })
         .collect()
-}
-
-fn rel_l2(got: &[f32], want: &[f32]) -> f64 {
-    let (mut num, mut den) = (0f64, 0f64);
-    for (&g, &w) in got.iter().zip(want) {
-        num += (f64::from(g) - f64::from(w)).powi(2);
-        den += f64::from(w).powi(2);
-    }
-    (num / den.max(1e-30)).sqrt()
 }
 
 // f32 GPU against the CPU: the sm_120 floor the chunked prefill parity

@@ -1,6 +1,10 @@
 //! Actual NVRTC Inference half pipeline admission, arithmetic and launch gates.
 #![cfg(feature = "cuda")]
 
+#[path = "common/rel_l2.rs"]
+mod distance;
+use distance::rel_l2;
+
 use cudarc::driver::{CudaGraph, sys};
 use mamba_rs::gpu::blas::TypedPtr;
 use mamba_rs::gpu::buffers::{GpuBuffer, GpuByteBuffer};
@@ -1701,15 +1705,6 @@ fn inference_sm89_cells_launch_on_their_measured_shapes() {
             })
             .collect()
     }
-    fn rel_l2(actual: &[f32], expected: &[f32]) -> f64 {
-        let (mut numerator, mut denominator) = (0.0f64, 0.0f64);
-        for (a, e) in actual.iter().zip(expected) {
-            numerator += (f64::from(*a) - f64::from(*e)).powi(2);
-            denominator += f64::from(*e).powi(2);
-        }
-        (numerator / denominator.max(1e-30)).sqrt()
-    }
-
     let device = GpuDevice::new(0).expect("CUDA device");
     let reference = GpuCtx::new(&device).expect("reference context");
     let ctx = GpuCtx::new(&device).expect("inference context");

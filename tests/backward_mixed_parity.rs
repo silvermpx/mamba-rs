@@ -13,6 +13,9 @@
 
 #![cfg(feature = "cuda")]
 
+#[path = "common/finite_pairs.rs"]
+mod tensor;
+
 use mamba_rs::gpu::buffers::GpuBuffer;
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
@@ -96,12 +99,11 @@ fn det_rand(n: usize, seed: u32) -> Vec<f32> {
 }
 
 fn cos_and_norm(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
-    assert_eq!(a.len(), b.len());
     let mut dot = 0f64;
     let mut na = 0f64;
     let mut nb = 0f64;
     let mut max_abs = 0f32;
-    for (&x, &y) in a.iter().zip(b) {
+    for (y, x) in tensor::pairs("cosine similarity and norm", b, a) {
         dot += (x as f64) * (y as f64);
         na += (x as f64) * (x as f64);
         nb += (y as f64) * (y as f64);

@@ -21,6 +21,10 @@
 //!       -- --ignored --nocapture
 #![cfg(feature = "hf")]
 
+#[path = "common/relative_peak.rs"]
+mod peak;
+use peak::relative_peak;
+
 #[cfg(feature = "cuda")]
 use mamba_rs::gpu::GpuOptions;
 use mamba_rs::hf::embed::lm_head_logits;
@@ -74,12 +78,7 @@ fn embed(model: &HfMambaModel, token: u32) -> &[f32] {
 fn row_error(golden: &Golden, t: usize, vocab: usize, logits: &[f32]) -> f64 {
     let r = t - golden.last_rows_from;
     let want = &golden.last_logits[r * vocab..(r + 1) * vocab];
-    let scale = want.iter().fold(0f64, |a, &w| a.max(w.abs()));
-    let diff = logits
-        .iter()
-        .zip(want)
-        .fold(0f64, |a, (&g, &w)| a.max((f64::from(g) - w).abs()));
-    diff / scale
+    relative_peak(logits, want, 0.0)
 }
 
 /// Follows the oracle's greedy continuation from `logits` through `step`,
@@ -208,9 +207,7 @@ fn mamba_130m_cpu_matches_the_f64_oracle() {
     let mut rows = vec![0f32; t_len * d];
     backbone.forward_sequence(&prompt, &mut rows, &mut st, &mut ps, t_len);
     let last = &rows[(t_len - 1) * d..];
-    let rel = last
-        .iter()
-        .zip(&last_hidden)
+    let rel = peak::tensor::pairs("prefill last row", last, &last_hidden)
         .fold(0f32, |a, (x, y)| a.max((x - y).abs()));
     eprintln!("mamba-130m CPU prefill last row vs decode: max|d| = {rel:.3e}");
     assert!(rel < 1e-4, "prefill last row {rel:.3e}");

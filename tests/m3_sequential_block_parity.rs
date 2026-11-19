@@ -14,6 +14,9 @@
 
 #![cfg(feature = "cuda")]
 
+#[path = "common/relative_peak.rs"]
+mod peak;
+
 #[path = "common/arch.rs"]
 mod arch;
 
@@ -849,14 +852,7 @@ fn backward_f64(s: Shape, v: &Values, fwd: &Forward) -> Vec<(&'static str, Vec<f
 /// The largest distance of `got` from the f64 `want`, over `want`'s largest
 /// magnitude.
 fn relative_error(got: &[f32], want: &[f64]) -> f64 {
-    let scale = want
-        .iter()
-        .fold(0f64, |m, w| m.max(w.abs()))
-        .max(f64::MIN_POSITIVE);
-    got.iter()
-        .zip(want)
-        .fold(0f64, |m, (&g, &w)| m.max((f64::from(g) - w).abs()))
-        / scale
+    peak::relative_peak(got, want, f64::MIN_POSITIVE)
 }
 
 /// The sliced backward at state widths no entry specialises: the same bits

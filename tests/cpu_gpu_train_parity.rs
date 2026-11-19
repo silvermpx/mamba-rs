@@ -25,6 +25,9 @@
 
 #![cfg(feature = "cuda")]
 
+#[path = "common/finite_pairs.rs"]
+mod tensor;
+
 use mamba_rs::gpu::buffers::GpuBuffer;
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
@@ -184,7 +187,7 @@ fn cos_sim(a: &[f32], b: &[f32]) -> f32 {
 /// not drowning in denormal noise.
 fn max_rel_err_masked(a: &[f32], b: &[f32], atol: f32) -> f32 {
     let mut worst = 0.0f32;
-    for (&x, &y) in a.iter().zip(b.iter()) {
+    for (y, x) in tensor::pairs("relative gradient error", b, a) {
         if x.abs().max(y.abs()) < atol {
             continue;
         }

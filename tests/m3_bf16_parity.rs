@@ -6,6 +6,10 @@
 
 #![cfg(feature = "cuda")]
 
+#[path = "common/rel_l2.rs"]
+mod distance;
+use distance::rel_l2;
+
 use mamba_rs::gpu::GpuOptions;
 use mamba_rs::gpu::dtype::WeightDtype;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
@@ -46,8 +50,9 @@ fn realistic_m3_cfg() -> Mamba3Config {
 }
 
 fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
-    assert_eq!(a.len(), b.len());
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let dot: f32 = distance::tensor::pairs("cosine similarity", a, b)
+        .map(|(x, y)| x * y)
+        .sum();
     let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
     if na == 0.0 || nb == 0.0 {
@@ -57,8 +62,7 @@ fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
 }
 
 fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
-    a.iter()
-        .zip(b.iter())
+    distance::tensor::pairs("absolute difference", a, b)
         .map(|(x, y)| (x - y).abs())
         .fold(0.0f32, f32::max)
 }
@@ -243,16 +247,6 @@ fn test_m3_f32_backbone_unchanged_after_mixed_refactor() {
             "F32 M3 backbone produced non-finite output at step {step}"
         );
     }
-}
-
-/// The relative l2 distance of `a` from `b`.
-fn rel_l2(a: &[f32], b: &[f32]) -> f64 {
-    let (mut num, mut den) = (0f64, 0f64);
-    for (&x, &y) in a.iter().zip(b) {
-        num += (f64::from(x) - f64::from(y)).powi(2);
-        den += f64::from(y).powi(2);
-    }
-    (num / den.max(1e-30)).sqrt()
 }
 
 /// Each reduced-precision backbone against the CPU backbone of the same

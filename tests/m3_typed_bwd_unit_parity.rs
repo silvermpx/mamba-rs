@@ -5,6 +5,9 @@
 
 #![cfg(feature = "cuda")]
 
+#[path = "common/finite_pairs.rs"]
+mod tensor;
+
 #[path = "common/arch.rs"]
 mod arch;
 
@@ -30,7 +33,7 @@ fn det_rand(n: usize, seed: u32) -> Vec<f32> {
 
 fn cos_norm(a: &[f32], b: &[f32]) -> (f32, f32) {
     let (mut dot, mut na, mut nb) = (0f64, 0f64, 0f64);
-    for (&x, &y) in a.iter().zip(b) {
+    for (y, x) in tensor::pairs("cosine similarity and norm", b, a) {
         dot += (x as f64) * (y as f64);
         na += (x as f64) * (x as f64);
         nb += (y as f64) * (y as f64);

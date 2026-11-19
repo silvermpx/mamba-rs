@@ -15,6 +15,10 @@
 //!   cargo test --release --features cuda --test mimo_scan_tc -- --test-threads=1
 #![cfg(feature = "cuda")]
 
+#[path = "common/rel_l2.rs"]
+mod distance;
+use distance::rel_l2;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -363,15 +367,6 @@ fn child(setting: &str) -> Vec<Vec<Vec<f32>>> {
     all
 }
 
-fn rel_l2(got: &[f32], want: &[f32]) -> f64 {
-    let (mut num, mut den) = (0f64, 0f64);
-    for (&g, &w) in got.iter().zip(want) {
-        num += (f64::from(g) - f64::from(w)).powi(2);
-        den += f64::from(w).powi(2);
-    }
-    (num / den.max(1e-30)).sqrt()
-}
-
 // The tensor-core products round each operand to TF32, a relative step of
 // 2^-11; through the scan, its gate and the layers that is a few times that
 // at most, the bounds above it and far below what a wrong index or mask
@@ -409,11 +404,11 @@ fn the_tensor_core_scan_tracks_the_cuda_core_scans() {
                 );
                 let w = &want[at..at + v.len()];
                 at += v.len();
+                let e = rel_l2(v, w);
                 if dtype == WeightDtype::F32 {
                     assert_eq!(bits(v), bits(w), "{dtype:?} {}: {name} moved", case.label);
                     continue;
                 }
-                let e = rel_l2(v, w);
                 if e > worst.0 {
                     worst = (e, name.clone());
                 }

@@ -918,6 +918,10 @@ name = "matrix_census_host"
 path = "tests/matrix_census_host.rs"
 
 [[test]]
+name = "parity_metrics"
+path = "tests/parity_metrics.rs"
+
+[[test]]
 name = "matrix_census_gpu"
 path = "tests/matrix_census_gpu.rs"
 required-features = ["cuda"]

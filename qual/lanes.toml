@@ -49,6 +49,7 @@
 "varlen_cpu" = "host"
 "varlen_gpu" = "gate"
 "matrix_census_host" = "host"
+"parity_metrics" = "host"
 "matrix_census_gpu" = "gate"
 "cublas_compute_probe" = "qualification"
 "ddp_emulated_equivalence" = "gate"

@@ -8,6 +8,15 @@
 //! one's logits and loads the language-model checkpoint.
 #![cfg(feature = "cuda")]
 
+#[cfg(feature = "hf")]
+#[path = "common/rel_l2.rs"]
+mod distance;
+#[cfg(feature = "hf")]
+use distance::tensor;
+#[cfg(not(feature = "hf"))]
+#[path = "common/finite_pairs.rs"]
+mod tensor;
+
 use mamba_rs::config::ScanMode;
 use mamba_rs::gpu::buffers::GpuBuffer;
 use mamba_rs::{
@@ -139,9 +148,7 @@ fn concat_in_time(a: &[f32], a_len: usize, b: &[f32], b_len: usize, width: usize
 
 fn max_rel_diff(got: &[f32], want: &[f32]) -> f32 {
     let scale = want.iter().fold(1e-3f32, |m, v| m.max(v.abs()));
-    got.iter()
-        .zip(want)
-        .fold(0.0f32, |m, (g, w)| m.max((g - w).abs()))
+    tensor::pairs("relative difference", got, want).fold(0.0f32, |m, (g, w)| m.max((g - w).abs()))
         / scale
 }
 
@@ -611,6 +618,7 @@ fn siso_prompt_from_zero_state_matches_the_stateless_window() {
 #[cfg(feature = "hf")]
 mod language_model {
     use super::*;
+    use distance::rel_l2;
     use mamba_rs::module::sample::SampleParams;
     use mamba_rs::{
         CpuOptions, Mamba2Backbone, Mamba3Backbone, Mamba3MimoBackbone, MambaBackbone, MambaGpuLM,
@@ -664,16 +672,6 @@ mod language_model {
                     .and_then(|bb| MambaGpuLM::new(bb, embed.clone(), None, VOCAB)),
             ),
         ]
-    }
-
-    /// The relative l2 distance of `a` from `b`.
-    fn rel_l2(a: &[f32], b: &[f32]) -> f64 {
-        let (mut num, mut den) = (0f64, 0f64);
-        for (&x, &y) in a.iter().zip(b) {
-            num += (f64::from(x) - f64::from(y)).powi(2);
-            den += f64::from(y).powi(2);
-        }
-        (num / den.max(1e-30)).sqrt()
     }
 
     /// The bf16 and f16 models of every family against the CPU model whose

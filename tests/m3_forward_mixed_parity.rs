@@ -4,6 +4,9 @@
 
 #![cfg(feature = "cuda")]
 
+#[path = "common/finite_pairs.rs"]
+mod tensor;
+
 #[path = "common/arch.rs"]
 mod arch;
 
@@ -79,7 +82,7 @@ fn cos_sim(a: &[f32], b: &[f32]) -> (f32, f32) {
     let mut dot = 0f64;
     let mut na = 0f64;
     let mut nb = 0f64;
-    for (&x, &y) in a.iter().zip(b) {
+    for (y, x) in tensor::pairs("cosine similarity and norm", b, a) {
         dot += (x as f64) * (y as f64);
         na += (x as f64) * (x as f64);
         nb += (y as f64) * (y as f64);

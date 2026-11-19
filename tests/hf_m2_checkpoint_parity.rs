@@ -21,6 +21,10 @@
 //!       -- --ignored --nocapture
 #![cfg(feature = "hf")]
 
+#[path = "common/relative_peak.rs"]
+mod peak;
+use peak::relative_peak;
+
 use mamba_rs::hf::embed::lm_head_logits;
 use mamba_rs::hf::load_mamba2;
 use mamba_rs::mamba2::Mamba2State;
@@ -121,12 +125,8 @@ fn mamba2_130m_cpu_matches_the_f64_oracle() {
         if t >= golden.last_rows_from {
             let r = t - golden.last_rows_from;
             let want = &golden.last_logits[r * vocab..(r + 1) * vocab];
-            let scale = want.iter().fold(0f64, |a, &w| a.max(w.abs()));
-            let diff = logits
-                .iter()
-                .zip(want)
-                .fold(0f64, |a, (&g, &w)| a.max((f64::from(g) - w).abs()));
-            worst_rel = worst_rel.max(diff / scale);
+            let error = relative_peak(&logits, want, 0.0);
+            worst_rel = worst_rel.max(error);
         }
     }
     let last_hidden = hidden.clone();
@@ -172,9 +172,7 @@ fn mamba2_130m_cpu_matches_the_f64_oracle() {
     );
     let last = &rows[(t_len - 1) * d..];
     if cfg!(any(feature = "accelerate", feature = "gemm-blas")) {
-        let rel = last
-            .iter()
-            .zip(&last_hidden)
+        let rel = peak::tensor::pairs("prefill last row", last, &last_hidden)
             .fold(0f32, |a, (x, y)| a.max((x - y).abs()));
         assert!(rel < 1e-4, "prefill last row {rel:.3e}");
     } else {
@@ -231,12 +229,8 @@ fn mamba2_130m_gpu_matches_the_f64_oracle() {
         );
         let r = t - golden.last_rows_from;
         let want = &golden.last_logits[r * vocab..(r + 1) * vocab];
-        let scale = want.iter().fold(0f64, |a, &w| a.max(w.abs()));
-        let diff = logits
-            .iter()
-            .zip(want)
-            .fold(0f64, |a, (&g, &w)| a.max((f64::from(g) - w).abs()));
-        worst = worst.max(diff / scale);
+        let error = relative_peak(&logits, want, 0.0);
+        worst = worst.max(error);
         assert_eq!(argmax(&logits), golden.top_ids[t][0], "top-1 at {t}");
     }
     eprintln!("mamba2-130m GPU prefill vs f64: max|dlogit|/max|logit| = {worst:.3e}");

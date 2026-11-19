@@ -18,6 +18,10 @@
 //!       -- --ignored --nocapture
 #![cfg(feature = "hf")]
 
+#[path = "common/relative_peak.rs"]
+mod peak;
+use peak::relative_peak;
+
 use mamba_rs::hf::embed::lm_head_logits;
 use mamba_rs::hf::load_mamba3_mimo;
 use mamba_rs::mamba3_mimo::Mamba3MimoState;
@@ -87,12 +91,8 @@ fn mimo_187m_cpu_decode_matches_the_f64_oracle() {
         if t >= golden.last_rows_from {
             let r = t - golden.last_rows_from;
             let want = &golden.last_logits[r * vocab..(r + 1) * vocab];
-            let scale = want.iter().fold(0f64, |a, &w| a.max(w.abs()));
-            let diff = logits
-                .iter()
-                .zip(want)
-                .fold(0f64, |a, (&g, &w)| a.max((f64::from(g) - w).abs()));
-            worst_rel = worst_rel.max(diff / scale);
+            let error = relative_peak(&logits, want, 0.0);
+            worst_rel = worst_rel.max(error);
         }
     }
     eprintln!(
@@ -174,12 +174,8 @@ fn mimo_187m_gpu_arm(dtype: mamba_rs::gpu::dtype::WeightDtype) {
         if t >= golden.last_rows_from {
             let r = t - golden.last_rows_from;
             let want = &golden.last_logits[r * vocab..(r + 1) * vocab];
-            let scale = want.iter().fold(0f64, |a, &w| a.max(w.abs()));
-            let diff = logits
-                .iter()
-                .zip(want)
-                .fold(0f64, |a, (&g, &w)| a.max((f64::from(g) - w).abs()));
-            worst = worst.max(diff / scale);
+            let error = relative_peak(&logits, want, 0.0);
+            worst = worst.max(error);
         }
     }
     let n = (t_len - 1) as f64;

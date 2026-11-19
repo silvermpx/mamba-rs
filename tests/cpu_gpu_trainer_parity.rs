@@ -13,6 +13,10 @@
 //! for a model that feeds its input straight to the first layer.
 #![cfg(feature = "cuda")]
 
+#[path = "common/rel_l2.rs"]
+mod distance;
+use distance::rel_l2;
+
 use mamba_rs::config::ScanMode;
 use mamba_rs::mlp::GatedMlpLayerWeights;
 use mamba_rs::{
@@ -145,12 +149,10 @@ fn values(n: usize, seed: u32) -> Vec<f32> {
         .collect()
 }
 
-/// The largest elementwise difference; a NaN on either side is infinite.
+/// The largest elementwise difference.
 fn worst(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b).fold(0.0f32, |m, (x, y)| {
-        let d = (x - y).abs();
-        if d.is_nan() { f32::INFINITY } else { m.max(d) }
-    })
+    distance::tensor::pairs("absolute difference", a, b)
+        .fold(0.0f32, |m, (x, y)| m.max((x - y).abs()))
 }
 
 /// The same family on both devices from the same weights, in f32, the GPU
@@ -521,16 +523,6 @@ fn train_alike(mut cpu: AnyCpuTrainer, mut gpu: AnyGpuTrainer, scan: ScanMode, c
         .unwrap_or_else(|e| panic!("{case}: the GPU's state on the CPU: {e}"));
     assert_eq!(gpu.optimizer_state().unwrap(), sc.optimizer, "{case}");
     assert_eq!(cpu.optimizer_state().unwrap(), sg.optimizer, "{case}");
-}
-
-/// The relative l2 distance of `a` from `b`.
-fn rel_l2(a: &[f32], b: &[f32]) -> f64 {
-    let (mut num, mut den) = (0f64, 0f64);
-    for (&x, &y) in a.iter().zip(b) {
-        num += (f64::from(x) - f64::from(y)).powi(2);
-        den += f64::from(y).powi(2);
-    }
-    (num / den.max(1e-30)).sqrt()
 }
 
 /// A trainer's window: the input and the output gradient in, the rows of
