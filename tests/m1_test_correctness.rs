@@ -2992,3 +2992,130 @@ fn config_variants_gradients_match_central_differences() {
         assert_central_differences(label, (&tw, &cfg, input_dim, &inputs), &grads, &checks);
     }
 }
+
+#[test]
+fn gated_fp16_scan_stores_the_product() {
+    use mamba_rs::{CpuOptions, MambaWeights, WeightDtype};
+    for final_norm in [false, true] {
+        let cfg = MambaConfig {
+            d_model: 1,
+            expand: 1,
+            n_layers: 1,
+            d_state: 1,
+            d_conv: 4,
+            proj_bias: true,
+            final_norm,
+            ..Default::default()
+        };
+        let mut weights = MambaWeights::zeros(&cfg, 1);
+        let layer = &mut weights.layers[0];
+        layer.in_proj_b.copy_from_slice(&[0.0, 1.0]);
+        layer.conv1d_bias[0] = 4.0;
+        layer.x_proj_w.copy_from_slice(&[0.0, 20.0, 20.0]);
+        layer.dt_proj_b[0] = 3.0;
+        layer.d_param[0] = 0.0;
+        layer.out_proj_w[0] = 1.0;
+        for dtype in [WeightDtype::F32, WeightDtype::F16] {
+            let net = MambaBackbone::new_with(
+                weights.clone(),
+                cfg,
+                1,
+                CpuOptions::default().dtype(dtype),
+            )
+            .unwrap();
+            let mut step = [0.0];
+            let mut full = [0.0];
+            net.forward_step(
+                &[0.0],
+                &mut step,
+                &mut net.alloc_state(),
+                &mut net.alloc_scratch(),
+            );
+            net.forward_sequence(
+                &[0.0],
+                &mut full,
+                &mut net.alloc_state(),
+                &mut net.alloc_scratch(),
+                1,
+            );
+            let mut trainer = mamba_rs::MambaCpuTrainer::new_with(
+                &weights,
+                cfg,
+                mamba_rs::TrainSessionCfg::new(1, 1, 1),
+                CpuOptions::default().dtype(dtype),
+            )
+            .unwrap();
+            let mut trained = [f32::NAN];
+            trainer.forward(&[0.0], &mut trained).unwrap();
+            assert_eq!(trained, full);
+            // The ungated readout is 73910.415. SiLU(1) brings it to
+            // 54032.843, whose nearest binary16 is 54048.
+            assert!(step[0].is_finite());
+            assert_eq!(full, step, "{dtype:?}, final norm {final_norm}");
+            if dtype == WeightDtype::F16 {
+                assert_eq!(step, [if final_norm { 1.0 } else { 54048.0 }]);
+            }
+        }
+    }
+}
+
+#[test]
+fn compensated_convolution_matches_step_and_window() {
+    use mamba_rs::MambaWeights;
+    let cfg = MambaConfig {
+        d_model: 1,
+        expand: 1,
+        n_layers: 1,
+        d_state: 1,
+        d_conv: 2,
+        proj_bias: true,
+        final_norm: true,
+        ..Default::default()
+    };
+    let mut w = MambaWeights::zeros(&cfg, 1);
+    let l = &mut w.layers[0];
+    l.in_proj_b.copy_from_slice(&[16.0, 10.0]);
+    l.conv1d_weight.copy_from_slice(&[16.0, -16.0]);
+    l.conv1d_bias[0] = 2.0_f32.powi(-16);
+    l.d_param[0] = 32.0;
+    l.out_proj_w[0] = 32.0;
+    let net = MambaBackbone::new(w, cfg, 1).unwrap();
+    let (mut state, mut scratch) = (net.alloc_state(), net.alloc_scratch());
+    let (mut step, mut full) = ([0.0], [0.0; 2]);
+    for _ in 0..2 {
+        net.forward_step(&[0.0], &mut step, &mut state, &mut scratch);
+    }
+    net.forward_sequence(
+        &[0.0; 2],
+        &mut full,
+        &mut net.alloc_state(),
+        &mut net.alloc_scratch(),
+        2,
+    );
+    assert_eq!(step[0], full[1]);
+}
+
+#[test]
+fn parallel_forward_decays_the_supplied_state() {
+    use mamba_rs::mamba1::cpu::{
+        flat::MambaBackboneFlat, parallel::parallel_mamba_forward, weights::TrainMambaWeights,
+    };
+    use mamba_rs::ops::dims::{MambaDims, MambaRecurrentState};
+    let dims = MambaDims::new((1, 1, 1, 1, 1, 1, 1, 1));
+    let w = TrainMambaWeights::zeros_from_dims(&dims);
+    let (mut out, mut conv, mut ssm) = ([0.0], [0.0], [2.0]);
+    parallel_mamba_forward(
+        &mut out,
+        &mut [MambaBackboneFlat::zeros(dims)],
+        &mut MambaRecurrentState {
+            conv: &mut conv,
+            ssm: &mut ssm,
+            a_neg: &[-1.0],
+        },
+        &w,
+        &[0.0],
+        &dims,
+        1,
+    );
+    assert_eq!(ssm, [1.0]);
+}

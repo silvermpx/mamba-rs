@@ -1245,8 +1245,8 @@ extern "C" __global__ __launch_bounds__(256) void NAME(                        \
     const int len = min(CS, T - chunk_start);                                  \
     /* In a packed row (seq_idx) only the tokens before the chunk's */         \
     /* first start read the state entering it. */                              \
-    const int cont = vl_lower_bound(seq_idx, b, T, chunk_start, chunk_start + len, \
-                                    vl_id(seq_idx, b, T, chunk_start - 1) + 1) \
+    const int cont = vl_bound<true>(seq_idx, b, T, chunk_start, chunk_start + len, \
+                                    vl_id(seq_idx, b, T, chunk_start - 1)) \
                      - chunk_start;                                            \
     const long long d_inner = (long long)nh_total * hd;                        \
     const long long cidx = ((long long)b * n_chunks + chunk_idx) * nh_total + h; \
@@ -1354,6 +1354,28 @@ DEFINE_M3_DQKV_STATE_TERMS_TILED(m3_dqkv_state_terms_tiled_f16, __half)
 // Shared memory, in floats: nine per-step lanes of 64, the three pair
 // triangles of CS (CS - 1) / 2, then two [M3R_KT][M3R_LD] operand tiles on
 // 16 bytes: 43,904 bytes at a chunk of 64.
+// Fill one tagged right endpoint in the same right-to-left order as the
+// scalar interval. Each additional left endpoint reuses its predecessor's
+// tail. The dense triangle is filled with the original prefix subtraction.
+__device__ __noinline__ void m3r_tagged_row(float* triangle, const float* tape, int right, int cs) {
+    float tail = 0.0f;
+    int k = right;
+    for (; k > 0 && tape[k] <= -1024.0f; --k) {
+        float word = tape[k];
+        if (word != -1024.0f) tail += word * 0x1p-118f;
+        triangle[m3t_tri(k - 1, right, cs)] = exp2f(tail * LOG2E);
+        if (tail <= -104.0f) {
+            for (int a = k - 2; a >= 0; --a)
+                triangle[m3t_tri(a, right, cs)] = exp2f(tail * LOG2E);
+            return;
+        }
+    }
+    for (int a = k - 1; a >= 0; --a) {
+        float log_decay = tape[a] <= -1024.0f && !isnan(tape[k]) ? 0.0f : tail + (tape[k] - tape[a]);
+        triangle[m3t_tri(a, right, cs)] = exp2f(log_decay * LOG2E);
+    }
+}
+
 #define M3R_KT 32
 #define M3R_LD 68
 
@@ -1490,6 +1512,7 @@ extern "C" __global__ __launch_bounds__(256, 2) void NAME(                     \
     const T_ACT* do_rows = dO + row0 * d_inner + (long long)h * hd;            \
     const float D_val = D_param[h];                                            \
     const float cs_sum = DA_CS_SUM[cidx];                                      \
+    const int last_start = vl_seq_first(seq_idx, b, T, chunk_start, chunk_start + len - 1) - chunk_start;                                      \
     const int tri_n = CS * (CS - 1) / 2;                                       \
     const int ty = tid >> 4;                                                   \
     const int tx = tid & 15;                                                   \
@@ -1523,7 +1546,7 @@ extern "C" __global__ __launch_bounds__(256, 2) void NAME(                     \
         da_sm[t] = da;                                                         \
         qk_sm[t] = qk;                                                         \
         ef_sm[t] = exp2f(da * LOG2E);                                          \
-        er_sm[t] = exp2f((cs_sum - da) * LOG2E);                               \
+        er_sm[t] = (t < len && t >= last_start ? exp2f(chunk_decay_interval(DA_CS + cidx * CS + t, 1, len - 1 - t, da, cs_sum) * LOG2E) : 0.0f);                               \
     }                                                                          \
     /* The sequence spans of the thread's four steps in a packed row. */       \
     VlSpan span[4];                                                            \
@@ -1586,6 +1609,10 @@ extern "C" __global__ __launch_bounds__(256, 2) void NAME(                     \
             }                                                                  \
         }                                                                      \
     }                                                                          \
+    if (!(cs_sum > -1024.0f) || seq_idx != nullptr) { \
+        __syncthreads(); \
+        if (tid < len && da_sm[tid] <= -1024.0f) m3r_tagged_row(dec_tri, da_sm, tid, CS); \
+    } \
     /* 2. dQK_dot. A warp takes a step, and lane l holds channel l of */       \
     /* each 32-channel segment. A head under a warp starts its tree at its */  \
     /* power of two, as the warp kernel's width-hd tree does. Lanes past */    \
@@ -1829,6 +1856,7 @@ extern "C" __global__ __launch_bounds__(256, 2) void NAME(                     \
     __syncthreads();                                                           \
     /* 5. dADT, pairs below the diagonal, then above, then the entering */     \
     /* and exit states, as m3_dqkv orders them. */                             \
+    float endpoint_mag = 0.0f; \
     for (int t = tid; t < len; t += 256) {                                     \
         float acc = 0.0f;                                                      \
         const VlSpan sp = vl_span(seq_idx, b, T, chunk_start, len, t);         \
@@ -1847,9 +1875,20 @@ extern "C" __global__ __launch_bounds__(256, 2) void NAME(                     \
             acc -= vdo * decay * kq;                                           \
         }                                                                      \
         if (sp.from_before) acc += qsdo_sm[t] * ef_sm[t];                      \
+        endpoint_mag = fabsf(acc); \
         dmrev_sm[t] = acc;                                                     \
         dmvec_sm[t] = sp.to_end ? dskv_sm[t] * er_sm[t] : 0.0f;                \
     }                                                                          \
+    /* A chunk-wide bound certifies every dense endpoint before the serial fold. */ \
+    if (tid < 64) { \
+        float peak = endpoint_mag; \
+        float least = endpoint_mag > 0.0f ? endpoint_mag : 0x1.fffffep127f; \
+        for (int off = 16; off; off >>= 1) { \
+            peak = fmaxf(peak, __shfl_down_sync(0xffffffffu, peak, off)); \
+            least = fminf(least, __shfl_down_sync(0xffffffffu, least, off)); \
+        } \
+        if ((tid & 31) == 0) { ta[tid >> 5] = peak; ta[2 + (tid >> 5)] = least; } \
+    } \
     __syncthreads();                                                           \
     if (tid == 0) {                                                            \
         float dM_scalar = dm_chain[cidx];                                      \
@@ -1857,16 +1896,45 @@ extern "C" __global__ __launch_bounds__(256, 2) void NAME(                     \
         /* A packed row combines each of its sequences in the chunk on */      \
         /* its own, as m3_dqkv does. */                                        \
         const bool passes = vl_passes(seq_idx, b, T, chunk_start, len);        \
-        for (int a = 0; a < len;) {                                            \
-            const int e = vl_span(seq_idx, b, T, chunk_start, len, a).end;     \
+        const bool ordinary = seq_idx == nullptr && cs_sum > -104.0f && \
+            fminf(ta[2], ta[3]) > fmaxf(ta[0], ta[1]) * 0x1p-23f; \
+        if (ordinary) { \
+            float total_rev = 0.0f; \
+            for (int t = 0; t < len; ++t) total_rev += dmrev_sm[t]; \
+            total_rev += dM_scalar; \
+            float cumsum = 0.0f; \
+            for (int t = 0; t < len; ++t) { \
+                cumsum += dmvec_sm[t] - dmrev_sm[t]; \
+                dADT[(row0 + t) * nh_total + h] = dmrev_sm[t] + (total_rev + cumsum - dmvec_sm[t]); \
+            } \
+        } else for (int a = 0; a < len;) {                                            \
+            const VlSpan span = vl_span(seq_idx, b, T, chunk_start, len, a); \
+            const int e = chunk_decay_span_end(da_sm, a, span.end); \
+            const bool cut = vl_starts(seq_idx, b, T, chunk_start + a) || chunk_decay_cuts(da_sm, a, span.first); \
             float total_rev = 0.0f;                                            \
-            for (int t = a; t < e; t++) total_rev += dmrev_sm[t];              \
+            float peak = 0.0f, least = 0x1.fffffep127f; \
+            for (int t = a; t < e; ++t) { \
+                total_rev += dmrev_sm[t]; \
+                const float mag = fabsf(dmrev_sm[t]); \
+                peak = fmaxf(peak, mag); \
+                if (mag > 0.0f) least = fminf(least, mag); \
+            } \
             if (passes) total_rev += dM_scalar;                                \
             float cumsum = 0.0f;                                               \
             for (int t = a; t < e; t++) {                                      \
                 cumsum += dmvec_sm[t] - dmrev_sm[t];                           \
                 const float out = dmrev_sm[t] + (total_rev + cumsum - dmvec_sm[t]); \
-                dADT[(row0 + t) * nh_total + h] = out;                         \
+                float value = out; \
+                if (cut && t == a && isfinite(out)) value = 0.0f; \
+                else if (least <= peak * 0x1p-23f && fabsf(out) <= peak * 0x1p-18f && isfinite(peak)) { \
+                    auto pair = [&](int i, int j) { \
+                        const int slot = m3t_tri(i, j, CS); \
+                        return (double)vdo_tri[slot] * dec_tri[slot] * kq_tri[slot]; \
+                    }; \
+                    auto entering = [&](int j) { return span.from_before ? (double)qsdo_sm[j] * ef_sm[j] : 0.0; }; \
+                    value = chunk_direct_adjoint(t, a, e, dmvec_sm, passes ? dM_scalar : 0.0f, pair, entering); \
+                } \
+                dADT[(row0 + t) * nh_total + h] = value; \
             }                                                                  \
             a = e;                                                             \
         }                                                                      \
@@ -1875,6 +1943,7 @@ extern "C" __global__ __launch_bounds__(256, 2) void NAME(                     \
         dD_partials[cidx] = dD_acc;                                            \
     }                                                                          \
 }
+
 
 DEFINE_M3_DQKV_TILED(m3_dqkv_tiled, float)
 DEFINE_M3_DQKV_TILED(m3_dqkv_tiled_bf16, __nv_bfloat16)

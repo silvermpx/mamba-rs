@@ -651,3 +651,88 @@ fn mamba1_refuses_a_packing() {
     assert!(err.contains("no varlen"), "{err}");
     t.set_varlen(None).unwrap();
 }
+
+#[test]
+fn the_largest_label_runs_across_two_chunks() {
+    let input = values(LONG * INPUT_DIM, 5);
+    let d = grad(LONG * D_MODEL, 8);
+    for (family, name) in FAMILIES.iter().enumerate() {
+        let trace = |id| {
+            let labels = (0..LONG).map(|t| if t < 7 { 1 } else { id }).collect();
+            let packing = Varlen::from_seq_idx(labels, 1, LONG).unwrap();
+            let mut t = gpu_trainer(family, (1, LONG), WeightDtype::F32, ScanMode::Parallel);
+            t.set_varlen(Some(&packing)).unwrap();
+            run(&mut t, &input, &d)
+        };
+        let a = trace(2);
+        let b = trace(i32::MAX);
+        assert_eq!(bits(&a.0), bits(&b.0), "{name} output");
+        assert_eq!(bits(&a.1), bits(&b.1), "{name} input gradient");
+        assert_eq!(bits(&a.2), bits(&b.2), "{name} weight gradient");
+    }
+}
+
+#[test]
+fn changing_boundaries_invalidates_a_pending_backward() {
+    let one = Varlen::from_starts(&[vec![0, CUT]], SEQ_LEN).unwrap();
+    let two = Varlen::from_starts(&[vec![0, CUT + 1]], SEQ_LEN).unwrap();
+    let input = values(SEQ_LEN * INPUT_DIM, 10);
+    let d = grad(SEQ_LEN * D_MODEL, 11);
+    for (i, name) in FAMILIES.iter().enumerate() {
+        let mut trainer = gpu_trainer(i, (1, SEQ_LEN), WeightDtype::F32, ScanMode::Parallel);
+        let mut rows = vec![0.0; d.len()];
+        trainer.set_varlen(Some(&one)).unwrap();
+        trainer.forward(&input, &mut rows).unwrap();
+        trainer.set_varlen(Some(&two)).unwrap();
+        assert!(
+            trainer.backward_step(&d, BackwardOpts::default()).is_err(),
+            "{name}"
+        );
+        assert_eq!(trainer.optimizer_state().unwrap().step, 0);
+        trainer.forward(&input, &mut rows).unwrap();
+        trainer.backward_step(&d, BackwardOpts::default()).unwrap();
+        assert!(
+            trainer.backward_step(&d, BackwardOpts::default()).is_err(),
+            "{name}"
+        );
+        assert_eq!(trainer.optimizer_state().unwrap().step, 1);
+        let state = trainer.trainer_state().unwrap();
+        assert_eq!(state.packing.as_ref().unwrap().seq_idx(), two.seq_idx());
+
+        trainer.step(&input, &d).unwrap();
+        assert!(
+            trainer.backward_step(&d, BackwardOpts::default()).is_err(),
+            "{name}"
+        );
+        trainer.capture_graph().unwrap();
+        trainer.step(&input, &d).unwrap();
+        assert!(
+            trainer.backward_step(&d, BackwardOpts::default()).is_err(),
+            "{name}"
+        );
+        assert_eq!(trainer.optimizer_state().unwrap().step, 3);
+    }
+}
+
+#[test]
+fn packed_resume_reproduces_the_next_rows_and_gradients_on_cuda() {
+    let packing = Varlen::from_starts(&[vec![0, CUT]], SEQ_LEN).unwrap();
+    let input = values(SEQ_LEN * INPUT_DIM, 44);
+    let d = grad(SEQ_LEN * D_MODEL, 77);
+    for (i, name) in FAMILIES.iter().enumerate() {
+        let build = || gpu_trainer(i, (1, SEQ_LEN), WeightDtype::F32, ScanMode::Parallel);
+        let mut original = build();
+        let mut resumed = build();
+        original.set_varlen(Some(&packing)).unwrap();
+        let mut rows = vec![0.0; d.len()];
+        original.forward(&input, &mut rows).unwrap();
+        resumed
+            .load_trainer_state(&original.trainer_state().unwrap())
+            .unwrap();
+        let a = run(&mut original, &input, &d);
+        let b = run(&mut resumed, &input, &d);
+        assert_eq!(bits(&a.0), bits(&b.0), "{name} resumed rows");
+        assert_eq!(bits(&a.1), bits(&b.1), "{name} resumed input gradient");
+        assert_eq!(bits(&a.2), bits(&b.2), "{name} resumed weights gradient");
+    }
+}

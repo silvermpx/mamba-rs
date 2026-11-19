@@ -37,6 +37,7 @@ impl Mamba3Backbone {
     /// Errs on a configuration `validate` refuses.
     pub fn init(cfg: Mamba3Config, input_dim: usize, seed: u64) -> Result<Self, String> {
         cfg.validate()?;
+        crate::config::input_projection_lens(input_dim, cfg.d_model, false)?;
         Self::new(Mamba3Weights::init(&cfg, input_dim, seed), cfg, input_dim)
     }
 

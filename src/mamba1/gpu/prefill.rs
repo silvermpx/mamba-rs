@@ -789,7 +789,8 @@ fn prefill_body<W: MambaWeightsView>(
             let ds_i = ds as i32;
             let gate_stride = (2 * di) as i32;
             if dims.scan_mode.use_parallel(t, ds) {
-                let width = scan_fwd_nosave_index_width(b, t, di, ds, 2 * di, tmajor_in);
+                let stride = if tmajor_in { 0 } else { 2 * di };
+                let width = scan_fwd_nosave_index_width(b, t, di, ds, stride, tmajor_in);
                 for (y_first, cfg) in y_runs(grid_parallel_scan(b, t, di, ds)) {
                     let mut builder = ctx
                         .stream
@@ -1376,7 +1377,7 @@ pub fn gpu_forward_inference_prefill_mixed_full<W: MambaWeightsView>(
                 for (y_first, cfg) in y_runs(crate::gpu::launch::grid_parallel_scan(b, t, di, ds)) {
                     let mut bld = ctx
                         .stream
-                        .launch_builder(k.ssm_parallel_fwd_nosave_typed.get(width).get(dt));
+                        .launch_builder(k.ssm_prefill_gated.get(width).get(dt));
                     bld.arg(&ssm_ptr);
                     bld.arg(&y_ptr);
                     bld.arg(&delta_ptr);
@@ -1407,7 +1408,8 @@ pub fn gpu_forward_inference_prefill_mixed_full<W: MambaWeightsView>(
                         bld.arg(&t_i);
                         bld.arg(&di_i);
                         bld.arg(&ts_i);
-                        bld.arg(&gate_stride);
+                        // The scan has already gated the fp32 readout. Only transpose.
+                        bld.arg(&0_i32);
                         bld.arg(&y_first);
                         bld.arg(&z_first);
                         unsafe { bld.launch(cfg) }
@@ -1418,7 +1420,7 @@ pub fn gpu_forward_inference_prefill_mixed_full<W: MambaWeightsView>(
                 let width = seq_scan_index_width(b, t, di, ds, 2 * di, false);
                 let mut bld = ctx
                     .stream
-                    .launch_builder(k.ssm_burnin_nosave_typed.get(width).get(dt));
+                    .launch_builder(k.ssm_prefill_sequential_gated.get(width).get(dt));
                 bld.arg(&ssm_ptr);
                 bld.arg(&gated_out_ptr);
                 bld.arg(&delta_ptr);

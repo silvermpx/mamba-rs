@@ -1183,6 +1183,7 @@ impl Mamba3MimoGpuTrainer {
         if !self.window.is_open() {
             return Err("apply_window: no accumulation window is open".into());
         }
+        self.forwarded = false;
         let scale = self.scaler.as_ref().map(DynamicLossScaler::scale);
         self.ensure_adamw_plan()?;
         // The step counts before the update, as the fused step counts it;
@@ -1331,6 +1332,7 @@ impl Mamba3MimoGpuTrainer {
         check_backward_opts(&opts, "MIMO trainer")?;
         let loss_scale = self.scaler.as_ref().map(DynamicLossScaler::scale);
         self.backward_rows(d_temporal, d_input)?;
+        self.forwarded = false;
         if opts.accumulate_only {
             self.window
                 .accumulate(&self.ctx, &self.grads, self.overflowed)?;
@@ -1681,9 +1683,15 @@ impl Mamba3MimoGpuTrainer {
     /// bit: the optimizer state, the f16 loss scale and the carried
     /// recurrence. [`TrainerState::save`] writes it to a file.
     pub fn trainer_state(&self) -> Result<TrainerState, String> {
+        if self.window.is_open() || self.fresh_grads {
+            return Err(
+                "finish the gradient accumulation window before saving a checkpoint".into(),
+            );
+        }
         let rec = self.recurrent_state()?;
         Ok(TrainerState {
             family: ModelFamily::Mamba3Mimo,
+            packing: self.varlen.packing().cloned(),
             optimizer: self.optimizer_state()?,
             scaler: self.scaler_state(),
             recurrent: vec![
@@ -1698,18 +1706,30 @@ impl Mamba3MimoGpuTrainer {
     /// Load a state a trainer of this family gave with
     /// [`Self::trainer_state`]. The learning rate is not part of it.
     pub fn load_trainer_state(&mut self, state: &TrainerState) -> Result<(), String> {
-        state.check_family(ModelFamily::Mamba3Mimo)?;
+        state.check_window(
+            ModelFamily::Mamba3Mimo,
+            self.batch,
+            self.seq_len,
+            self.layout.packed_len(&self.template),
+        )?;
+        self.varlen
+            .check_graph(self.graph.is_some(), state.packing.as_ref())?;
         let parts = [
-            state.recurrent_tensor("ssm")?,
-            state.recurrent_tensor("k")?,
-            state.recurrent_tensor("v")?,
-            state.recurrent_tensor("angle")?,
+            state.recurrent_tensor("ssm", self.state_ssm.len())?,
+            state.recurrent_tensor("k", self.state_k.len())?,
+            state.recurrent_tensor("v", self.state_v.len())?,
+            state.recurrent_tensor("angle", self.state_ang.len())?,
         ];
+        self.forwarded = false;
+        self.fresh_grads = false;
+        self.overflowed = false;
+        self.window.close();
         self.load_optimizer_state(&state.optimizer)?;
         if let Some((scale, tracker)) = state.scaler {
             self.load_scaler_state(scale, tracker)?;
         }
-        self.load_recurrent_parts(parts)
+        self.load_recurrent_parts(parts)?;
+        self.set_varlen(state.packing.as_ref())
     }
 
     /// Download the f32 master weights for a checkpoint or the CPU model.
@@ -1728,6 +1748,7 @@ impl Mamba3MimoGpuTrainer {
 
     /// Back to the empty states.
     pub fn reset_state(&mut self) -> Result<(), String> {
+        self.forwarded = false;
         let s = &self.ctx.stream;
         self.state_ssm.zero(s)?;
         self.state_k.zero(s)?;
@@ -1744,8 +1765,13 @@ impl Mamba3MimoGpuTrainer {
     /// one on or off needs `drop_graph` first.
     pub fn set_varlen(&mut self, packing: Option<&Varlen>) -> Result<(), String> {
         self.varlen.check_graph(self.graph.is_some(), packing)?;
-        self.varlen
-            .set(&self.ctx.stream, packing, (self.batch, self.seq_len))
+        if self
+            .varlen
+            .set(&self.ctx.stream, packing, (self.batch, self.seq_len))?
+        {
+            self.forwarded = false;
+        }
+        Ok(())
     }
 
     fn refresh_mirror(&self) -> Result<(), String> {
@@ -1878,6 +1904,7 @@ impl Mamba3MimoGpuTrainer {
         self.check_window_len("forward input", input.len(), self.input_dim)?;
         self.check_window_len("forward output", out.len(), self.cfg.d_model)?;
         self.forwarded = false;
+        self.fresh_grads = false;
         self.presize_gemm_scratch()?;
         self.forward_unchecked(RowSource::Host(input), Some(out))?;
         self.forwarded = true;
@@ -1889,6 +1916,7 @@ impl Mamba3MimoGpuTrainer {
     /// at [`Self::temporal_ptr`]. The bits are the host forward's.
     pub fn forward_on_device(&mut self) -> Result<(), String> {
         self.forwarded = false;
+        self.fresh_grads = false;
         self.presize_gemm_scratch()?;
         self.forward_unchecked(RowSource::Device, None)?;
         self.forwarded = true;
@@ -3570,6 +3598,7 @@ impl Mamba3MimoGpuTrainer {
         if !self.fresh_grads {
             return Err("no new gradients since the last optimizer step".into());
         }
+        self.forwarded = false;
         self.fresh_grads = false;
         self.apply_adamw_unchecked()
     }

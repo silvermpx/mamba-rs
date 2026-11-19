@@ -207,18 +207,16 @@ fn layer_step(
         let v = scratch.proj[d_inner + d];
         scratch.gate_silu[d] = v * sigmoid(v);
     }
-    store(dtype, &mut scratch.gate_silu[..d_inner]);
 
     // Conv1d shift register (dot BEFORE shift)
     let hist = d_conv - 1;
     for d in 0..d_inner {
         let state_off = d * hist;
-        let mut val = 0.0_f32;
+        let mut val = lw.conv1d_bias.get(d).copied().unwrap_or(0.0);
         for k in 0..hist {
             val += state.conv_state[state_off + k] * lw.conv1d_weight[d * d_conv + k];
         }
         val += scratch.x[d] * lw.conv1d_weight[d * d_conv + hist];
-        val += lw.conv1d_bias.get(d).copied().unwrap_or(0.0);
 
         // Shift state left + insert new
         for k in 0..hist.saturating_sub(1) {

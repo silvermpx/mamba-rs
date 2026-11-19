@@ -8,6 +8,10 @@
 //! window from the rows, and one wider than 32 deepens the forward tiles.
 #![cfg(feature = "cuda")]
 
+#[path = "common/rel_l2.rs"]
+mod distance;
+use distance::rel_l2;
+
 use mamba_rs::MambaBackbone;
 use mamba_rs::config::ScanMode;
 use mamba_rs::gpu::dtype::WeightDtype;
@@ -33,15 +37,6 @@ fn det(n: usize, seed: u64, scale: f32) -> Vec<f32> {
             (((s & 0xFFFFFF) as f32 / 16777216.0) * 2.0 - 1.0) * scale
         })
         .collect()
-}
-
-fn rel_l2(got: &[f32], want: &[f32]) -> f64 {
-    let (mut num, mut den) = (0f64, 0f64);
-    for (&g, &w) in got.iter().zip(want) {
-        num += (f64::from(g) - f64::from(w)).powi(2);
-        den += f64::from(w).powi(2);
-    }
-    (num / den.max(1e-30)).sqrt()
 }
 
 fn cases() -> Vec<(&'static str, MambaConfig)> {
@@ -577,12 +572,17 @@ fn m1_gpu_train_matches_cpu_at_any_width() {
                 assert_eq!(arena.len(), want_grads.len(), "{label}: arena length");
                 let (mut at, mut worst) = (0usize, (0f64, String::new()));
                 for (name, len) in &tensors {
-                    let e = rel_l2(&arena[at..at + len], &want_grads[at..at + len]);
+                    let e = distance::named_rel_l2(
+                        name,
+                        &arena[at..at + len],
+                        &want_grads[at..at + len],
+                    );
                     at += len;
                     if e > worst.0 {
                         worst = (e, name.clone());
                     }
                 }
+                assert_eq!(at, arena.len(), "{label}: gradient tensor lengths");
                 let fwd = rel_l2(&rows, &want_rows);
                 eprintln!(
                     "{label} {scan_mode:?} {dtype:?}: forward {fwd:.2e}, worst gradient {:.2e} ({})",
@@ -600,5 +600,80 @@ fn m1_gpu_train_matches_cpu_at_any_width() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn a_finite_fp16_gate_survives_an_unrepresentable_scan_readout() {
+    use mamba_rs::{BackwardOpts, MambaGpuTrainer, TrainSessionCfg};
+    let cfg = MambaConfig {
+        d_model: 1,
+        expand: 1,
+        n_layers: 1,
+        d_state: 1,
+        d_conv: 4,
+        proj_bias: true,
+        final_norm: false,
+        ..Default::default()
+    };
+    let mut weights = MambaWeights::zeros(&cfg, 1);
+    let layer = &mut weights.layers[0];
+    layer.in_proj_b.copy_from_slice(&[0.0, 1.0]);
+    layer.conv1d_bias[0] = 4.0;
+    layer.x_proj_w.copy_from_slice(&[0.0, 20.0, 20.0]);
+    layer.dt_proj_b[0] = 3.0;
+    layer.d_param[0] = 0.0;
+    layer.out_proj_w[0] = 1.0;
+    for scan in [ScanMode::Sequential, ScanMode::Parallel] {
+        let opts = GpuOptions::default()
+            .dtype(WeightDtype::F16)
+            .scan_mode(scan);
+        let mut gpu = MambaGpuBackbone::new(&weights, cfg, 1, 1, opts).unwrap();
+        let mut got = [f32::NAN];
+        gpu.step(&[0.0], &mut got).unwrap();
+        assert_eq!(got, [54048.0]);
+        gpu.reset().unwrap();
+        gpu.prefill(&[0.0], 1).unwrap();
+        gpu.download_temporal(&mut got).unwrap();
+        assert_eq!(got, [54048.0]);
+        let mut trainer =
+            MambaGpuTrainer::new(&weights, cfg, TrainSessionCfg::new(1, 1, 1), opts).unwrap();
+        trainer.load_scaler_state(1.0, 0).unwrap();
+        trainer.forward(&[0.0], &mut got).unwrap();
+        assert_eq!(got, [54048.0]);
+        trainer
+            .backward_step(
+                &[1.0 / 1024.0],
+                BackwardOpts::default().with_accumulate_only(true),
+            )
+            .unwrap();
+        let grads = trainer.download_grad_arena().unwrap();
+        assert!(grads.iter().all(|x| x.is_finite()));
+        let layout = train_weights_from(&weights);
+        let gate_at = named(&layout)
+            .iter()
+            .take_while(|(name, _)| name != "layer0.in_proj_b")
+            .map(|(_, data)| data.len())
+            .sum::<usize>()
+            + 1;
+        let sigmoid = 1.0f32 / (1.0 + (-1.0f32).exp());
+        let expected = 73910.415 * sigmoid * (2.0 - sigmoid) / 1024.0;
+        assert!(
+            (grads[gate_at] - expected).abs() < 0.08,
+            "gate derivative {} vs {expected}",
+            grads[gate_at]
+        );
+        trainer.apply_step(None).unwrap();
+        let mut overflow =
+            MambaGpuTrainer::new(&weights, cfg, TrainSessionCfg::new(1, 1, 1), opts).unwrap();
+        overflow.load_scaler_state(1.0, 0).unwrap();
+        overflow.forward(&[0.0], &mut got).unwrap();
+        assert_eq!(
+            overflow
+                .backward_step(&[1.0], BackwardOpts::default())
+                .unwrap()
+                .overflow_skipped,
+            Some(true)
+        );
     }
 }

@@ -62,10 +62,9 @@ __device__ __forceinline__ float ssm_update_input_fused(float da, float h,
 // The decode SSM step with its neighbours folded in: softplus on the
 // dt_proj output, B and C read straight from xdbl, and the gate read from
 // the in_proj output with the SiLU recomputed. One launch replaces the
-// softplus, gather, step and gating kernels. Every folded value is
-// spelled as the kernel it replaces spelled it, including the rounding
-// each deleted store applied (the to_f(FROM_F(..)) round trips), so the
-// outputs keep their bits; for f32 those round trips are identities.
+// softplus, gather, step and gating kernels. The time step retains the
+// projection's storage precision. The scan and SiLU meet in float so a
+// finite gated product can survive an ungated value outside half range.
 //
 // A channel takes m1_step_lanes(d_state) neighbouring lanes of one warp
 // (a power of two, at most 16, giving each lane at most four states up to
@@ -89,7 +88,7 @@ __device__ __forceinline__ int m1_step_lanes(int d_state) {
     while (lanes < want && lanes < 16) lanes <<= 1;
     return lanes;
 }
-#define DEFINE_SSM_STEP_FWD_FUSED(NAME, IDX, T, FROM_F, UPDATE)            \
+#define DEFINE_SSM_STEP_FWD_FUSED(NAME, IDX, T, FROM_F, UPDATE, WIDE_GATE)            \
 extern "C" __global__ void NAME(                                           \
     float* h,                                                              \
     T* y,                                                                  \
@@ -145,22 +144,28 @@ extern "C" __global__ void NAME(                                           \
         y_d = __shfl_sync(0xffffffffu, y_d, (lane & ~(lanes - 1)) + r);    \
     }                                                                      \
     if (!live || sub != 0) return;                                         \
-    /* The gate's SiLU as the split kernel spelled it, then its store. */  \
+    /* The final gated mixer output is the first narrow store. */  \
     float g = to_f(proj_gate[b * gate_stride + d_inner + d]);              \
-    float gp = to_f(FROM_F(g / (1.0f + exp2f(-g * LOG2E))));               \
-    y[idx] = FROM_F(y_d * gp);                                             \
+    float gp = g / (1.0f + exp2f(-g * LOG2E));               \
+    y[idx] = FROM_F(y_d * (WIDE_GATE ? gp : to_f(FROM_F(gp))));                                             \
 }
 
-DEFINE_SSM_STEP_FWD_FUSED(ssm_step_forward_fused_f32, int, float, from_f_f32, ssm_update_decay_fused)
-DEFINE_SSM_STEP_FWD_FUSED(ssm_step_forward_fused_f32_i64, long long, float, from_f_f32, ssm_update_decay_fused)
-DEFINE_SSM_STEP_FWD_FUSED(ssm_step_forward_fused_bf16, int, __nv_bfloat16, from_f_bf16, ssm_update_input_fused)
-DEFINE_SSM_STEP_FWD_FUSED(ssm_step_forward_fused_bf16_i64, long long, __nv_bfloat16, from_f_bf16, ssm_update_input_fused)
-DEFINE_SSM_STEP_FWD_FUSED(ssm_step_forward_fused_f16, int, __half, from_f_f16, ssm_update_input_fused)
-DEFINE_SSM_STEP_FWD_FUSED(ssm_step_forward_fused_f16_i64, long long, __half, from_f_f16, ssm_update_input_fused)
+DEFINE_SSM_STEP_FWD_FUSED(ssm_step_forward_fused_f32, int, float, from_f_f32, ssm_update_decay_fused, false)
+DEFINE_SSM_STEP_FWD_FUSED(ssm_step_readout_f32, int, float, from_f_f32, ssm_update_decay_fused, true)
+DEFINE_SSM_STEP_FWD_FUSED(ssm_step_forward_fused_f32_i64, long long, float, from_f_f32, ssm_update_decay_fused, false)
+DEFINE_SSM_STEP_FWD_FUSED(ssm_step_readout_f32_i64, long long, float, from_f_f32, ssm_update_decay_fused, true)
+DEFINE_SSM_STEP_FWD_FUSED(ssm_step_forward_fused_bf16, int, __nv_bfloat16, from_f_bf16, ssm_update_input_fused, false)
+DEFINE_SSM_STEP_FWD_FUSED(ssm_step_readout_bf16, int, __nv_bfloat16, from_f_bf16, ssm_update_input_fused, true)
+DEFINE_SSM_STEP_FWD_FUSED(ssm_step_forward_fused_bf16_i64, long long, __nv_bfloat16, from_f_bf16, ssm_update_input_fused, false)
+DEFINE_SSM_STEP_FWD_FUSED(ssm_step_readout_bf16_i64, long long, __nv_bfloat16, from_f_bf16, ssm_update_input_fused, true)
+DEFINE_SSM_STEP_FWD_FUSED(ssm_step_forward_fused_f16, int, __half, from_f_f16, ssm_update_input_fused, false)
+DEFINE_SSM_STEP_FWD_FUSED(ssm_step_readout_f16, int, __half, from_f_f16, ssm_update_input_fused, true)
+DEFINE_SSM_STEP_FWD_FUSED(ssm_step_forward_fused_f16_i64, long long, __half, from_f_f16, ssm_update_input_fused, false)
+DEFINE_SSM_STEP_FWD_FUSED(ssm_step_readout_f16_i64, long long, __half, from_f_f16, ssm_update_input_fused, true)
 
 // Templated SSM burnin nosave — sequence forward for prefill / target net.
 // Activations in T_IN, state/a_neg/D stay f32. A channel's lanes as above.
-#define DEFINE_SSM_BURNIN_NOSAVE(NAME, IDX, TY, FROM_F)                        \
+#define DEFINE_SSM_BURNIN_NOSAVE(NAME, IDX, TY, FROM_F, WIDE_GATE)                        \
 extern "C" __global__ void NAME(                                               \
     float* h,                                                                  \
     TY* y_out,                                                                 \
@@ -218,16 +223,14 @@ extern "C" __global__ void NAME(                                               \
             y_d = __fmaf_rn(h_local[n], to_f(C[bt_ds + n]), y_d);              \
         }                                                                      \
         if (k == last) {                                                       \
-            TY ty = FROM_F(y_d);                                               \
+            float value = y_d;                                               \
             if (gate_stride > 0) {                                             \
-                /* Round-trip emulation of the replaced typed chain (see       \
-                 * the parallel nosave twin). */                               \
                 float g = to_f(proj_gate[(b * T_len + t) * gate_stride         \
                                          + d_inner + d]);                      \
-                TY tg = FROM_F(g / (1.0f + exp2f(-g * 1.4426950408889634f)));  \
-                ty = FROM_F(to_f(ty) * to_f(tg));                              \
+                float tg = g / (1.0f + exp2f(-g * 1.4426950408889634f));  \
+                value = WIDE_GATE ? value * tg : to_f(FROM_F(value)) * to_f(FROM_F(tg));                              \
             }                                                                  \
-            y_out[bt_di] = ty;                                                 \
+            y_out[bt_di] = FROM_F(value);                                                 \
         }                                                                      \
         y_pass = y_d;                                                          \
         delta_pass = delta_d;                                                  \
@@ -238,23 +241,40 @@ extern "C" __global__ void NAME(                                               \
         h[h_base + n] = h_local[n];                                            \
 }
 
-DEFINE_SSM_BURNIN_NOSAVE(ssm_burnin_forward_nosave_f32, int, float, from_f_f32)
-DEFINE_SSM_BURNIN_NOSAVE(ssm_burnin_forward_nosave_f32_i64, long long, float, from_f_f32)
-DEFINE_SSM_BURNIN_NOSAVE(ssm_burnin_forward_nosave_bf16, int, __nv_bfloat16, from_f_bf16)
-DEFINE_SSM_BURNIN_NOSAVE(ssm_burnin_forward_nosave_bf16_i64, long long, __nv_bfloat16, from_f_bf16)
-DEFINE_SSM_BURNIN_NOSAVE(ssm_burnin_forward_nosave_f16, int, __half, from_f_f16)
-DEFINE_SSM_BURNIN_NOSAVE(ssm_burnin_forward_nosave_f16_i64, long long, __half, from_f_f16)
+DEFINE_SSM_BURNIN_NOSAVE(ssm_burnin_forward_nosave_f32, int, float, from_f_f32, false)
+DEFINE_SSM_BURNIN_NOSAVE(ssm_prefill_sequential_gated_f32, int, float, from_f_f32, true)
+DEFINE_SSM_BURNIN_NOSAVE(ssm_burnin_forward_nosave_f32_i64, long long, float, from_f_f32, false)
+DEFINE_SSM_BURNIN_NOSAVE(ssm_prefill_sequential_gated_f32_i64, long long, float, from_f_f32, true)
+DEFINE_SSM_BURNIN_NOSAVE(ssm_burnin_forward_nosave_bf16, int, __nv_bfloat16, from_f_bf16, false)
+DEFINE_SSM_BURNIN_NOSAVE(ssm_prefill_sequential_gated_bf16, int, __nv_bfloat16, from_f_bf16, true)
+DEFINE_SSM_BURNIN_NOSAVE(ssm_burnin_forward_nosave_bf16_i64, long long, __nv_bfloat16, from_f_bf16, false)
+DEFINE_SSM_BURNIN_NOSAVE(ssm_prefill_sequential_gated_bf16_i64, long long, __nv_bfloat16, from_f_bf16, true)
+DEFINE_SSM_BURNIN_NOSAVE(ssm_burnin_forward_nosave_f16, int, __half, from_f_f16, false)
+DEFINE_SSM_BURNIN_NOSAVE(ssm_prefill_sequential_gated_f16, int, __half, from_f_f16, true)
+DEFINE_SSM_BURNIN_NOSAVE(ssm_burnin_forward_nosave_f16_i64, long long, __half, from_f_f16, false)
+DEFINE_SSM_BURNIN_NOSAVE(ssm_prefill_sequential_gated_f16_i64, long long, __half, from_f_f16, true)
 
 // Templated SSM burnin WITH saves — full forward sequence for training/backward.
 // h_saved and y_out in activation dtype; h_state + a_neg + D in f32. The
 // first lane computes and saves the step's softplus and hands it on.
-#define DEFINE_SSM_BURNIN(NAME, IDX, TY, FROM_F)                               \
+// Training also saves the ungated fp32 readout for the gate derivative.
+#define M1_RAW_ARGS(T)
+#define M1_GATED_ARGS(T) , const T* __restrict__ proj_gate, T* __restrict__ gated
+#define M1_RAW_STORE(I, D, V, CAST) y_out[I] = CAST(V)
+#define M1_GATED_STORE(I, D, V, CAST) do {                                   \
+    const auto ix = (I);                                                       \
+    float g = to_f(proj_gate[2LL * ix + d_inner - (D)]);                        \
+    y_out[ix] = (V);                                                          \
+    gated[ix] = CAST((V) * (g / (1.0f + exp2f(-g * LOG2E))));                 \
+} while (0)
+#define DEFINE_SSM_BURNIN(NAME, IDX, TY, FROM_F, OUT, GATE_ARGS, SAVE)                               \
 extern "C" __global__ void NAME(                                               \
-    float* h, TY* y_out, float* h_saved,                                       \
+    float* h, OUT* y_out, float* h_saved,                                       \
     const TY* delta_raw, TY* delta_saved, const TY* u,                         \
     const TY* B, const TY* C,                                                  \
     const float* a_neg, const float* D,                                        \
     int batch, int T_len, int d_inner, int d_state, int lanes                  \
+    GATE_ARGS(TY) \
 ) {                                                                            \
     const IDX tid = (IDX)blockIdx.x * blockDim.x + threadIdx.x;                \
     const int k = (int)tid & (lanes - 1);                                      \
@@ -313,7 +333,7 @@ extern "C" __global__ void NAME(                                               \
                                                 to_f(B[bt_ds + n]));           \
             y_d = __fmaf_rn(h_local[n], to_f(C[bt_ds + n]), y_d);              \
         }                                                                      \
-        if (k == last) y_out[bt_di] = FROM_F(y_d);                             \
+        if (k == last) SAVE(bt_di, d, y_d, FROM_F);                             \
         _Pragma("unroll")                                                      \
         for (int n = 0; n < M1_SEQ_SLICE; n++) if (n >= len) break; else {     \
             IDX hs_idx =                                                       \
@@ -329,12 +349,22 @@ extern "C" __global__ void NAME(                                               \
         h[h_base + n] = h_local[n];                                            \
 }
 
-DEFINE_SSM_BURNIN(ssm_burnin_forward_f32, int, float, from_f_f32)
-DEFINE_SSM_BURNIN(ssm_burnin_forward_f32_i64, long long, float, from_f_f32)
-DEFINE_SSM_BURNIN(ssm_burnin_forward_bf16, int, __nv_bfloat16, from_f_bf16)
-DEFINE_SSM_BURNIN(ssm_burnin_forward_bf16_i64, long long, __nv_bfloat16, from_f_bf16)
-DEFINE_SSM_BURNIN(ssm_burnin_forward_f16, int, __half, from_f_f16)
-DEFINE_SSM_BURNIN(ssm_burnin_forward_f16_i64, long long, __half, from_f_f16)
+DEFINE_SSM_BURNIN(ssm_burnin_forward_f32, int, float, from_f_f32, float, M1_RAW_ARGS, M1_RAW_STORE)
+DEFINE_SSM_BURNIN(ssm_burnin_readout_f32, int, float, from_f_f32, float, M1_GATED_ARGS, M1_GATED_STORE)
+DEFINE_SSM_BURNIN(ssm_burnin_forward_f32_i64, long long, float, from_f_f32, float, M1_RAW_ARGS, M1_RAW_STORE)
+DEFINE_SSM_BURNIN(ssm_burnin_readout_f32_i64, long long, float, from_f_f32, float, M1_GATED_ARGS, M1_GATED_STORE)
+DEFINE_SSM_BURNIN(ssm_burnin_forward_bf16, int, __nv_bfloat16, from_f_bf16, __nv_bfloat16, M1_RAW_ARGS, M1_RAW_STORE)
+DEFINE_SSM_BURNIN(ssm_burnin_readout_bf16, int, __nv_bfloat16, from_f_bf16, float, M1_GATED_ARGS, M1_GATED_STORE)
+DEFINE_SSM_BURNIN(ssm_burnin_forward_bf16_i64, long long, __nv_bfloat16, from_f_bf16, __nv_bfloat16, M1_RAW_ARGS, M1_RAW_STORE)
+DEFINE_SSM_BURNIN(ssm_burnin_readout_bf16_i64, long long, __nv_bfloat16, from_f_bf16, float, M1_GATED_ARGS, M1_GATED_STORE)
+DEFINE_SSM_BURNIN(ssm_burnin_forward_f16, int, __half, from_f_f16, __half, M1_RAW_ARGS, M1_RAW_STORE)
+DEFINE_SSM_BURNIN(ssm_burnin_readout_f16, int, __half, from_f_f16, float, M1_GATED_ARGS, M1_GATED_STORE)
+DEFINE_SSM_BURNIN(ssm_burnin_forward_f16_i64, long long, __half, from_f_f16, __half, M1_RAW_ARGS, M1_RAW_STORE)
+DEFINE_SSM_BURNIN(ssm_burnin_readout_f16_i64, long long, __half, from_f_f16, float, M1_GATED_ARGS, M1_GATED_STORE)
+#undef M1_GATED_STORE
+#undef M1_RAW_STORE
+#undef M1_GATED_ARGS
+#undef M1_RAW_ARGS
 
 // ======================== BACKWARD ========================
 

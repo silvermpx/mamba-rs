@@ -315,10 +315,10 @@ __device__ __forceinline__ void m3m_prep_tok_body(
     __syncthreads();
     for (int c0 = threadIdx.x * M3M_CHUNK; c0 < tn; c0 += blockDim.x * M3M_CHUNK) {
         const int c1 = min(tn, c0 + M3M_CHUNK);
-        float acs = 0.0f;
+        float acs = 0.0f, remainder = 0.0f;
         for (int i = c0; i < c1; i++) {
             const bool fresh = seq_idx != nullptr && vl_starts(seq_idx, b, seq, t0 + i);
-            acs = __fadd_rn(fresh ? 0.0f : acs, s_adt[i]);
+            acs = chunk_decay_prefix(acs, s_adt[i], remainder, fresh);
             c_rows[i * cstr + 3] = acs;
         }
     }
@@ -525,7 +525,7 @@ __device__ __forceinline__ void m3m_chunk_state_body(
         }
         for (int s = tid; s < sn_; s += blockDim.x) {
             const float* cf = coef + ((b * seq + t0 + s0 + s) * nh + h) * 4;
-            wt[s] = __fmul_rn(mimo_exp(fminf(__fsub_rn(acs_last, cf[3]), 0.0f)), cf[2]);
+            wt[s] = __fmul_rn(mimo_exp(fminf(chunk_decay_interval(cf + 3, 4LL * nh, lc - 1 - s0 - s, cf[3], acs_last), 0.0f)), cf[2]);
         }
         __syncthreads();
         if (active) {
@@ -613,7 +613,7 @@ __device__ __forceinline__ void m3m_state_tile_chunk(
         if (s0 > s_first) __syncthreads();
         for (int s = tid; s < sn_; s += blockDim.x) {
             const float* cf = coef + ((b * seq + t0 + s0 + s) * nh + h) * 4;
-            wt[s] = __fmul_rn(mimo_exp(fminf(__fsub_rn(acs_last, cf[3]), 0.0f)), cf[2]);
+            wt[s] = __fmul_rn(mimo_exp(fminf(chunk_decay_interval(cf + 3, 4LL * nh, lc - 1 - s0 - s, cf[3], acs_last), 0.0f)), cf[2]);
         }
         const int kd = sn_ * rank;
         // The keys, rotated: a warp's rows two at a time, every load of the
@@ -1047,7 +1047,7 @@ __device__ __forceinline__ void m3m_chunk_scan_body(
                 const long long row_s = b * seq + t0 + s;
                 const float* cf = coef + (row_s * nh + h) * 4;
                 const float w = s < t
-                    ? __fmul_rn(mimo_exp(fminf(__fsub_rn(acs_t, cf[3]), 0.0f)), cf[2])
+                    ? __fmul_rn(mimo_exp(fminf(chunk_decay_interval(cf + 3, 4LL * nh, t - s, cf[3], acs_t), 0.0f)), cf[2])
                     : gamma_t;
                 const float xsv = xs[sk * pt + pl];
                 _Pragma("unroll") for (int r = 0; r < R; r++) {
@@ -1292,7 +1292,7 @@ __device__ __forceinline__ void m3m_chunk_scan_tiles_body(
             const int t = tile0 + i / kt, s = s0 + i % kt;
             float w = 0.0f;
             if (t < s_end && s <= t)
-                w = s < t ? __fmul_rn(mimo_exp(fminf(__fsub_rn(sc[t], sc[s]), 0.0f)),
+                w = s < t ? __fmul_rn(mimo_exp(fminf(chunk_decay_interval(sc + s, 1, t - s, sc[s], sc[t]), 0.0f)),
                                       sc[M3M_CHUNK + s])
                           : sc[2 * M3M_CHUNK + t];
             wts[i] = w;
@@ -1799,7 +1799,7 @@ __device__ __forceinline__ void m3m_chunk_scan_tc_core(
             float v = 0.0f;
             if (i < rows && col < rows && s <= t && sid[s] == sid[t]) {
                 const float w = s < t
-                    ? __fmul_rn(mimo_exp(fminf(__fsub_rn(acs[t], acs[s]), 0.0f)), scl[s])
+                    ? __fmul_rn(mimo_exp(fminf(chunk_decay_interval(acs + s, 1, t - s, acs[s], acs[t]), 0.0f)), scl[s])
                     : gam[t];
                 v = __fmul_rn(gacc[j][q], w);
             }

@@ -1269,7 +1269,8 @@ pub fn gpu_forward_mamba_target_burnin(
             // the gated output lands directly and no gating pass runs.
             let gate_stride = (2 * di) as i32;
             if dims.scan_mode.use_parallel(t, ds) {
-                let width = scan_fwd_nosave_index_width(b, t, di, ds, 2 * di, tmajor_in);
+                let stride = if tmajor_in { 0 } else { 2 * di };
+                let width = scan_fwd_nosave_index_width(b, t, di, ds, stride, tmajor_in);
                 for (y_first, cfg) in y_runs(grid_parallel_scan(b, t, di, ds)) {
                     let mut builder = ctx
                         .stream

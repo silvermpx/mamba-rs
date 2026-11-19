@@ -31,6 +31,7 @@ impl Mamba3MimoBackbone {
     /// Fresh weights with the reference init.
     pub fn init(cfg: Mamba3MimoConfig, input_dim: usize, seed: u64) -> Result<Self, String> {
         cfg.validate()?;
+        crate::config::input_projection_lens(input_dim, cfg.d_model, false)?;
         Ok(Self {
             weights: Mamba3MimoWeights::init(&cfg, input_dim, seed),
             cfg,

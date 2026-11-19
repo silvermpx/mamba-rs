@@ -865,3 +865,138 @@ fn the_cooperative_scan_keeps_its_48_kb_shapes() {
     assert_eq!(chunk_scan_cfg(4, 8, 24, 100, 24, 64).0, ChunkArm::Sliced);
     assert_eq!(chunk_scan_cfg(1, 73, 48, 16, 16, 64).0, ChunkArm::Whole);
 }
+
+#[test]
+fn an_earlier_large_decay_preserves_the_later_impulse() {
+    let ctx = GpuCtx::new(&GpuDevice::new(0).unwrap()).unwrap();
+    let kernels = make_m3k(&ctx);
+    let (rows, chunk, hd, ds) = (65usize, 64usize, 16usize, 16usize);
+    let dims = [1, rows, 1, hd, ds, chunk].map(|x| x as i32);
+    let mut logs = vec![-std::f32::consts::LN_2; rows];
+    logs[0] = -2.0_f32.powi(100);
+    logs[32] = logs[0];
+    let adt = upload_f32(&ctx, &logs);
+    let ones = upload_f32(&ctx, &vec![1.0; rows]);
+    let mut k = vec![0.0; rows * ds];
+    let mut q = k.clone();
+    let mut x = vec![0.0; rows * hd];
+    k[61 * ds] = 1.0;
+    x[61 * hd] = 1.0;
+    q[0] = 1.0;
+    q[62 * ds] = 1.0;
+    q[64 * ds] = 1.0;
+    let (k, q, x) = (
+        upload_f32(&ctx, &k),
+        upload_f32(&ctx, &q),
+        upload_f32(&ctx, &x),
+    );
+    let ks = GpuBuffer::zeros(&ctx.stream, rows * ds).unwrap();
+    let qk = GpuBuffer::zeros(&ctx.stream, rows).unwrap();
+    let tape = GpuBuffer::zeros(&ctx.stream, 2 * chunk).unwrap();
+    let state = GpuBuffer::zeros(&ctx.stream, 2 * hd * ds).unwrap();
+    let skip = upload_f32(&ctx, &[0.0]);
+    let launch = |kernel: &CudaFunction, cfg, ptrs: &[u64]| {
+        for (first, cfg) in y_runs(cfg) {
+            let mut call = ctx.stream.launch_builder(kernel);
+            for p in ptrs {
+                call.arg(p);
+            }
+            for dim in &dims {
+                call.arg(dim);
+            }
+            call.arg(&first);
+            call.arg(&0u64);
+            unsafe { call.launch(cfg) }.unwrap();
+        }
+        ctx.stream.synchronize().unwrap();
+    };
+    let pres = [
+        ks.cached_ptr(),
+        qk.cached_ptr(),
+        0,
+        0,
+        state.cached_ptr(),
+        k.cached_ptr(),
+        q.cached_ptr(),
+        ones.cached_ptr(),
+        ones.cached_ptr(),
+        x.cached_ptr(),
+        adt.cached_ptr(),
+        tape.cached_ptr(),
+    ];
+    launch(
+        &kernels.m3_chunk_pre_state_sliced_typed.i32.f32,
+        chunk_pre_state_sliced_cfg(1, 2, 1, hd),
+        &pres,
+    );
+    let exit = download_f32(&ctx, &state, 2 * hd * ds);
+    assert!((exit[0] - 0.25).abs() < 1e-6, "chunk exit {}", exit[0]);
+    let entering = upload_f32(&ctx, &vec![1.0; hd * ds]);
+    let prev_k = GpuBuffer::zeros(&ctx.stream, ds).unwrap();
+    let prev_v = GpuBuffer::zeros(&ctx.stream, hd).unwrap();
+    let ptrs = [
+        state.cached_ptr(),
+        entering.cached_ptr(),
+        prev_k.cached_ptr(),
+        prev_v.cached_ptr(),
+        entering.cached_ptr(),
+        prev_k.cached_ptr(),
+        prev_v.cached_ptr(),
+        ones.cached_ptr(),
+        ones.cached_ptr(),
+        tape.cached_ptr(),
+        k.cached_ptr(),
+        x.cached_ptr(),
+    ];
+    for (first, cfg) in y_runs(state_pass_fused_cfg(1, 1, hd, ds)) {
+        let mut call = ctx
+            .stream
+            .launch_builder(&kernels.m3_state_pass_fused_typed.i32.f32);
+        for ptr in &ptrs {
+            call.arg(ptr);
+        }
+        let args = [
+            1,
+            2,
+            1,
+            hd as i32,
+            ds as i32,
+            chunk as i32,
+            rows as i32,
+            first,
+        ];
+        for arg in &args {
+            call.arg(arg);
+        }
+        call.arg(&0u64);
+        unsafe { call.launch(cfg) }.unwrap();
+    }
+    let y = GpuBuffer::zeros(&ctx.stream, rows * hd).unwrap();
+    let ptrs = [
+        y.cached_ptr(),
+        x.cached_ptr(),
+        q.cached_ptr(),
+        ks.cached_ptr(),
+        qk.cached_ptr(),
+        tape.cached_ptr(),
+        state.cached_ptr(),
+        skip.cached_ptr(),
+    ];
+    launch(
+        &kernels.m3_chunk_scan_fwd_sliced_typed.i32.f32,
+        chunk_scan_sliced_cfg(1, 2, 1, hd),
+        &ptrs,
+    );
+    let y = download_f32(&ctx, &y, rows * hd);
+    assert_eq!(y[0], 0.0);
+    assert!(
+        (y[62 * hd] - 0.5).abs() < 1e-6,
+        "within chunk {}",
+        y[62 * hd]
+    );
+    assert!(
+        (y[64 * hd] - 0.125).abs() < 1e-6,
+        "next chunk {}",
+        y[64 * hd]
+    );
+}

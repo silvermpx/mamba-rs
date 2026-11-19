@@ -12,10 +12,14 @@
 //! next window drops it by starting a sequence at its first position.
 //! Mamba-1 has no varlen in the reference and refuses one.
 
+use std::sync::Arc;
+
 /// The sequence ids of a window's positions, `[batch, seq_len]`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Varlen {
-    seq_idx: Vec<i32>,
+    // The trainer and its checkpoints share immutable ids. Keeping the
+    // caller's vector also avoids copying a packed batch at construction.
+    seq_idx: Arc<Vec<i32>>,
     batch: usize,
     seq_len: usize,
 }
@@ -44,7 +48,7 @@ impl Varlen {
             }
         }
         Ok(Self {
-            seq_idx,
+            seq_idx: Arc::new(seq_idx),
             batch,
             seq_len,
         })
@@ -127,6 +131,23 @@ impl Varlen {
             ));
         }
         Ok(())
+    }
+
+    /// A backward can still use its saved activations when only the labels
+    /// changed. A row with no starts continues the carried sequence.
+    pub(crate) fn same_boundaries(left: Option<&Self>, right: Option<&Self>) -> bool {
+        match (left, right) {
+            (None, None) => true,
+            (Some(p), None) | (None, Some(p)) => p.seq_idx.iter().all(|&id| id == 0),
+            (Some(a), Some(b)) => {
+                (a.batch, a.seq_len) == (b.batch, b.seq_len)
+                    && (Arc::ptr_eq(&a.seq_idx, &b.seq_idx)
+                        || (0..a.batch).all(|row| {
+                            let (x, y) = (a.row(row), b.row(row));
+                            (0..x.len()).all(|t| starts_at(x, t) == starts_at(y, t))
+                        }))
+            }
+        }
     }
 }
 

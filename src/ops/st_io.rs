@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
 
-use safetensors::serialize_to_file;
 use safetensors::tensor::{SafeTensors, TensorView};
+use safetensors::{Dtype, serialize_to_file};
 
 /// The tensors of one checkpoint, named, in the order they are written.
 pub(crate) struct TensorList<'a> {
@@ -49,12 +49,34 @@ impl<'a> TensorList<'a> {
                 data.len()
             ));
         }
-        // The views borrow `data`; safetensors writes them little-endian,
-        // which is the f32 layout in memory on every target this crate
-        // builds for.
-        let bytes: &'a [u8] = bytemuck_f32(data);
-        let view = TensorView::new(safetensors::Dtype::F32, shape, bytes)
-            .map_err(|e| format!("tensor '{name}': {e:?}"))?;
+        self.push_bytes(name, Dtype::F32, shape, pulp::bytemuck::cast_slice(data))
+    }
+
+    /// Keep a packed window's integer labels and both of its dimensions.
+    pub(crate) fn push_i32(
+        &mut self,
+        name: String,
+        data: &'a [i32],
+        shape: [usize; 2],
+    ) -> Result<(), String> {
+        self.push_bytes(
+            name,
+            Dtype::I32,
+            shape.into(),
+            pulp::bytemuck::cast_slice(data),
+        )
+    }
+
+    /// The views borrow the original little-endian data until the file is written.
+    fn push_bytes(
+        &mut self,
+        name: String,
+        dtype: Dtype,
+        shape: Vec<usize>,
+        bytes: &'a [u8],
+    ) -> Result<(), String> {
+        let view =
+            TensorView::new(dtype, shape, bytes).map_err(|e| format!("tensor '{name}': {e:?}"))?;
         self.tensors.push((name, view));
         Ok(())
     }
@@ -70,13 +92,6 @@ impl<'a> TensorList<'a> {
         serialize_to_file(self.tensors, Some(meta), path)
             .map_err(|e| format!("safetensors save failed: {e:?}"))
     }
-}
-
-/// The bytes of an f32 slice.
-fn bytemuck_f32(data: &[f32]) -> &[u8] {
-    // SAFETY: any f32 is four initialized bytes, u8 has alignment one, and
-    // the length covers exactly the slice's memory.
-    unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), std::mem::size_of_val(data)) }
 }
 
 /// An f32 tensor of `st` as a vector. Decoded byte by byte: the format does

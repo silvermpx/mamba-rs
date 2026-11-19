@@ -99,10 +99,10 @@ extern "C" __global__ void gating_backward(
 // All math in f32, activations T_IN (typed). Outputs typed.
 // Reference math identical to f32 above; matches state-spaces/mamba
 // selective_scan_bwd_kernel.cuh z/gate-branch backward.
-#define DEFINE_GATING_BWD(SUFFIX, T, FROM_F)                                   \
+#define DEFINE_GATING_BWD(SUFFIX, T, FROM_F, READOUT, GATE_ROUND)                                   \
 extern "C" __global__ void gating_backward_##SUFFIX(                           \
     T* d_y, T* d_gate_pre,                                                     \
-    const T* d_gated, const T* y,                                              \
+    const T* d_gated, const READOUT* y,                                              \
     const T* gate_pre,                                                         \
     long long n, int d_inner, int out_stride, int out_offset                   \
 ) {                                                                            \
@@ -115,7 +115,7 @@ extern "C" __global__ void gating_backward_##SUFFIX(                           \
            deleted activation carried: FROM_F of the split kernel's        \
            division form, then back to f32 - the exact bits                \
            `gate_post[i]` held. */                                         \
-        float gp = to_f(FROM_F(xv / (1.0f + exp2f(-xv * LOG2E))));             \
+        float gp = to_f(GATE_ROUND(xv / (1.0f + exp2f(-xv * LOG2E))));             \
         d_y[i] = FROM_F(dg * gp);                                              \
         float sigma = 1.0f / (1.0f + exp2f(-xv * 1.4426950408889634f));        \
         d_gate_pre[row * out_stride + out_offset + col] =                      \
@@ -123,9 +123,12 @@ extern "C" __global__ void gating_backward_##SUFFIX(                           \
     }                                                                          \
 }
 
-DEFINE_GATING_BWD(f32,  float,         from_f_f32)
-DEFINE_GATING_BWD(bf16, __nv_bfloat16, from_f_bf16)
-DEFINE_GATING_BWD(f16,  __half,        from_f_f16)
+DEFINE_GATING_BWD(f32, float, from_f_f32, float, from_f_f32)
+DEFINE_GATING_BWD(readout_f32, float, from_f_f32, float, from_f_f32)
+DEFINE_GATING_BWD(bf16, __nv_bfloat16, from_f_bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_GATING_BWD(readout_bf16, __nv_bfloat16, from_f_bf16, float, from_f_f32)
+DEFINE_GATING_BWD(f16, __half, from_f_f16, __half, from_f_f16)
+DEFINE_GATING_BWD(readout_f16, __half, from_f_f16, float, from_f_f32)
 
 #define DEFINE_GATHER_COLS(SUFFIX, T)                                         \
 extern "C" __global__ void gather_cols_##SUFFIX(                              \

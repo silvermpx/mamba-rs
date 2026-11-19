@@ -12,7 +12,7 @@ use mamba_rs::{
     AnyCpuTrainer, BackwardOpts, CpuOptions, CpuTrainer, Mamba2Config, Mamba2CpuTrainer,
     Mamba2Weights, Mamba3Config, Mamba3CpuTrainer, Mamba3MimoConfig, Mamba3MimoCpuTrainer,
     Mamba3MimoWeights, Mamba3Weights, MambaConfig, MambaCpuTrainer, MambaWeights, TrainSessionCfg,
-    Varlen, WeightDtype,
+    TrainerState, Varlen, WeightDtype,
 };
 
 const D_MODEL: usize = 32;
@@ -422,4 +422,212 @@ fn mamba1_refuses_a_packing() {
     let err = t.set_varlen(Some(&packing)).unwrap_err();
     assert!(err.contains("no varlen"), "{err}");
     t.set_varlen(None).unwrap();
+}
+
+#[test]
+fn packing_contract_backward_requires_the_boundaries_of_its_forward() {
+    let input = values(SEQ_LEN * INPUT_DIM, 32);
+    let mut d = grad(SEQ_LEN * D_MODEL, 33);
+    d[..CUT * D_MODEL].fill(0.0);
+    let mut rows = vec![0.0; d.len()];
+    let mut dx = vec![0.0; input.len()];
+    let packing = Varlen::from_starts(&[vec![CUT]], SEQ_LEN).unwrap();
+    let mut ids = vec![0; SEQ_LEN];
+    ids[CUT..].fill(i32::MAX);
+    let relabeled = Varlen::from_seq_idx(ids, 1, SEQ_LEN).unwrap();
+    let wrong_shape = Varlen::from_seq_idx(vec![0; SEQ_LEN], 2, SEQ_LEN / 2).unwrap();
+    let uncut = Varlen::from_starts(&[vec![]], SEQ_LEN).unwrap();
+    for (family, mut t) in trainers((1, SEQ_LEN), WeightDtype::F32) {
+        t.set_varlen(Some(&packing)).unwrap();
+        t.forward(&input, &mut rows).unwrap();
+        assert!(t.set_varlen(Some(&wrong_shape)).is_err(), "{family}");
+        t.set_varlen(Some(&relabeled)).unwrap();
+        t.backward_step_input_grad(&d, BackwardOpts::default(), &mut dx)
+            .unwrap();
+        assert!(dx[..CUT * INPUT_DIM].iter().all(|&x| x == 0.0), "{family}");
+        assert!(dx[CUT * INPUT_DIM..].iter().any(|&x| x != 0.0), "{family}");
+
+        t.forward(&input, &mut rows).unwrap();
+        t.set_varlen(None).unwrap();
+        assert!(
+            t.backward_step(&d, BackwardOpts::default()).is_err(),
+            "{family} accepted a backward across a changed sequence boundary"
+        );
+        t.forward(&input, &mut rows).unwrap();
+        t.set_varlen(Some(&uncut)).unwrap();
+        t.backward_step_input_grad(&d, BackwardOpts::default(), &mut dx)
+            .unwrap();
+        assert!(dx[..CUT * INPUT_DIM].iter().any(|&x| x != 0.0), "{family}");
+    }
+}
+
+#[test]
+fn packing_contract_checkpoint_restores_the_next_windows() {
+    let shape = (2, SEQ_LEN);
+    let input = values(2 * SEQ_LEN * INPUT_DIM, 34);
+    let d = grad(2 * SEQ_LEN * D_MODEL, 35);
+    let warm = values(input.len(), 36);
+    let mut ids = vec![0; 2 * SEQ_LEN];
+    ids[CUT..SEQ_LEN].fill(i32::MAX);
+    ids[SEQ_LEN..].fill(i32::MAX - 1);
+    ids[SEQ_LEN + 2..].fill(i32::MAX);
+    let packing = Varlen::from_seq_idx(ids, 2, SEQ_LEN).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trainer.safetensors");
+    for ((family, mut original), (_, mut restored)) in trainers(shape, WeightDtype::F32)
+        .into_iter()
+        .zip(trainers(shape, WeightDtype::F32))
+    {
+        original.set_lr(0.0).unwrap();
+        restored.set_lr(0.0).unwrap();
+        for next in [Some(&packing), None] {
+            original.set_varlen(next).unwrap();
+            original.step(&warm, &d).unwrap();
+            let saved = original.trainer_state().unwrap();
+            assert_eq!(saved.packing.as_ref(), next, "{family}: configured labels");
+            saved.save(&path).unwrap();
+            let loaded = TrainerState::load(&path).unwrap();
+            assert_eq!(saved, loaded, "{family}: the file");
+            restored.load_trainer_state(&loaded).unwrap();
+            let (y, dx, dw) = run(&mut original, &input, &d);
+            let (yr, dxr, dwr) = run(&mut restored, &input, &d);
+            for (name, a, b) in [
+                ("output", y, yr),
+                ("input gradient", dx, dxr),
+                ("gradient", dw, dwr),
+            ] {
+                assert!(bits(&a) == bits(&b), "{family}: resumed {name}");
+            }
+            original.apply_window().unwrap();
+            restored.apply_window().unwrap();
+        }
+    }
+}
+
+#[test]
+fn packing_contract_checkpoint_requires_a_closed_accumulation_window() {
+    let input = values(SEQ_LEN * INPUT_DIM, 37);
+    let d = grad(SEQ_LEN * D_MODEL, 38);
+    let mut rows = vec![0.0; d.len()];
+    for (family, mut t) in trainers((1, SEQ_LEN), WeightDtype::F32) {
+        t.forward(&input, &mut rows).unwrap();
+        let checkpoint = t.trainer_state().unwrap();
+        t.backward_step(&d, BackwardOpts::default().with_accumulate_only(true))
+            .unwrap();
+        assert!(
+            t.trainer_state().is_err(),
+            "{family} checkpointed a window with unapplied gradients"
+        );
+        assert!(t.apply_window().unwrap().optimizer_stepped);
+        t.load_trainer_state(&checkpoint).unwrap();
+        assert!(
+            t.backward_step(&d, BackwardOpts::default()).is_err(),
+            "{family}"
+        );
+    }
+}
+
+#[test]
+fn packing_contract_loading_replaces_pending_gradients_and_activations() {
+    let input = values(SEQ_LEN * INPUT_DIM, 39);
+    let d = grad(SEQ_LEN * D_MODEL, 40);
+    let mut rows = vec![0.0; d.len()];
+    for (family, mut t) in trainers((1, SEQ_LEN), WeightDtype::F32) {
+        let checkpoint = t.trainer_state().unwrap();
+        t.accumulate(&input, &d).unwrap();
+        t.forward(&input, &mut rows).unwrap();
+        t.load_trainer_state(&checkpoint).unwrap();
+        assert!(t.apply_window().is_err(), "{family}: stale gradients");
+        assert!(
+            t.backward_step(&d, BackwardOpts::default()).is_err(),
+            "{family}: stale activations"
+        );
+        assert_eq!(t.step(&input, &d).unwrap().step, 1, "{family}");
+    }
+}
+
+#[test]
+fn packing_contract_failed_load_preserves_the_pending_backward_and_scale() {
+    let input = values(SEQ_LEN * INPUT_DIM, 41);
+    let d = grad(SEQ_LEN * D_MODEL, 42);
+    let mut rows = vec![0.0; d.len()];
+    let wrong_shape = Varlen::from_starts(&[vec![0], vec![3]], SEQ_LEN / 2).unwrap();
+    for (family, mut t) in trainers((1, SEQ_LEN), WeightDtype::F16) {
+        t.forward(&input, &mut rows).unwrap();
+        let checkpoint = t.trainer_state().unwrap();
+        let mut invalid = checkpoint.clone();
+        invalid.scaler = Some((4.0, 17));
+        invalid.optimizer.v.pop();
+        assert!(t.load_trainer_state(&invalid).is_err(), "{family}");
+        assert_eq!(t.scaler_state(), checkpoint.scaler, "{family}");
+        let mut invalid = checkpoint.clone();
+        invalid.packing = Some(wrong_shape.clone());
+        invalid.optimizer.step += 1;
+        assert!(t.load_trainer_state(&invalid).is_err(), "{family}");
+        assert_eq!(t.trainer_state().unwrap(), checkpoint, "{family}");
+        t.backward_step(&d, BackwardOpts::default()).unwrap();
+    }
+}
+
+#[test]
+fn packing_contract_an_optimizer_step_invalidates_an_older_forward() {
+    let input = values(SEQ_LEN * INPUT_DIM, 43);
+    let d = grad(SEQ_LEN * D_MODEL, 44);
+    let mut rows = vec![0.0; d.len()];
+    for (family, mut t) in trainers((1, SEQ_LEN), WeightDtype::F32) {
+        t.accumulate(&input, &d).unwrap();
+        t.forward(&input, &mut rows).unwrap();
+        assert!(t.apply_window().unwrap().optimizer_stepped);
+        assert!(
+            t.backward_step(&d, BackwardOpts::default()).is_err(),
+            "{family} paired the new weights with activations of the old weights"
+        );
+        t.forward(&input, &mut rows).unwrap();
+        t.backward_step(&d, BackwardOpts::default()).unwrap();
+    }
+}
+
+#[test]
+fn packing_contract_reads_legacy_files_and_rejects_malformed_ids() {
+    use safetensors::{Dtype, SafeTensors, tensor::TensorView};
+
+    let mut t = trainer(0, 2, WeightDtype::F32);
+    let packing = Varlen::from_seq_idx(vec![0, i32::MAX], 1, 2).unwrap();
+    t.set_varlen(Some(&packing)).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("packed.safetensors");
+    t.trainer_state().unwrap().save(&path).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let file = SafeTensors::deserialize(&bytes).unwrap();
+    let (_, header) = SafeTensors::read_metadata(&bytes).unwrap();
+    let metadata = header.metadata().as_ref().unwrap();
+    let packed_format = &metadata["format"];
+    let labels = file.tensor("seq_idx").unwrap();
+    assert_eq!(labels.dtype(), Dtype::I32);
+    assert_eq!(labels.shape(), &[1, 2]);
+    let read = |format: &str, ids: Option<TensorView<'_>>| {
+        let mut tensors = file.tensors();
+        tensors.retain(|(name, _)| name != "seq_idx");
+        if let Some(tensor) = ids {
+            tensors.push(("seq_idx".into(), tensor));
+        }
+        let mut m = metadata.clone();
+        m.insert("format".into(), format.into());
+        TrainerState::load_from_bytes(&safetensors::serialize(tensors, Some(m)).unwrap())
+    };
+    let legacy = "mamba-rs-trainer-state";
+    assert!(read(legacy, None).unwrap().packing.is_none());
+    assert!(read(legacy, Some(labels.clone())).is_err());
+    assert!(read(packed_format, None).is_err());
+    let decreasing = [1i32, 0].map(i32::to_le_bytes);
+    let negative = [-1i32, 0].map(i32::to_le_bytes);
+    for (dtype, shape, data) in [
+        (Dtype::F32, vec![1, 2], labels.data()),
+        (Dtype::I32, vec![2], labels.data()),
+        (Dtype::I32, vec![1, 2], decreasing.as_flattened()),
+        (Dtype::I32, vec![1, 2], negative.as_flattened()),
+    ] {
+        let malformed = TensorView::new(dtype, shape, data).unwrap();
+        assert!(read(packed_format, Some(malformed)).is_err());
+    }
 }

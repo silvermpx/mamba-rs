@@ -8,6 +8,12 @@
 //! lowers a loss in every lane.
 #![cfg(feature = "cuda")]
 
+#[path = "common/rel_l2.rs"]
+mod distance;
+#[path = "common/gradient_distance.rs"]
+mod gradients;
+use distance::rel_l2;
+
 use mamba_rs::config::ScanMode;
 use mamba_rs::gpu::GpuOptions;
 use mamba_rs::gpu::dtype::WeightDtype;
@@ -28,15 +34,6 @@ fn det(n: usize, seed: u64, scale: f32) -> Vec<f32> {
             (((s & 0xFFFFFF) as f32 / 16777216.0) * 2.0 - 1.0) * scale
         })
         .collect()
-}
-
-fn rel_l2(got: &[f32], want: &[f32]) -> f64 {
-    let (mut num, mut den) = (0f64, 0f64);
-    for (&g, &w) in got.iter().zip(want) {
-        num += (f64::from(g) - f64::from(w)).powi(2);
-        den += f64::from(w).powi(2);
-    }
-    (num / den.max(1e-30)).sqrt()
 }
 
 fn cases() -> Vec<(&'static str, Mamba3MimoConfig)> {
@@ -222,20 +219,6 @@ fn cpu_reference(
     (rows, grads, d_in)
 }
 
-fn worst_gradient(got: &Mamba3MimoWeights, want: &Mamba3MimoWeights) -> (f64, String) {
-    let mut worst = (0f64, String::new());
-    for ((name, g), (_, w)) in named(got).into_iter().zip(named(want)) {
-        if w.is_empty() {
-            continue;
-        }
-        let e = rel_l2(g, w);
-        if e > worst.0 {
-            worst = (e, name);
-        }
-    }
-    worst
-}
-
 // The GPU's exp2f/log1pf/sincosf/tanhf and the CPU's fast exp differ in the
 // last bits and the reductions run in other orders; the bounds hold about
 // ten times what these shapes measure, and a wrong index or term fails by
@@ -285,7 +268,7 @@ fn m3_mimo_gpu_train_matches_the_cpu_trainer() {
                 );
                 let fwd = rel_l2(&rows, &want_rows);
                 let din = rel_l2(&d_in, &want_d_in);
-                let worst = worst_gradient(&grads, &want_grads);
+                let worst = gradients::worst_gradient(named(&grads), named(&want_grads));
                 eprintln!(
                     "{mode:?} {dtype:?} {label}: forward {fwd:.2e}, input gradient {din:.2e}, worst \
                  weight gradient {:.2e} ({})",
@@ -305,6 +288,62 @@ fn m3_mimo_gpu_train_matches_the_cpu_trainer() {
             }
         }
     }
+}
+
+#[test]
+fn the_mimo_impulse_decays_after_an_earlier_large_transition() {
+    let cfg = Mamba3MimoConfig {
+        d_model: 16,
+        expand: 1,
+        headdim: 16,
+        d_state: 8,
+        mimo_rank: 1,
+        n_layers: 1,
+        final_norm: false,
+        scan_mode: ScanMode::Parallel,
+        ..Mamba3MimoConfig::default()
+    };
+    let (dm, ip, seq) = (cfg.d_model, cfg.in_proj_out_dim(), 65);
+    let mut w = Mamba3MimoWeights::zeros(&cfg, dm);
+    w.input_proj_w.clear();
+    w.input_proj_b.clear();
+    let layer = &mut w.layers[0];
+    let decay_col = 2 * cfg.d_inner() + 2 * cfg.bc_width() + cfg.nheads();
+    layer.in_proj_w[decay_col] = 33_554_432.0;
+    layer.in_proj_w[ip] = 1.0;
+    layer.in_proj_w[2 * ip + cfg.d_inner()] = 1.0;
+    layer.dt_bias.fill(1.0f32.exp_m1().ln());
+    layer.d_param.fill(0.0);
+    layer.out_proj_w[4] = 1.0;
+    let mut input = vec![0.0; seq * dm];
+    input[0] = 1.0;
+    for t in 1..seq {
+        input[t * dm + 1] = 1.0;
+        input[t * dm + if t == 1 { 2 } else { 3 }] = 1.0;
+    }
+    let mut upstream = vec![0.0; seq * dm];
+    upstream[3 * dm + 4] = 1.0;
+    let (_, reference, _) = cpu_reference(&cfg, &w, (&input, &upstream), (dm, 1, seq));
+    let mut trainer = Mamba3MimoGpuTrainer::new(
+        &w,
+        cfg,
+        TrainSessionCfg::new(dm, 1, seq),
+        GpuOptions::default(),
+    )
+    .unwrap();
+    let mut rows = vec![0.0; seq * dm];
+    trainer.forward(&input, &mut rows).unwrap();
+    // The trapezoid writes the impulse on two tokens. From the second
+    // of those tokens onward only the exp(-1) recurrence acts.
+    let ratio = rows[3 * dm + 4] / rows[2 * dm + 4];
+    assert!(
+        (ratio - (-1.0f32).exp()).abs() < 1e-5,
+        "retained impulse {ratio}"
+    );
+    trainer.backward(&upstream, None).unwrap();
+    let grad = &trainer.grads().unwrap().layers[0];
+    assert!(reference.layers[0].dt_bias[0].abs() > 1e-3);
+    assert!(rel_l2(&grad.dt_bias, &reference.layers[0].dt_bias) < 5e-4);
 }
 
 /// The sequential path's gradients are the same bits for every checkpoint
@@ -474,7 +513,7 @@ fn m3_mimo_gpu_train_fits_a_wide_rank() {
             );
             let fwd = rel_l2(&rows, &want_rows);
             let din = rel_l2(&d_in, &want_d_in);
-            let worst = worst_gradient(&grads, &want_grads);
+            let worst = gradients::worst_gradient(named(&grads), named(&want_grads));
             eprintln!(
                 "{mode:?} {dtype:?} rank 16: forward {fwd:.2e}, input gradient {din:.2e}, worst \
                  weight gradient {:.2e} ({})",
@@ -561,7 +600,7 @@ fn m3_mimo_gpu_train_pads_every_float4_block() {
             );
             let fwd = rel_l2(&rows, &want_rows);
             let din = rel_l2(&d_in, &want_d_in);
-            let worst = worst_gradient(&grads, &want_grads);
+            let worst = gradients::worst_gradient(named(&grads), named(&want_grads));
             eprintln!(
                 "{label}: forward {fwd:.2e}, input gradient {din:.2e}, worst weight gradient \
                  {:.2e} ({})",
@@ -666,7 +705,7 @@ fn m3_mimo_gpu_train_wide_heads_match_the_cpu_trainer() {
             );
             let fwd = rel_l2(&rows, &want_rows);
             let din = rel_l2(&d_in, &want_d_in);
-            let worst = worst_gradient(&grads, &want_grads);
+            let worst = gradients::worst_gradient(named(&grads), named(&want_grads));
             eprintln!(
                 "{mode:?} {dtype:?} {label}: forward {fwd:.2e}, input gradient {din:.2e}, worst \
                  weight gradient {:.2e} ({})",
@@ -776,7 +815,7 @@ fn m3_mimo_gpu_train_continues_a_carried_state() {
             let grads = tr.grads().unwrap();
             let fwd = rel_l2(&rows, &want_rows);
             let din = rel_l2(&d_in, &want_d_in);
-            let worst = worst_gradient(&grads, &want_grads);
+            let worst = gradients::worst_gradient(named(&grads), named(&want_grads));
             eprintln!(
                 "{mode:?} {label}{}: carried window forward {fwd:.2e}, input gradient {din:.2e}, \
                  worst weight gradient {:.2e} ({})",
@@ -839,7 +878,7 @@ fn m3_mimo_gpu_train_identity_input() {
             let grads = tr.grads().unwrap();
             let fwd = rel_l2(&rows, &want_rows);
             let din = rel_l2(&d_in, &want_d_in);
-            let worst = worst_gradient(&grads, &want_grads);
+            let worst = gradients::worst_gradient(named(&grads), named(&want_grads));
             eprintln!(
                 "{mode:?} {dtype:?} identity input: forward {fwd:.2e}, input gradient {din:.2e}, \
                  worst weight gradient {:.2e} ({})",

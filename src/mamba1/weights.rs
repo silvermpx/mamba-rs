@@ -51,9 +51,8 @@ impl MambaLayerWeights {
     /// Recompute `a_neg = -exp(a_log)` from current `a_log` values.
     /// Call after loading weights from safetensors or modifying `a_log`.
     pub fn compute_a_neg(&mut self) {
-        for i in 0..self.a_log.len() {
-            self.a_neg[i] = -self.a_log[i].exp();
-        }
+        self.a_neg.clear();
+        self.a_neg.extend(self.a_log.iter().map(|a| -a.exp()));
     }
 }
 
@@ -262,22 +261,10 @@ impl MambaWeights {
             Ok(())
         };
 
-        if self.input_proj_w.is_empty() && self.input_proj_b.is_empty() {
-            // No input projection: the rows are read as they are, so they
-            // are d_model wide.
-            check(
-                "input_dim of weights without an input projection",
-                input_dim,
-                d,
-            )?;
-        } else {
-            check(
-                "input_proj_w",
-                self.input_proj_w.len(),
-                input_dim.saturating_mul(d),
-            )?;
-            check("input_proj_b", self.input_proj_b.len(), d)?;
-        }
+        let (nw, nb) =
+            crate::config::input_projection_lens(input_dim, d, self.input_proj_w.is_empty())?;
+        check("input_proj_w", self.input_proj_w.len(), nw)?;
+        check("input_proj_b", self.input_proj_b.len(), nb)?;
         let nb = cfg.block_norm.bias_len(d);
         let (nf, nfb) = cfg.block_norm.final_lens(d, cfg.final_norm);
         check("norm_f_weight", self.norm_f_weight.len(), nf)?;

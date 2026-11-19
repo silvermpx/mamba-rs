@@ -1126,6 +1126,50 @@ fn every_family_resumes_through_its_checkpoint_and_trainer_state_files() {
     }
 }
 
+#[test]
+fn a_rejected_checkpoint_preserves_the_open_window_and_pending_forward() {
+    let (input, d) = window();
+    let mut rows = vec![0.0; d.len()];
+    let acc = BackwardOpts::default().with_accumulate_only(true);
+    for dtype in [WeightDtype::F32, WeightDtype::F16] {
+        for mut t in any_trainers(dtype) {
+            let family = t.family();
+            let saved = t.trainer_state().unwrap();
+            t.accumulate(&input, &d).unwrap();
+            t.forward(&input, &mut rows).unwrap();
+            let gradients = t.download_grad_arena().unwrap();
+            let mut bad_recurrence = saved.clone();
+            bad_recurrence.optimizer.step += 7;
+            bad_recurrence.scaler = saved.scaler.map(|_| (8.0, 13));
+            bad_recurrence
+                .recurrent
+                .last_mut()
+                .unwrap()
+                .1
+                .pop()
+                .unwrap();
+            let mut bad_moments = saved.clone();
+            bad_moments.optimizer.v.pop().unwrap();
+            for invalid in [&bad_recurrence, &bad_moments] {
+                assert!(t.load_trainer_state(invalid).is_err(), "{family:?}");
+                assert_eq!(t.optimizer_state().unwrap(), saved.optimizer, "{family:?}");
+                assert_eq!(t.scaler_state(), saved.scaler, "{family:?}");
+                assert_eq!(t.download_grad_arena().unwrap(), gradients, "{family:?}");
+            }
+            t.backward_step(&d, acc).unwrap();
+            assert!(t.apply_window().unwrap().optimizer_stepped, "{family:?}");
+            t.accumulate(&input, &d).unwrap();
+            t.forward(&input, &mut rows).unwrap();
+            t.load_trainer_state(&saved).unwrap();
+            assert!(
+                t.apply_window().is_err() && t.backward_step(&d, acc).is_err(),
+                "{family:?}"
+            );
+            assert_eq!(t.step(&input, &d).unwrap().step, 1, "{family:?}");
+        }
+    }
+}
+
 /// The master weights of any family's trainer, as bits.
 fn snapshot_bits(t: &AnyGpuTrainer) -> Vec<u32> {
     match t {

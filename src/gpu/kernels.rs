@@ -152,6 +152,11 @@ pub struct MambaKernels {
     /// Multi-step SSM forward with activation saves for backward: f32 and
     /// the typed I/O builds with f32 saves, in both offset widths.
     pub ssm_burnin_fwd_typed: ByIndexWidth<TypedKernel>,
+    /// Mixed training scans save fp32 readouts and gate before narrowing.
+    pub ssm_burnin_readout: ByIndexWidth<TypedKernel>,
+    pub ssm_parallel_readout: ByIndexWidth<TypedKernel>,
+    pub ssm_prefill_gated: ByIndexWidth<TypedKernel>,
+    pub gating_bwd_readout: TypedKernel,
     /// Per-(b,t,d,n) local SSM backward: dh, du, d_delta contributions.
     pub ssm_backward_local: ByIndexWidth<CudaFunction>,
     /// Fused dB+dC reduction `[B*T*d_state]` each, `=`-store (no memset
@@ -313,12 +318,16 @@ pub struct MambaKernels {
     /// The decode SSM step with softplus, the B/C gather and the gating
     /// folded in: the decode routes' only step kernel.
     pub ssm_step_fwd_fused_typed: ByIndexWidth<TypedKernel>,
+    /// Decode with the gate applied before the activation is narrowed.
+    pub ssm_step_readout: ByIndexWidth<TypedKernel>,
     /// Conv1d step with the SiLU fused into its store: the decode routes'
     /// only conv step kernel, one launch per layer.
     pub conv1d_step_fwd_silu_typed: ByIndexWidth<TypedKernel>,
     /// Multi-step SSM forward without activation saves (target network and
     /// prefill), every activation type in both offset widths.
     pub ssm_burnin_nosave_typed: ByIndexWidth<TypedKernel>,
+    /// Sequential prefill with the same gated readout as decode.
+    pub ssm_prefill_sequential_gated: ByIndexWidth<TypedKernel>,
     pub softplus_bwd_typed: TypedKernel,
     pub gather_last_timestep_typed: TypedKernel,
     pub vec_cast_zplus_typed: TypedKernel,
@@ -1666,6 +1675,10 @@ impl MambaKernels {
             triad,
             // SSM
             ssm_burnin_fwd_typed: load_widths("ssm_burnin_forward")?,
+            ssm_burnin_readout: load_widths("ssm_burnin_readout")?,
+            ssm_parallel_readout: load_widths("ssm_parallel_readout")?,
+            ssm_prefill_gated: load_widths("ssm_prefill_gated")?,
+            gating_bwd_readout: load_typed("gating_backward_readout")?,
             ssm_backward_local: ByIndexWidth {
                 i32: get("ssm_backward_local")?,
                 i64: get("ssm_backward_local_i64")?,
@@ -1920,8 +1933,10 @@ impl MambaKernels {
             elementwise_mul_v_typed: load_typed("elementwise_mul_v")?,
             softplus_copy_typed: load_typed("softplus_copy")?,
             ssm_step_fwd_fused_typed: load_widths("ssm_step_forward_fused")?,
+            ssm_step_readout: load_widths("ssm_step_readout")?,
             conv1d_step_fwd_silu_typed: load_widths("conv1d_step_forward_silu")?,
             ssm_burnin_nosave_typed: load_widths("ssm_burnin_forward_nosave")?,
+            ssm_prefill_sequential_gated: load_widths("ssm_prefill_sequential_gated")?,
             softplus_bwd_typed: load_typed("softplus_backward")?,
             gather_last_timestep_typed: load_typed("gather_last_timestep")?,
             vec_cast_zplus_typed: load_typed("vec_cast_zplus")?,

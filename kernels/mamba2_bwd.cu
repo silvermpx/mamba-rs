@@ -322,8 +322,8 @@ __device__ __forceinline__ void m2b_dhloc_body(
     float* es = cs + M2_CHUNK * NT;                   // [64]
     const int tid = threadIdx.x;
     const int lane = tid & 31, warp = tid >> 5, nw = blockDim.x >> 5;
-    const int cont = vl_lower_bound(seq_idx, b, seq, t0, t0 + lc,
-                                    vl_id(seq_idx, b, seq, t0 - 1) + 1) - t0;
+    const int cont = vl_bound<true>(seq_idx, b, seq, t0, t0 + lc,
+                                    vl_id(seq_idx, b, seq, t0 - 1)) - t0;
     for (int t = tid; t < cont; t += blockDim.x) es[t] = m2_exp(acs[sc + t]);
     m2_stage4(cont * NT, tid, blockDim.x,
               [&](int i) {
@@ -490,7 +490,7 @@ __device__ __forceinline__ void m2b_dx_tiles_body(
                   if (s <= t && t < lc
                       && vl_id(seq_idx, b, seq, t0 + s) == vl_id(seq_idx, b, seq, t0 + t))
                       w = __fmul_rn(cb[cbo + m2b_pair(t, s)],
-                                    m2_exp(fminf(__fsub_rn(acs[sc + t], acs[sc + s]), 0.0f)));
+                                    m2_exp(fminf(chunk_decay_interval(acs + sc + s, 1, t - s, acs[sc + s], acs[sc + t]), 0.0f)));
                   return w;
               },
               [&](int i, float v) { wv[i] = v; });
@@ -573,9 +573,9 @@ __device__ __forceinline__ void m2b_dx_tiles_body(
         in_last[i] = sid == id_last;
         from_prev[i] = sid == id_prev;
         t_end[i] = s0 + i < lc
-            ? vl_lower_bound(seq_idx, b, seq, t0 + s0 + i, t0 + lc, sid + 1) - t0
+            ? vl_bound<true>(seq_idx, b, seq, t0 + s0 + i, t0 + lc, sid) - t0
             : lc;
-        const float el = m2_exp(fminf(__fsub_rn(acs_s[max(lc - 1, 0)], acs_s[s0 + i]), 0.0f));
+        const float el = m2_exp(fminf(chunk_decay_interval(acs_s + s0 + i, 1, lc - 1 - s0 - i, acs_s[s0 + i], acs_s[lc - 1]), 0.0f));
 #pragma unroll
         for (int j = 0; j < 4; j++) {
             st[i][j] = in_last[i] ? __fmul_rn(st[i][j], el) : 0.0f;
@@ -808,7 +808,7 @@ __device__ __forceinline__ void m2b_pairs_body(
                 mm[o] = 0.0f;
                 continue;
             }
-            const float ev = m2_exp(fminf(__fsub_rn(acs[sc + t], acs[sc + s]), 0.0f));
+            const float ev = m2_exp(fminf(chunk_decay_interval(acs + sc + s, 1, t - s, acs[sc + s], acs[sc + t]), 0.0f));
             const float dcb = __fmul_rn(__fmul_rn(gv[i][j], ev), dt[sc + s]);
             dcbh[o] = dcb;
             mm[o] = t > s ? __fmul_rn(dcb, cb[(bc * ng + g) * M2B_PAIRS + m2b_pair(t, s)]) : 0.0f;
@@ -907,8 +907,8 @@ __device__ __forceinline__ void m2b_bc_tiles_body(
         const int r = r0 + i;
         const int sid = r < lc ? vl_id(seq_idx, b, seq, t0 + r) : id_edge;
         keep[i] = sid == id_edge;
-        lo[i] = r < lc ? vl_lower_bound(seq_idx, b, seq, t0, t0 + r + 1, sid) - t0 : 0;
-        hi[i] = r < lc ? vl_lower_bound(seq_idx, b, seq, t0 + r, t0 + lc, sid + 1) - t0 : lc;
+        lo[i] = r < lc ? vl_bound<false>(seq_idx, b, seq, t0, t0 + r + 1, sid) - t0 : 0;
+        hi[i] = r < lc ? vl_bound<true>(seq_idx, b, seq, t0 + r, t0 + lc, sid) - t0 : lc;
     }
     float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     for (int k = 0; k < hpg; k++) {
@@ -937,7 +937,7 @@ __device__ __forceinline__ void m2b_bc_tiles_body(
                     if (r < lc) {
                         sv = DC ? m2_exp(acs[sc + r])
                                 : __fmul_rn(dt[sc + r],
-                                            m2_exp(fminf(__fsub_rn(acs[sc + lc - 1], acs[sc + r]),
+                                            m2_exp(fminf(chunk_decay_interval(acs + sc + r, 1, lc - 1 - r, acs[sc + r], acs[sc + lc - 1]),
                                                          0.0f)));
                     }
                     scale[r] = sv;

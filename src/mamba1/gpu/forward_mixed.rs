@@ -9,10 +9,10 @@
 //! Precision rules:
 //! - **f32 always**: `residual` (residual stream), `rms_vals`/`norm_f_rms`
 //!   (reduction stats), `conv_states` (recurrent state), `h_saved` (BPTT
-//!   carry).
+//!   carry), the ungated scan readout `y`, and the final norm's input.
 //! - **typed (bf16/f16/f32)**: `post_norm`, `proj`,
-//!   `u`, `xdbl`, `delta_raw`, `delta`, `y`, `gated`,
-//!   `input_proj_inputs`, `input_proj_outputs`, `norm_f_input` — these are
+//!   `u`, `xdbl`, `delta_raw`, `delta`, `gated`,
+//!   `input_proj_inputs`, `input_proj_outputs` — these are
 //!   GEMM I/O or elementwise activations where bf16 storage is safe.
 //!
 //! Reference: `docs/training-mixed-precision.md` for the full design.
@@ -64,7 +64,7 @@ pub struct GpuMambaLayerMixedActs {
     /// f32 — hidden state saved BEFORE each step (T+1 entries)
     /// `[B*(T+1)*d_inner*d_state]`. STAYS f32 (BPTT recurrence).
     pub h_saved: GpuBuffer,
-    /// typed — SSM output before gating `[B*T*d_inner]`.
+    /// f32 — SSM output before gating `[B*T*d_inner]`.
     pub y: DtypedBuf,
     /// typed — gated output `y * gate_silu` `[B*T*d_inner]`.
     pub gated: DtypedBuf,
@@ -85,13 +85,29 @@ pub struct GpuMambaBackboneMixedActs {
     pub norm_f_input: GpuBuffer,
     /// f32 — RMS values per sample for norm_f backward `[B*T]`.
     pub norm_f_rms: GpuBuffer,
-    /// Element dtype of all `DtypedBuf` fields.
+    /// Storage dtype of the projections and the gated activation.
     pub dtype: WeightDtype,
     /// The gated MLP's saves, for a model with one (see [`Self::with_mlp`]).
     pub mlp: Option<super::mlp::GpuMambaMlpMixedBufs>,
 }
 
 impl GpuMambaBackboneMixedActs {
+    pub(super) fn check_scan_readouts(&self, dims: &GpuMambaDims) -> Result<(), String> {
+        let words = dims.bt() * dims.d_inner;
+        if self.layers.len() != dims.n_layers
+            || self
+                .layers
+                .iter()
+                .any(|l| l.y.dtype() != WeightDtype::F32 || l.y.len_elems() != words)
+        {
+            return Err(
+                "the mixed scan needs one full f32 readout per token and channel of every layer"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
     /// The same activations with the gated MLP's saves, for a model whose
     /// MLP is `hidden` wide (0 leaves them out).
     pub fn with_mlp(
@@ -160,7 +176,7 @@ impl GpuMambaBackboneMixedActs {
                     xdbl: DtypedBuf::zeros(stream, bt * xdbl_dim, dtype)?,
                     delta_raw: DtypedBuf::zeros(stream, bt * d_inner, dtype)?,
                     delta: DtypedBuf::zeros(stream, bt * d_inner, dtype)?,
-                    y: DtypedBuf::zeros(stream, bt * d_inner, dtype)?,
+                    y: DtypedBuf::zeros(stream, bt * d_inner, WeightDtype::F32)?,
                     gated: DtypedBuf::zeros(stream, bt * d_inner, dtype)?,
                     bcdt_rstd: GpuBuffer::zeros(
                         stream,
@@ -420,6 +436,7 @@ pub fn gpu_forward_mamba_backbone_mixed(
 
     let dims = scratch.dims;
     dims.check_for(ctx)?;
+    acts.check_scan_readouts(&dims)?;
     let bt = dims.batch * dims.seq_len;
     let dm = dims.d_model;
     let di = dims.d_inner;
@@ -716,7 +733,7 @@ pub fn gpu_forward_mamba_backbone_mixed(
             if dims.scan_mode.use_parallel(t, ds) {
                 let slim = crate::gpu::launch::scan_tape_slim();
                 let width = crate::gpu::launch::scan_fwd_index_width(b, t, di, ds, slim);
-                let kernel = k.ssm_parallel_fwd_typed.get(width).get(dt);
+                let kernel = k.ssm_parallel_readout.get(width).get(dt);
                 for (y_first, cfg) in y_runs(crate::gpu::launch::grid_parallel_scan(b, t, di, ds)) {
                     let mut bld = ctx.stream.launch_builder(kernel);
                     let y = layer_acts.y.cached_ptr();
@@ -745,12 +762,16 @@ pub fn gpu_forward_mamba_backbone_mixed(
                     bld.arg(&hs);
                     bld.arg(&slim_i);
                     bld.arg(&y_first);
+                    let proj = layer_acts.proj.cached_ptr();
+                    let gated = layer_acts.gated.cached_ptr();
+                    bld.arg(&proj);
+                    bld.arg(&gated);
                     unsafe { bld.launch(cfg) }
                         .map_err(|e| format!("ssm_parallel_fwd typed L{layer_idx}: {e:?}"))?;
                 }
             } else {
                 let width = crate::gpu::launch::seq_scan_index_width(b, t, di, ds, di, true);
-                let kernel = k.ssm_burnin_fwd_typed.get(width).get(dt);
+                let kernel = k.ssm_burnin_readout.get(width).get(dt);
                 let mut bld = ctx.stream.launch_builder(kernel);
                 let y = layer_acts.y.cached_ptr();
                 let hs = layer_acts.h_saved.cached_ptr();
@@ -776,41 +797,13 @@ pub fn gpu_forward_mamba_backbone_mixed(
                 bld.arg(&ds_i);
                 let lanes_i = crate::gpu::launch::seq_lanes(ds) as i32;
                 bld.arg(&lanes_i);
+                let proj = layer_acts.proj.cached_ptr();
+                let gated = layer_acts.gated.cached_ptr();
+                bld.arg(&proj);
+                bld.arg(&gated);
                 unsafe { bld.launch(crate::gpu::launch::grid_seq(b, di, ds)?) }
                     .map_err(|e| format!("ssm_burnin_forward typed L{layer_idx}: {e:?}"))?;
             }
-        }
-
-        // F4e: gating — gated = y * SiLU(gate), the gate read from the
-        // second half of the in_proj output through the row stride. The
-        // vector twin needs its width to divide d_inner so no vector
-        // straddles a row.
-        {
-            let g = layer_acts.gated.cached_ptr();
-            let y = layer_acts.y.cached_ptr();
-            let gp = layer_acts.proj.cached_ptr();
-            let w = crate::gpu::launch::vec8_width(dt.size_bytes());
-            let vec = di.is_multiple_of(w)
-                && crate::gpu::launch::vec8_ok(bt * di, dt.size_bytes(), &[g, y, gp]);
-            let (kern, count) = if vec {
-                (k.gate_mul_silu_v_typed.get(dt), bt * di / w)
-            } else {
-                (k.gate_mul_silu_typed.get(dt), bt * di)
-            };
-            let n = count as i64;
-            let di_i = di as i32;
-            let gate_stride = (2 * di) as i32;
-            let gate_off = di as i32;
-            let mut bld = ctx.stream.launch_builder(kern);
-            bld.arg(&g);
-            bld.arg(&y);
-            bld.arg(&gp);
-            bld.arg(&n);
-            bld.arg(&di_i);
-            bld.arg(&gate_stride);
-            bld.arg(&gate_off);
-            unsafe { bld.launch(grid_1d_wide(count)) }
-                .map_err(|e| format!("gate_mul_silu_typed L{layer_idx}: {e:?}"))?;
         }
 
         // F5: out_proj GEMM typed → scratch.out_flat [B*T, d_model].

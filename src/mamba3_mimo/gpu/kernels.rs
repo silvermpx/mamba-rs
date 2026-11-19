@@ -1312,6 +1312,7 @@ impl Mamba3MimoKernels {
                 sources: &[
                     include_str!("../../../kernels/_typed_prelude.cuh"),
                     include_str!("../../../kernels/_varlen.cuh"),
+                    include_str!("../../../kernels/_chunk_decay.cuh"),
                     include_str!("../../../kernels/_shared_loads.cuh"),
                     include_str!("../../../kernels/gated_mlp.cu"),
                     include_str!("../../../kernels/mamba3_mimo.cu"),

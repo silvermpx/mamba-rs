@@ -27,6 +27,16 @@ pub enum Path {
 impl Path {
     pub const ALL: [Path; 3] = [Path::Decode, Path::Prefill, Path::Train];
 
+    /// A bidirectional engine starts with a complete one-token prompt.
+    #[cfg(feature = "cuda")]
+    pub(crate) fn for_inference_engine(bidirectional: bool) -> Self {
+        if bidirectional {
+            Self::Prefill
+        } else {
+            Self::Decode
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Path::Decode => "decode",
@@ -90,8 +100,7 @@ pub struct Plan {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Refusal {
-    /// The request names no work: a zero batch or window, or a decode
-    /// window of more than one token.
+    /// The requested input or window is empty, or the model cannot decode it.
     Request { detail: String },
     /// The request needs more of `resource` than the 32-bit kernel
     /// arguments carry.
@@ -181,8 +190,18 @@ pub(crate) fn triad_spans(
     Ok(())
 }
 
-/// Refuses a request that names no work.
-pub(crate) fn check_request(req: &Request) -> Result<(), Refusal> {
+/// A decode step needs a carried causal state. A complete bidirectional
+/// window of one token is a valid prefill.
+pub(crate) fn check_request(
+    req: &Request,
+    input_dim: usize,
+    bidirectional: bool,
+) -> Result<(), Refusal> {
+    if input_dim == 0 {
+        return Err(Refusal::Request {
+            detail: "input_dim must be positive".into(),
+        });
+    }
     if req.batch == 0 || req.seq_len == 0 {
         return Err(Refusal::Request {
             detail: format!(
@@ -198,6 +217,11 @@ pub(crate) fn check_request(req: &Request) -> Result<(), Refusal> {
                 "a decode step is one token per sequence, got seq_len {}",
                 req.seq_len
             ),
+        });
+    }
+    if req.path == Path::Decode && bidirectional {
+        return Err(Refusal::Request {
+            detail: "a bidirectional model reads whole sequences and has no decode step".into(),
         });
     }
     Ok(())
@@ -220,11 +244,11 @@ mod tests {
 
     #[test]
     fn an_empty_or_multi_token_decode_request_is_refused() {
-        assert!(check_request(&req(Path::Train, 0, 4)).is_err());
-        assert!(check_request(&req(Path::Prefill, 2, 0)).is_err());
-        assert!(check_request(&req(Path::Decode, 2, 2)).is_err());
-        assert!(check_request(&req(Path::Decode, 2, 1)).is_ok());
-        assert!(check_request(&req(Path::Train, 1, 1)).is_ok());
+        assert!(check_request(&req(Path::Train, 0, 4), 1, false).is_err());
+        assert!(check_request(&req(Path::Prefill, 2, 0), 1, false).is_err());
+        assert!(check_request(&req(Path::Decode, 2, 2), 1, false).is_err());
+        assert!(check_request(&req(Path::Decode, 2, 1), 1, false).is_ok());
+        assert!(check_request(&req(Path::Train, 1, 1), 1, false).is_ok());
     }
 
     #[test]

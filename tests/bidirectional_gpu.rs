@@ -390,6 +390,60 @@ fn a_mamba1_pair_on_the_device_is_its_layers_composed() {
 }
 
 #[test]
+fn bidirectional_backbones_accept_independent_one_token_prompts() {
+    macro_rules! check {
+        ($cfg:expr, $weights:ident, $cpu:ident, $gpu:ident) => {{
+            let cfg = $cfg;
+            let w = $weights::init(&cfg, D_MODEL, 9);
+            let mut gpu = mamba_rs::$gpu::new(&w, cfg, D_MODEL, 1, opts(WeightDtype::F32)).unwrap();
+            let cpu = mamba_rs::$cpu::new(w, cfg, D_MODEL).unwrap();
+            gpu.prefill(&values(3 * D_MODEL, 6), 3).unwrap();
+            let input = values(D_MODEL, 10);
+            let mut want = [f32::NAN; D_MODEL];
+            cpu.forward_sequence(
+                &input,
+                &mut want,
+                &mut cpu.alloc_state(),
+                &mut cpu.alloc_scratch(),
+                1,
+            );
+            let reference = want.map(f64::from);
+            for _ in 0..2 {
+                gpu.prefill(&input, 1).unwrap();
+                let mut got = [f32::NAN; D_MODEL];
+                gpu.download_temporal(&mut got).unwrap();
+                let error = rel(&reference, &got);
+                assert!(error < 1e-4, "{}: {error:e}", stringify!($gpu));
+            }
+        }};
+    }
+    check!(
+        m1_cfg(2, true),
+        MambaWeights,
+        MambaBackbone,
+        MambaGpuBackbone
+    );
+    check!(
+        m2_cfg(2, true),
+        Mamba2Weights,
+        Mamba2Backbone,
+        Mamba2GpuBackbone
+    );
+    check!(
+        siso_cfg(2, true),
+        Mamba3Weights,
+        Mamba3Backbone,
+        Mamba3GpuBackbone
+    );
+    check!(
+        mimo_cfg(2, true),
+        Mamba3MimoWeights,
+        Mamba3MimoBackbone,
+        Mamba3MimoGpuBackbone
+    );
+}
+
+#[test]
 fn a_bidirectional_mamba2_engine_refuses_the_decode_step() {
     use mamba_rs::gpu::device::GpuDevice;
     use mamba_rs::mamba2::gpu::Mamba2GpuEngine;
@@ -404,4 +458,27 @@ fn a_bidirectional_mamba2_engine_refuses_the_decode_step() {
         .step_gpu_only(&x, &mut state, &mut scratch)
         .unwrap_err();
     assert!(err.contains("no decode step"), "{err}");
+}
+
+#[test]
+fn bidirectional_mimo_rejects_all_three_decode_calls() {
+    let cfg = mimo_cfg(2, true);
+    let w = Mamba3MimoWeights::init(&cfg, D_MODEL, 1);
+    let mut gpu =
+        mamba_rs::Mamba3MimoGpuBackbone::new(&w, cfg, D_MODEL, BATCH, opts(WeightDtype::F32))
+            .unwrap();
+    let input = values(BATCH * D_MODEL, 2);
+    let mut output = vec![0.0; input.len()];
+    assert!(
+        gpu.step(&input, &mut output)
+            .unwrap_err()
+            .contains("no decode step")
+    );
+    assert!(
+        gpu.step_gpu_only(&input)
+            .unwrap_err()
+            .contains("no decode step")
+    );
+    assert!(gpu.step_on_device().unwrap_err().contains("no decode step"));
+    gpu.prefill(&input, 1).unwrap();
 }

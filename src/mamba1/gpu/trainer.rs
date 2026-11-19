@@ -510,9 +510,19 @@ impl MambaGpuTrainer {
     /// bit: the optimizer state, the f16 loss scale and the carried
     /// recurrence. [`TrainerState::save`] writes it to a file.
     pub fn trainer_state(&self) -> Result<TrainerState, String> {
+        let (open, packing) = match &self.inner {
+            TrainerInner::F32(t) => (t.grads_dirty, None),
+            TrainerInner::Mixed(t) => (t.grads_dirty, None),
+        };
+        if open {
+            return Err(
+                "finish the gradient accumulation window before saving a checkpoint".into(),
+            );
+        }
         let rec = self.recurrent_state()?;
         Ok(TrainerState {
             family: ModelFamily::Mamba1,
+            packing,
             optimizer: self.optimizer_state()?,
             scaler: self.scaler_state(),
             recurrent: vec![
@@ -525,9 +535,31 @@ impl MambaGpuTrainer {
     /// Load a state a trainer of this family gave with
     /// [`Self::trainer_state`]. The learning rate is not part of it.
     pub fn load_trainer_state(&mut self, state: &TrainerState) -> Result<(), String> {
-        state.check_family(ModelFamily::Mamba1)?;
-        let conv = state.recurrent_tensor("conv")?;
-        let ssm = state.recurrent_tensor("ssm")?;
+        if self.has_graph() {
+            return Err(
+                "drop_graph before restoring a trainer state with captured AdamW settings".into(),
+            );
+        }
+        let (batch, seq_len) = (self.batch(), self.seq_len());
+        let (rec, moments, window, tape) = match &mut self.inner {
+            TrainerInner::F32(t) => (
+                &t.state,
+                t.adam.m.len(),
+                &mut t.grads_dirty,
+                &mut t.split_forward_route,
+            ),
+            TrainerInner::Mixed(t) => (
+                &t.state,
+                t.adam.m.len(),
+                &mut t.grads_dirty,
+                &mut t.split_forward_route,
+            ),
+        };
+        state.check_window(ModelFamily::Mamba1, batch, seq_len, moments)?;
+        let conv = state.recurrent_tensor("conv", rec.conv_states.len())?;
+        let ssm = state.recurrent_tensor("ssm", rec.ssm_states.len())?;
+        *window = false;
+        *tape = None;
         self.load_optimizer_state(&state.optimizer)?;
         if let Some((scale, tracker)) = state.scaler {
             self.load_scaler_state(scale, tracker)?;

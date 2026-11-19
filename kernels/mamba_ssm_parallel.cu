@@ -560,11 +560,21 @@ __device__ __forceinline__ void block_reverse_scan_ab_with_exclusive(
 // differently on sm_120, and the int build stopped being the 32-bit code.
 // ============================================================================
 
-#define DEFINE_SSM_PARALLEL_SCAN_FWD(NAME, IDX, T_ACT, FROM_F)                \
+// Training also saves the ungated fp32 readout for the gate derivative.
+#define M1_RAW_ARGS(T)
+#define M1_GATED_ARGS(T) , const T* __restrict__ proj_gate, T* __restrict__ gated
+#define M1_RAW_STORE(I, D, V, CAST) y_out[I] = CAST(V)
+#define M1_GATED_STORE(I, D, V, CAST) do {                                   \
+    const auto ix = (I);                                                       \
+    float g = to_f(proj_gate[2LL * ix + d_inner - (D)]);                        \
+    y_out[ix] = (V);                                                          \
+    gated[ix] = CAST((V) * (g / (1.0f + exp2f(-g * LOG2E))));                 \
+} while (0)
+#define DEFINE_SSM_PARALLEL_SCAN_FWD(NAME, IDX, T_ACT, FROM_F, OUT, GATE_ARGS, SAVE)                \
 extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void             \
 NAME(                                                                         \
     float* __restrict__ h,               /* [batch, d_inner, d_state] */      \
-    T_ACT* __restrict__ y_out,           /* [batch, T, d_inner] */            \
+    OUT* __restrict__ y_out,           /* [batch, T, d_inner] */            \
     float* __restrict__ h_saved,         /* [batch, d_inner, d_state, T+1] */ \
     /* Pre-softplus dt: the kernel applies the softplus and writes the        \
        post-softplus save the backward replays from. */                       \
@@ -583,6 +593,7 @@ NAME(                                                                         \
     float* run_tape,                                                          \
     int slim_tape,                                                            \
     int y_first /* this run's first y block */                                \
+    GATE_ARGS(T_ACT) \
 ) {                                                                           \
     IDX bid = blockIdx.x;                                                     \
     if (bid >= batch) return;                                                 \
@@ -808,7 +819,7 @@ NAME(                                                                         \
         for (int i = 0; i < NITEMS; i++) {                                    \
             int t = chunk_start + tid * NITEMS + i;                           \
             if (t < T && live) {                                              \
-                y_out[(bid * T + t) * d_inner + did] = FROM_F(out_vals[i]);   \
+                SAVE((bid * T + t) * d_inner + did, did, out_vals[i], FROM_F);   \
             }                                                                 \
         }                                                                     \
     }                                                                         \
@@ -821,14 +832,24 @@ NAME(                                                                         \
     }                                                                         \
 }
 
-DEFINE_SSM_PARALLEL_SCAN_FWD(ssm_parallel_scan_fwd,          int,       float,         from_f_f32)
-DEFINE_SSM_PARALLEL_SCAN_FWD(ssm_parallel_scan_fwd_i64,      long long, float,         from_f_f32)
-DEFINE_SSM_PARALLEL_SCAN_FWD(ssm_parallel_scan_fwd_bf16,     int,       __nv_bfloat16, from_f_bf16)
-DEFINE_SSM_PARALLEL_SCAN_FWD(ssm_parallel_scan_fwd_bf16_i64, long long, __nv_bfloat16, from_f_bf16)
-DEFINE_SSM_PARALLEL_SCAN_FWD(ssm_parallel_scan_fwd_f16,      int,       __half,        from_f_f16)
-DEFINE_SSM_PARALLEL_SCAN_FWD(ssm_parallel_scan_fwd_f16_i64,  long long, __half,        from_f_f16)
+DEFINE_SSM_PARALLEL_SCAN_FWD(ssm_parallel_scan_fwd,          int,       float,         from_f_f32, float, M1_RAW_ARGS, M1_RAW_STORE)
+DEFINE_SSM_PARALLEL_SCAN_FWD(ssm_parallel_readout_f32, int, float, from_f_f32, float, M1_GATED_ARGS, M1_GATED_STORE)
+DEFINE_SSM_PARALLEL_SCAN_FWD(ssm_parallel_scan_fwd_i64,      long long, float,         from_f_f32, float, M1_RAW_ARGS, M1_RAW_STORE)
+DEFINE_SSM_PARALLEL_SCAN_FWD(ssm_parallel_readout_f32_i64, long long, float, from_f_f32, float, M1_GATED_ARGS, M1_GATED_STORE)
+DEFINE_SSM_PARALLEL_SCAN_FWD(ssm_parallel_scan_fwd_bf16,     int,       __nv_bfloat16, from_f_bf16, __nv_bfloat16, M1_RAW_ARGS, M1_RAW_STORE)
+DEFINE_SSM_PARALLEL_SCAN_FWD(ssm_parallel_readout_bf16, int, __nv_bfloat16, from_f_bf16, float, M1_GATED_ARGS, M1_GATED_STORE)
+DEFINE_SSM_PARALLEL_SCAN_FWD(ssm_parallel_scan_fwd_bf16_i64, long long, __nv_bfloat16, from_f_bf16, __nv_bfloat16, M1_RAW_ARGS, M1_RAW_STORE)
+DEFINE_SSM_PARALLEL_SCAN_FWD(ssm_parallel_readout_bf16_i64, long long, __nv_bfloat16, from_f_bf16, float, M1_GATED_ARGS, M1_GATED_STORE)
+DEFINE_SSM_PARALLEL_SCAN_FWD(ssm_parallel_scan_fwd_f16,      int,       __half,        from_f_f16, __half, M1_RAW_ARGS, M1_RAW_STORE)
+DEFINE_SSM_PARALLEL_SCAN_FWD(ssm_parallel_readout_f16, int, __half, from_f_f16, float, M1_GATED_ARGS, M1_GATED_STORE)
+DEFINE_SSM_PARALLEL_SCAN_FWD(ssm_parallel_scan_fwd_f16_i64,  long long, __half,        from_f_f16, __half, M1_RAW_ARGS, M1_RAW_STORE)
+DEFINE_SSM_PARALLEL_SCAN_FWD(ssm_parallel_readout_f16_i64, long long, __half, from_f_f16, float, M1_GATED_ARGS, M1_GATED_STORE)
+#undef M1_GATED_STORE
+#undef M1_RAW_STORE
+#undef M1_GATED_ARGS
+#undef M1_RAW_ARGS
 
-#define DEFINE_SSM_PARALLEL_SCAN_FWD_NOSAVE(NAME, IDX, T_ACT, FROM_F)         \
+#define DEFINE_SSM_PARALLEL_SCAN_FWD_NOSAVE(NAME, IDX, T_ACT, FROM_F, GATE_TMAJOR)         \
 extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void             \
 NAME(                                                                         \
     float* __restrict__ h,               /* [batch, d_inner, d_state] */      \
@@ -998,34 +1019,24 @@ NAME(                                                                         \
         /* Direct per-thread stores, as in the saving forward. On the         \
            t-major route a thread's eight times are one span of its           \
            channel's row. */                                                  \
-        if (live && tstride > 0) {                                            \
-            T_ACT y8[NITEMS];                                                 \
-            _Pragma("unroll")                                                 \
-            for (int i = 0; i < NITEMS; i++) y8[i] = FROM_F(out_vals[i]);     \
-            store_row8(y_out + row, chunk_start + tid * NITEMS, T, y8);       \
-        } else if (live) {                                                    \
-            _Pragma("unroll")                                                 \
-            for (int i = 0; i < NITEMS; i++) {                                \
-                int t = chunk_start + tid * NITEMS + i;                       \
-                if (t < T) {                                                  \
-                    T_ACT ty = FROM_F(out_vals[i]);                           \
-                    if (gate_stride > 0) {                                    \
-                        /* Each rounding of the chain this store              \
-                         * replaced, in place: it stored y and SiLU(gate)     \
-                         * in T_ACT, then multiplied the reloaded values      \
-                         * with one final rounding. In f32 the stores         \
-                         * round nothing. */                                  \
-                        float g = to_f(proj_gate[(bid * T + t) * gate_stride  \
-                                                 + d_inner + did]);           \
-                        T_ACT tg = FROM_F(                                    \
-                            g / (1.0f + exp2f(-g * 1.4426950408889634f)));    \
-                        ty = FROM_F(to_f(ty) * to_f(tg));                     \
-                    }                                                         \
-                    y_out[(bid * T + t) * d_inner + did] = ty;                \
-                }                                                             \
-            }                                                                 \
-        }                                                                     \
-    }                                                                         \
+        if (live) {                                                             \
+            T_ACT values[NITEMS];                                               \
+            _Pragma("unroll")                                                   \
+            for (int i = 0; i < NITEMS; i++) {                                  \
+                int t = chunk_start + tid * NITEMS + i;                         \
+                float y = out_vals[i];                                          \
+                if (t < T && gate_stride > 0 && (GATE_TMAJOR || !tstride)) {    \
+                    float g = to_f(proj_gate[(bid * T + t) * gate_stride + d_inner + did]);\
+                    const float sg = g / (1.0f + exp2f(-g * 1.4426950408889634f)); \
+                    y = GATE_TMAJOR ? y * sg : to_f(FROM_F(y)) * to_f(FROM_F(sg));          \
+                }                                                               \
+                values[i] = FROM_F(y);                                          \
+                if (!tstride && t < T)                                          \
+                    y_out[(bid * T + t) * d_inner + did] = values[i];           \
+            }                                                                   \
+            if (tstride) store_row8(y_out + row, chunk_start + tid * NITEMS, T, values);\
+        }                                                                       \
+    }                                                                           \
     /* Each group's last running-prefix write by its thread 0 precedes        \
        the reads below. */                                                    \
     __syncthreads();                                                          \
@@ -1035,12 +1046,18 @@ NAME(                                                                         \
     }                                                                         \
 }
 
-DEFINE_SSM_PARALLEL_SCAN_FWD_NOSAVE(ssm_parallel_scan_fwd_nosave,          int,       float,         from_f_f32)
-DEFINE_SSM_PARALLEL_SCAN_FWD_NOSAVE(ssm_parallel_scan_fwd_nosave_i64,      long long, float,         from_f_f32)
-DEFINE_SSM_PARALLEL_SCAN_FWD_NOSAVE(ssm_parallel_scan_fwd_nosave_bf16,     int,       __nv_bfloat16, from_f_bf16)
-DEFINE_SSM_PARALLEL_SCAN_FWD_NOSAVE(ssm_parallel_scan_fwd_nosave_bf16_i64, long long, __nv_bfloat16, from_f_bf16)
-DEFINE_SSM_PARALLEL_SCAN_FWD_NOSAVE(ssm_parallel_scan_fwd_nosave_f16,      int,       __half,        from_f_f16)
-DEFINE_SSM_PARALLEL_SCAN_FWD_NOSAVE(ssm_parallel_scan_fwd_nosave_f16_i64,  long long, __half,        from_f_f16)
+DEFINE_SSM_PARALLEL_SCAN_FWD_NOSAVE(ssm_parallel_scan_fwd_nosave,          int,       float,         from_f_f32, false)
+DEFINE_SSM_PARALLEL_SCAN_FWD_NOSAVE(ssm_prefill_gated_f32,          int,       float,         from_f_f32, true)
+DEFINE_SSM_PARALLEL_SCAN_FWD_NOSAVE(ssm_parallel_scan_fwd_nosave_i64,      long long, float,         from_f_f32, false)
+DEFINE_SSM_PARALLEL_SCAN_FWD_NOSAVE(ssm_prefill_gated_f32_i64,      long long, float,         from_f_f32, true)
+DEFINE_SSM_PARALLEL_SCAN_FWD_NOSAVE(ssm_parallel_scan_fwd_nosave_bf16,     int,       __nv_bfloat16, from_f_bf16, false)
+DEFINE_SSM_PARALLEL_SCAN_FWD_NOSAVE(ssm_prefill_gated_bf16,     int,       __nv_bfloat16, from_f_bf16, true)
+DEFINE_SSM_PARALLEL_SCAN_FWD_NOSAVE(ssm_parallel_scan_fwd_nosave_bf16_i64, long long, __nv_bfloat16, from_f_bf16, false)
+DEFINE_SSM_PARALLEL_SCAN_FWD_NOSAVE(ssm_prefill_gated_bf16_i64, long long, __nv_bfloat16, from_f_bf16, true)
+DEFINE_SSM_PARALLEL_SCAN_FWD_NOSAVE(ssm_parallel_scan_fwd_nosave_f16,      int,       __half,        from_f_f16, false)
+DEFINE_SSM_PARALLEL_SCAN_FWD_NOSAVE(ssm_prefill_gated_f16,      int,       __half,        from_f_f16, true)
+DEFINE_SSM_PARALLEL_SCAN_FWD_NOSAVE(ssm_parallel_scan_fwd_nosave_f16_i64,  long long, __half,        from_f_f16, false)
+DEFINE_SSM_PARALLEL_SCAN_FWD_NOSAVE(ssm_prefill_gated_f16_i64,  long long, __half,        from_f_f16, true)
 
 // ============================================================================
 // Parallel selective-scan BACKWARD pass.

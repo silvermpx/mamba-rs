@@ -488,6 +488,112 @@ fn setup() -> (GpuCtx, Mamba3Kernels) {
     (ctx, m3k)
 }
 
+#[test]
+fn a_partial_tile_keeps_decay_gradients_on_their_own_token_and_channel() {
+    let (ctx, kernels) = setup();
+    let shape = Shape {
+        hd: 32,
+        ds: 24,
+        t: 2,
+    };
+    let dtype = WeightDtype::F32;
+    let components = B * shape.t * NH;
+    let isolated = |channel: usize| {
+        let mut q = vec![0.0; components * shape.ds];
+        let mut d_o = vec![0.0; components * shape.hd];
+        let mut states = vec![0.0; B * NH * shape.hd * shape.ds];
+        q[0] = 1.0;
+        q[NH * shape.ds] = 1.0;
+        d_o[NH * shape.hd + channel] = 1.0;
+        states[9 * shape.ds] = 1.0;
+        let mut prefixes = vec![0.0; B * NH * CS];
+        for chunk in prefixes.as_chunks_mut::<CS>().0 {
+            chunk[0] = -std::f32::consts::LN_2;
+            chunk[1] = -2.0 * std::f32::consts::LN_2;
+        }
+        let inputs = Inputs {
+            q: upload_typed(&ctx, &q, dtype),
+            k: upload_typed(&ctx, &vec![0.0; q.len()], dtype),
+            v: upload_typed(&ctx, &vec![0.0; d_o.len()], dtype),
+            d_o: upload_typed(&ctx, &d_o, dtype),
+            da_cs: upload(&ctx, &prefixes),
+            da_cs_sum: upload(&ctx, &[-2.0 * std::f32::consts::LN_2; B * NH]),
+            qk: upload(&ctx, &vec![0.0; components]),
+            states: upload(&ctx, &states),
+            d_param: upload(&ctx, &[0.0; NH]),
+        };
+        let terminal = GpuBuffer::zeros(&ctx.stream, states.len()).unwrap();
+        download(
+            &ctx,
+            &dqkv_tiled(&ctx, &kernels, dtype, shape, &inputs, &terminal).d_adt,
+        )
+    };
+    // Only channel nine carries a state. Its value on the second token
+    // is one quarter, and differentiating either of the two log decays
+    // returns that same value.
+    assert_eq!(isolated(0), vec![0.0; components]);
+    let mut expected = vec![0.0; components];
+    expected[0] = 0.25;
+    expected[NH] = 0.25;
+    assert_eq!(isolated(9), expected);
+}
+
+#[test]
+fn a_large_later_pair_leaves_earlier_decay_gradients_intact() {
+    let (ctx, kernels) = setup();
+    let s = Shape {
+        hd: 32,
+        ds: 24,
+        t: 5,
+    };
+    let f = WeightDtype::F32;
+    for hard_transition in [false, true] {
+        let steps = B * s.t * NH;
+        let mut q = vec![0.0; steps * s.ds];
+        let mut k = q.clone();
+        let mut v = vec![0.0; steps * s.hd];
+        let mut dy = v.clone();
+        // Separate state coordinates make the two impulses independent,
+        // even when the transition between them is the identity.
+        for (t, component) in [(0, 0), (2, 1)] {
+            k[t * NH * s.ds + component] = 1.0;
+            v[t * NH * s.hd] = 1.0;
+        }
+        for (t, component, gain) in [(1, 0, 1.0), (3, 1, 67108864.0), (4, 1, 1.0)] {
+            q[t * NH * s.ds + component] = 1.0;
+            dy[t * NH * s.hd] = gain;
+        }
+        let mut prefixes = vec![0.0; B * NH * CS];
+        let mut ends = [0.0; B * NH];
+        if hard_transition {
+            prefixes[2] = -2.0f32.powi(125);
+            prefixes[3..5].fill(-1024.0);
+            ends[0] = -1024.0;
+        }
+        let inputs = Inputs {
+            q: upload_typed(&ctx, &q, f),
+            k: upload_typed(&ctx, &k, f),
+            v: upload_typed(&ctx, &v, f),
+            d_o: upload_typed(&ctx, &dy, f),
+            da_cs: upload(&ctx, &prefixes),
+            da_cs_sum: upload(&ctx, &ends),
+            qk: upload(&ctx, &vec![0.0; steps]),
+            d_param: upload(&ctx, &[0.0; NH]),
+            states: GpuBuffer::zeros(&ctx.stream, B * NH * s.hd * s.ds).unwrap(),
+        };
+        let terminal = GpuBuffer::zeros(&ctx.stream, B * NH * s.hd * s.ds).unwrap();
+        let got = download(
+            &ctx,
+            &dqkv_tiled(&ctx, &kernels, f, s, &inputs, &terminal).d_adt,
+        );
+        let mut expected = vec![0.0; steps];
+        expected[NH] = 1.0;
+        expected[3 * NH] = 67108864.0;
+        expected[4 * NH] = 1.0;
+        assert_eq!(got, expected, "hard transition {hard_transition}");
+    }
+}
+
 /// Every warp-kernel shape: the tiled stage gives the warp stage's bits.
 fn tiled_matches_warp(dtype: WeightDtype) {
     let (ctx, m3k) = setup();

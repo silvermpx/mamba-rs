@@ -1,6 +1,9 @@
 //! Mamba-2 on the CPU: against a float64 transcription of the reference
 //! step, prefill against the decode chain, and the decode's invariants.
 
+#[path = "common/relative_peak.rs"]
+mod peak;
+
 use mamba_rs::mamba1::cpu::prefill::PrefillMode;
 use mamba_rs::mamba2::cpu::{
     Mamba2PrefillScratch, Mamba2StepScratch, forward_mamba2_backbone_prefill_mode, mamba2_step,
@@ -20,11 +23,7 @@ fn det(n: usize, seed: u64, scale: f32) -> Vec<f32> {
 }
 
 fn rel_max(got: &[f32], want: &[f64]) -> f64 {
-    let scale = want.iter().fold(0f64, |a, &w| a.max(w.abs())).max(1e-3);
-    got.iter()
-        .zip(want)
-        .fold(0f64, |a, (&g, &w)| a.max((f64::from(g) - w).abs()))
-        / scale
+    peak::relative_peak(got, want, 1e-3)
 }
 
 /// Weights with every parameter drawn, biases and norm scales included.

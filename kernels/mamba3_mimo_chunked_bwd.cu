@@ -817,7 +817,7 @@ __device__ __forceinline__ void m3mb_state_terms_tiles_body(
         cfs[i] = 0.0f;
         if (a < rows) {
             const float* cf = coef + ((row0 + a / rank) * nh + h) * 4;
-            cfs[i] = __fmul_rn(mimo_exp(fminf(__fsub_rn(acs_last, cf[3]), 0.0f)), cf[2]);
+            cfs[i] = __fmul_rn(mimo_exp(fminf(chunk_decay_interval(cf + 3, 4LL * nh, lc - 1 - S0 - a / rank, cf[3], acs_last), 0.0f)), cf[2]);
         }
     }
     // dk's 128 columns from nb: c_s times the chain over p ascending.
@@ -1253,7 +1253,7 @@ __device__ __forceinline__ void m3mb_pairs_dq_body(
                 if (s <= t && vl_id(seq_idx, b, seq, t0 + s) == vl_id(seq_idx, b, seq, t0 + t)) {
                     const float* ct = coef + ((trow0 + tq) * nh + h) * 4;
                     const float* cs_ = coef + ((srow0 + sk) * nh + h) * 4;
-                    w = s < t ? __fmul_rn(mimo_exp(fminf(__fsub_rn(ct[3], cs_[3]), 0.0f)), cs_[2])
+                    w = s < t ? __fmul_rn(mimo_exp(fminf(chunk_decay_interval(cs_ + 3, 4LL * nh, t - s, cs_[3], ct[3]), 0.0f)), cs_[2])
                               : ct[1];
                 }
                 ws[tq * tl + sk] = w;
@@ -1594,7 +1594,7 @@ __device__ __forceinline__ void m3mb_pairs_dk_body(
             const float* ct = coef + ((trow0 + tq) * nh + h) * 4;
             const float* cs_ = coef + ((srow0 + sk) * nh + h) * 4;
             ws[tq * tl + sk] = s < t
-                ? __fmul_rn(mimo_exp(fminf(__fsub_rn(ct[3], cs_[3]), 0.0f)), cs_[2])
+                ? __fmul_rn(mimo_exp(fminf(chunk_decay_interval(cs_ + 3, 4LL * nh, t - s, cs_[3], ct[3]), 0.0f)), cs_[2])
                 : ct[1];
             if (!do_dw) continue;
             float dw = 0.0f;
@@ -1954,7 +1954,7 @@ __device__ __forceinline__ void m3mb_pairs_tc_body(
     };
     auto w_at = [&](int a, int col) {
         const int t = a / rank, s = col / rank;
-        return s < t ? __fmul_rn(mimo_exp(fminf(__fsub_rn(acs[t], acs[s]), 0.0f)), scl[s])
+        return s < t ? __fmul_rn(mimo_exp(fminf(chunk_decay_interval(acs + s, 1, t - s, acs[s], acs[t]), 0.0f)), scl[s])
                      : gam[t];
     };
     float* wm = prod;                              // [64][72] w M, then M
@@ -2335,28 +2335,48 @@ extern "C" __global__ void m3mb_combine(
     const long long b = bc / nc;
     const int t0 = c * M3M_CHUNK;
     const int lc = min(M3M_CHUNK, seq - t0);
-    if (k >= lc) return;
     const long long pairs = M3M_CHUNK * (M3M_CHUNK + 1) / 2;
     const float* dw = dwp + (bc * nh + h) * pairs;
-    auto acs = [&](int t) { return coef[((b * seq + t0 + t) * nh + h) * 4 + 3]; };
+    const float* tape = coef + ((b * seq + t0) * nh + h) * 4 + 3;
+    const long long stride = 4LL * nh;
+    auto acs = [&](int t) { return tape[t * stride]; };
     auto scale = [&](int t) { return coef[((b * seq + t0 + t) * nh + h) * 4 + 2]; };
     auto wts = [&](int t, int s) {
-        return __fmul_rn(mimo_exp(fminf(__fsub_rn(acs(t), acs(s)), 0.0f)), scale(s));
+        return __fmul_rn(mimo_exp(fminf(chunk_decay_interval(tape + s * stride, stride, t - s, acs(s), acs(t)), 0.0f)), scale(s));
     };
     const float acs_last = acs(lc - 1);
     // k's sequence in the chunk, [k_first, k_end), and the chunk's last
     // sequence from `last`: the whole chunk without a packing.
-    const VlSpan ks = vl_span(seq_idx, b, seq, t0, lc, k);
+    const bool marked = __syncthreads_or(k < lc && acs(k) <= -1024.0f);
+    if (!marked && k >= lc) return;
+    const VlSpan ks = k < lc ? vl_span(seq_idx, b, seq, t0, lc, k) : VlSpan{0, 0, false, false};
     const int last = vl_seq_first(seq_idx, b, seq, t0, t0 + lc - 1) - t0;
     float stable = 0.0f;
-    for (int t = k; t < ks.end; t++)
-        for (int s = ks.first; s < k; s++) {
-            const float wv = wts(t, s);
-            stable = __fadd_rn(stable, __fmul_rn(dw[(long long)t * (t + 1) / 2 + s], wv));
+    if (marked) {
+        // Every intermediate token uses the same pair weight. Compute a
+        // row once and give each lane its original ordered sum.
+        __shared__ float weights[M3M_CHUNK];
+        for (int t = 0; t < lc; ++t) {
+            if (k < t && t < ks.end) weights[k] = wts(t, k);
+            __syncthreads();
+            if (k <= t && t < ks.end) {
+                for (int s = ks.first; s < k; ++s) {
+                    stable = __fadd_rn(stable, __fmul_rn(dw[(long long)t * (t + 1) / 2 + s], weights[s]));
+                }
+            }
+            __syncthreads();
         }
+        if (k >= lc) return;
+    } else {
+        for (int t = k; t < ks.end; t++)
+            for (int s = ks.first; s < k; s++) {
+                const float wv = wts(t, s);
+                stable = __fadd_rn(stable, __fmul_rn(dw[(long long)t * (t + 1) / 2 + s], wv));
+            }
+    }
     float nxt = 0.0f;
     for (int s = last; s < k; s++) {
-        const float cv = __fmul_rn(mimo_exp(fminf(__fsub_rn(acs_last, acs(s)), 0.0f)), scale(s));
+        const float cv = __fmul_rn(mimo_exp(fminf(chunk_decay_interval(tape + s * stride, stride, lc - 1 - s, acs(s), acs_last), 0.0f)), scale(s));
         nxt = __fadd_rn(nxt, __fmul_rn(dcs[(b * seq + t0 + s) * nh + h], cv));
     }
     const float pass = vl_passes(seq_idx, b, seq, t0, lc)
@@ -2366,11 +2386,11 @@ extern "C" __global__ void m3mb_combine(
     const float da = __fadd_rn(stable, __fadd_rn(nxt, prv));
     float dsc = k >= last
         ? __fmul_rn(dcs[(b * seq + t0 + k) * nh + h],
-                    mimo_exp(fminf(__fsub_rn(acs_last, acs(k)), 0.0f)))
+                    mimo_exp(fminf(chunk_decay_interval(tape + k * stride, stride, lc - 1 - k, acs(k), acs_last), 0.0f)))
         : 0.0f;
     for (int t = k + 1; t < ks.end; t++)
         dsc = __fmaf_rn(dw[(long long)t * (t + 1) / 2 + k],
-                        mimo_exp(fminf(__fsub_rn(acs(t), acs(k)), 0.0f)), dsc);
+                        mimo_exp(fminf(chunk_decay_interval(tape + k * stride, stride, t - k, acs(k), acs(t)), 0.0f)), dsc);
     float* o = dsc3 + ((b * seq + t0 + k) * nh + h) * 3;
     o[0] = da;
     o[1] = dsc;
@@ -2737,7 +2757,7 @@ __device__ __forceinline__ void m3mb_chunk_terms_body(
     for (int t = tid; t < lc; t += blockDim.x) {
         const float* cf = coef + ((row0 + t) * nh + h) * 4;
         ef[t] = mimo_exp(cf[3]);
-        cfs[t] = __fmul_rn(mimo_exp(fminf(__fsub_rn(acs_last, cf[3]), 0.0f)), cf[2]);
+        cfs[t] = __fmul_rn(mimo_exp(fminf(chunk_decay_interval(cf + 3, 4LL * nh, lc - 1 - t, cf[3], acs_last), 0.0f)), cf[2]);
     }
     __syncthreads();
     {

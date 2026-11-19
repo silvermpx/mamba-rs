@@ -1,6 +1,9 @@
 //! Mamba-3 SISO integration tests — correctness and gradient checks.
 //! Mirrors test_correctness.rs (Mamba-1) adapted for Mamba-3 architecture.
 
+#[path = "common/relative_peak.rs"]
+mod peak;
+
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::cpu::backward::backward_mamba3_layer_batched;
 use mamba_rs::mamba3_siso::cpu::dims::Mamba3Dims;
@@ -1132,11 +1135,7 @@ fn draw(n: usize, seed: u64, scale: f32) -> Vec<f32> {
 
 /// The largest deviation from the float64 values over their largest one.
 fn rel_max(got: &[f32], want: &[f64]) -> f64 {
-    let scale = want.iter().fold(0f64, |a, &w| a.max(w.abs())).max(1e-30);
-    got.iter()
-        .zip(want)
-        .fold(0f64, |a, (&g, &w)| a.max((f64::from(g) - w).abs()))
-        / scale
+    peak::relative_peak(got, want, 1e-30)
 }
 
 /// The decode step of a whole model against the float64 reference step:
@@ -1209,4 +1208,14 @@ fn m3_decode_matches_the_f64_backbone_oracle() {
         eprintln!("{label}: outputs {worst:.2e}");
         assert!(worst < 2e-5, "{label}: outputs rel {worst:.3e}");
     }
+}
+
+#[test]
+fn peak_error_checks_each_logit_against_its_reference() {
+    assert_eq!(peak::relative_peak(&[1.0, 4.0], &[2.0, 4.0], 0.0), 0.25);
+    assert_eq!(peak::relative_peak(&[0.0], &[0.0], 0.0), 0.0);
+    assert!(
+        std::panic::catch_unwind(|| peak::relative_peak(&[1.0, f32::NAN], &[1.0, 2.0], 0.0))
+            .is_err()
+    );
 }

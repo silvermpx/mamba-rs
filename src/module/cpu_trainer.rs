@@ -160,6 +160,8 @@ pub(crate) struct CpuCore<F: CpuFamily> {
     seq_len: usize,
     input_dim: usize,
     d_model: usize,
+    /// The configured boundaries, shared with snapshots of the trainer.
+    packing: Option<Varlen>,
     /// A forward whose backward has not run.
     forwarded: bool,
     /// The options of the fused [`CpuCore::step`].
@@ -222,6 +224,7 @@ impl<F: CpuFamily> CpuCore<F> {
             seq_len,
             input_dim,
             d_model,
+            packing: None,
             forwarded: false,
             step_opts: BackwardOpts::default(),
             window_open: false,
@@ -605,6 +608,7 @@ impl<F: CpuFamily> CpuCore<F> {
         let roles = &self.roles;
         self.adam
             .step(&mut self.weights, &self.grads, |i| roles[i].decays)?;
+        self.forwarded = false;
         self.fam.after_update(&self.weights);
         self.refresh_compute();
         Ok(BackwardMetrics {
@@ -629,10 +633,17 @@ impl<F: CpuFamily> CpuCore<F> {
         if let Some(v) = packing {
             v.check_shape(self.batch, self.seq_len)?;
         }
-        let fam = &self.fam;
-        for (b, seq) in self.seqs.iter_mut().enumerate() {
-            fam.set_varlen(seq, packing.map(|v| v.row(b)))?;
+        if self.packing.as_ref() == packing {
+            return Ok(());
         }
+        let same = Varlen::same_boundaries(self.packing.as_ref(), packing);
+        if !same || self.packing.is_some() != packing.is_some() {
+            for (b, seq) in self.seqs.iter_mut().enumerate() {
+                self.fam.set_varlen(seq, packing.map(|v| v.row(b)))?;
+            }
+        }
+        self.forwarded &= same;
+        self.packing = packing.cloned();
         Ok(())
     }
 
@@ -667,23 +678,7 @@ impl<F: CpuFamily> CpuCore<F> {
             .collect()
     }
 
-    /// An error unless `values` holds the batch's recurrence tensor `i`.
-    fn check_recurrence(&self, i: usize, values: &[f32]) -> Result<(), String> {
-        let per = self.fam.recurrence_len(i) * self.fam.n_layers();
-        if values.len() != per * self.batch {
-            return Err(format!(
-                "recurrence '{}': {} values for {} sequences of {per}",
-                F::RECURRENCE[i],
-                values.len(),
-                self.batch
-            ));
-        }
-        Ok(())
-    }
-
-    /// Load the recurrence tensor `i` from `values`, laid out as
-    /// [`Self::recurrent_state`] gives it and checked by
-    /// [`Self::check_recurrence`].
+    /// Load a checked recurrence tensor in the layout of [`Self::recurrent_state`].
     fn load_recurrence(&mut self, i: usize, values: &[f32]) {
         let per = self.fam.recurrence_len(i);
         if per == 0 {
@@ -701,34 +696,41 @@ impl<F: CpuFamily> CpuCore<F> {
     }
 
     /// Everything beside the weights a bit-continuous resume needs.
-    pub(crate) fn trainer_state(&self) -> TrainerState {
-        TrainerState {
+    pub(crate) fn trainer_state(&self) -> Result<TrainerState, String> {
+        if self.window_open {
+            return Err("apply the open accumulation window before taking a trainer state".into());
+        }
+        Ok(TrainerState {
             family: F::FAMILY,
             optimizer: self.optimizer_state(),
             scaler: self.scaler_state(),
             recurrent: self.recurrent_state(),
-        }
+            packing: self.packing.clone(),
+        })
     }
 
     /// Load a state a trainer of this family gave; another family's, or a
     /// recurrence of another shape, is refused before anything changes.
     pub(crate) fn load_trainer_state(&mut self, state: &TrainerState) -> Result<(), String> {
-        state.check_family(F::FAMILY)?;
+        state.check_window(F::FAMILY, self.batch, self.seq_len, self.adam.m.len())?;
         let tensors = F::RECURRENCE
             .iter()
-            .map(|name| state.recurrent_tensor(name))
+            .enumerate()
+            .map(|(i, name)| {
+                let len = self.fam.n_layers() * self.batch * self.fam.recurrence_len(i);
+                state.recurrent_tensor(name, len)
+            })
             .collect::<Result<Vec<_>, String>>()?;
-        for (i, values) in tensors.iter().enumerate() {
-            self.check_recurrence(i, values)?;
-        }
+        self.adam.import_state(&state.optimizer)?;
+        self.set_varlen(state.packing.as_ref())?;
         if let Some((scale, tracker)) = state.scaler {
-            DynamicLossScaler::check_scale(scale)?;
             self.load_scaler_state(scale, tracker)?;
         }
-        self.adam.import_state(&state.optimizer)?;
         for (i, values) in tensors.iter().enumerate() {
             self.load_recurrence(i, values);
         }
+        self.forwarded = false;
+        self.window_open = false;
         Ok(())
     }
 
@@ -843,8 +845,9 @@ pub trait CpuTrainer {
     /// Pack several sequences of different lengths into the rows of the
     /// next windows (see [`crate::varlen`]): no state or gradient crosses
     /// from one into the next. `None` runs each row as one sequence. The
-    /// packing holds until replaced; Mamba-1 has none in the reference and
-    /// refuses one.
+    /// packing holds until replaced. Changing the boundaries after a forward
+    /// discards its backward tape: run a new forward with the new boundaries.
+    /// Relabeling the same sequences keeps the tape. Mamba-1 refuses a packing.
     fn set_varlen(&mut self, packing: Option<&Varlen>) -> Result<(), String>;
 
     fn set_lr(&mut self, lr: f32) -> Result<(), String>;
@@ -874,12 +877,15 @@ pub trait CpuTrainer {
     /// error.
     fn load_optimizer_state(&mut self, blob: &AdamWStateBlob) -> Result<(), String>;
 
-    /// Everything beside the weights a bit-continuous resume needs: the
-    /// optimizer state and the carried recurrence.
+    /// Save the optimizer, loss scaler, recurrence and packing for the next
+    /// forward. Apply an open accumulation window before saving. A snapshot
+    /// after a forward carries its final recurrence; its backward tape stays
+    /// on the original trainer.
     fn trainer_state(&self) -> Result<TrainerState, String>;
 
     /// Load a [`CpuTrainer::trainer_state`] of a trainer of the same family
-    /// and shape.
+    /// and compatible shape. Loading discards the destination's pending
+    /// backward and accumulated gradients. The next window starts with a forward.
     fn load_trainer_state(&mut self, state: &TrainerState) -> Result<(), String>;
 }
 
@@ -1049,7 +1055,7 @@ macro_rules! cpu_trainer_type {
 
             /// See [`CpuTrainer::trainer_state`]($crate::module::CpuTrainer::trainer_state).
             pub fn trainer_state(&self) -> Result<$crate::optim::TrainerState, String> {
-                Ok(self.core.trainer_state())
+                self.core.trainer_state()
             }
 
             /// See [`CpuTrainer::load_trainer_state`]($crate::module::CpuTrainer::load_trainer_state).

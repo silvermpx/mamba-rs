@@ -60,9 +60,9 @@ fn linears(cfg: &Mamba3MimoConfig, input_dim: usize) -> [(&'static str, usize, u
 /// Whether and how the GPU runs `req` on a MIMO model of `cfg` fed rows
 /// `input_dim` wide. `cfg` must pass [`Mamba3MimoConfig::validate`]; the
 /// request's scan mode stands in for the config's. A prompt of one token
-/// takes the recurrence, which is the decode step.
+/// takes the sequential recurrence.
 pub fn admit(cfg: &Mamba3MimoConfig, input_dim: usize, req: &Request) -> Result<Plan, Refusal> {
-    matrix::check_request(req)?;
+    matrix::check_request(req, input_dim, cfg.bidirectional)?;
     matrix::int_args(&int_args(cfg, input_dim, (req.batch, req.seq_len)))?;
     if req.path == Path::Train && req.gemm == GemmMode::Deterministic {
         let rows = req.batch.saturating_mul(req.seq_len);

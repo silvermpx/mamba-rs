@@ -180,16 +180,10 @@ impl Mamba2Weights {
             }
         };
         let on = |n: usize, flag: bool| if flag { n } else { 0 };
-        if self.input_proj_w.is_empty() && self.input_proj_b.is_empty() {
-            ck("identity input width", input_dim, d)?;
-        } else {
-            ck(
-                "input_proj_w",
-                self.input_proj_w.len(),
-                input_dim.saturating_mul(d),
-            )?;
-            ck("input_proj_b", self.input_proj_b.len(), d)?;
-        }
+        let (nw, nb) =
+            crate::config::input_projection_lens(input_dim, d, self.input_proj_w.is_empty())?;
+        ck("input_proj_w", self.input_proj_w.len(), nw)?;
+        ck("input_proj_b", self.input_proj_b.len(), nb)?;
         let (nf, nfb) = cfg.block_norm.final_lens(d, cfg.final_norm);
         ck("norm_f_weight", self.norm_f_weight.len(), nf)?;
         ck("norm_f_bias", self.norm_f_bias.len(), nfb)?;

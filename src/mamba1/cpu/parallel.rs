@@ -208,10 +208,6 @@ pub fn parallel_mamba_forward(
             let t_len = seq_len * dm;
             scratch.temporal_flat[..t_len].fill(0.0);
 
-            // Zero conv/ssm states for this sample (fresh forward, no carry-over).
-            conv_b.fill(0.0);
-            ssm_b.fill(0.0);
-
             // Run the per-sample forward through the full Mamba backbone.
             forward_mamba_backbone_batched(
                 &mut scratch.temporal_flat[..t_len],

@@ -12,7 +12,7 @@ use crate::varlen::Varlen;
 #[derive(Default)]
 pub(crate) struct GpuVarlen {
     ids: Option<GpuByteBuffer>,
-    active: bool,
+    packing: Option<Varlen>,
 }
 
 impl GpuVarlen {
@@ -23,29 +23,34 @@ impl GpuVarlen {
         stream: &Arc<cudarc::driver::CudaStream>,
         packing: Option<&Varlen>,
         (batch, seq_len): (usize, usize),
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
+        let changed = !Varlen::same_boundaries(self.packing.as_ref(), packing);
         let Some(v) = packing else {
-            self.active = false;
-            return Ok(());
+            self.packing = None;
+            return Ok(changed);
         };
         v.check_shape(batch, seq_len)?;
         let bytes: &[u8] = bytemuck::cast_slice(v.seq_idx());
         if bytes.is_empty() {
-            self.active = false;
-            return Ok(());
+            self.packing = None;
+            return Ok(changed);
         }
         let buf = match self.ids.take() {
             Some(buf) => buf,
             None => GpuByteBuffer::zeros(stream, bytes.len())?,
         };
         self.ids.insert(buf).upload_bytes(stream, bytes)?;
-        self.active = true;
-        Ok(())
+        self.packing = Some(v.clone());
+        Ok(changed)
+    }
+
+    pub(crate) fn packing(&self) -> Option<&Varlen> {
+        self.packing.as_ref()
     }
 
     /// The address of the ids the kernels take: 0 for one sequence a row.
     pub(crate) fn ptr(&self) -> u64 {
-        match (&self.ids, self.active) {
+        match (&self.ids, self.packing.is_some()) {
             (Some(buf), true) => buf.cached_ptr(),
             _ => 0,
         }

@@ -6,6 +6,29 @@
 #[doc(hidden)]
 pub use crate::mamba1::config::MambaConfig;
 
+/// An absent input projection reads full residual rows and has no bias.
+pub(crate) fn input_projection_lens(
+    input_dim: usize,
+    d_model: usize,
+    identity: bool,
+) -> Result<(usize, usize), String> {
+    if input_dim == 0 {
+        return Err("input_dim must be positive".into());
+    }
+    if identity {
+        if input_dim != d_model {
+            return Err(format!(
+                "identity input width: expected {d_model}, got {input_dim}"
+            ));
+        }
+        return Ok((0, 0));
+    }
+    let len = input_dim
+        .checked_mul(d_model)
+        .ok_or("input projection size overflows")?;
+    Ok((len, d_model))
+}
+
 /// The model families this crate runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]

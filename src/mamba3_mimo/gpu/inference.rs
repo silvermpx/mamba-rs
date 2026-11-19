@@ -263,7 +263,7 @@ impl Mamba3MimoGpuEngine {
     ) -> Result<Self, String> {
         w.validate(&cfg, input_dim)?;
         let request = Request {
-            path: Path::Decode,
+            path: Path::for_inference_engine(cfg.bidirectional),
             batch,
             seq_len: 1,
             scan: cfg.scan_mode,
@@ -456,11 +456,7 @@ impl Mamba3MimoGpuEngine {
     pub fn alloc_window(&self, seq_len: usize) -> Result<Mamba3MimoGpuWindow, String> {
         let c = &self.cfg;
         let request = Request {
-            path: if seq_len == 1 {
-                Path::Decode
-            } else {
-                Path::Prefill
-            },
+            path: Path::Prefill,
             batch: self.batch,
             seq_len,
             scan: c.scan_mode,

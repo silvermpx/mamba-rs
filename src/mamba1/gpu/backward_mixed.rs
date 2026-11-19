@@ -269,7 +269,7 @@ fn layer_backward_mixed(
     // ─── B2: gating_bwd_typed ────────────────────────────────────────
     {
         let n = (bt * di) as i64;
-        let mut bld = ctx.stream.launch_builder(k.gating_bwd_typed.get(dtype));
+        let mut bld = ctx.stream.launch_builder(k.gating_bwd_readout.get(dtype));
         let dy = scratch.d_y.cached_ptr();
         // Gate gradient lands directly in the d_proj gate half.
         let dg = scratch.d_proj.cached_ptr();
@@ -937,6 +937,7 @@ pub fn gpu_backward_mamba_backbone_mixed(
 ) -> Result<(), String> {
     let dims = scratch.dims;
     dims.check_for(ctx)?;
+    acts.check_scan_readouts(&dims)?;
     let dtype = acts.dtype;
     let bt = dims.bt();
     let hidden = mamba_w.mlp.first().map(|m| m.hidden);

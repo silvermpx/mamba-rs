@@ -59,7 +59,7 @@ fn linears(cfg: &Mamba2Config, input_dim: usize) -> [(&'static str, usize, usize
 /// `input_dim` wide. `cfg` must pass [`Mamba2Config::validate`]; the
 /// request's scan mode stands in for the config's.
 pub fn admit(cfg: &Mamba2Config, input_dim: usize, req: &Request) -> Result<Plan, Refusal> {
-    matrix::check_request(req)?;
+    matrix::check_request(req, input_dim, cfg.bidirectional)?;
     matrix::int_args(&int_args(cfg, input_dim, (req.batch, req.seq_len)))?;
     if req.path == Path::Train && req.gemm == GemmMode::Deterministic {
         let rows = req.batch.saturating_mul(req.seq_len);

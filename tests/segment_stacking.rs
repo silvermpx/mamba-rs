@@ -73,6 +73,68 @@ fn mimo_cfg() -> Mamba3MimoConfig {
     }
 }
 
+macro_rules! rejects_empty_input_rows {
+    ($name:ident, $family:ident, $cfg:expr, $weights:ident, $backbone:ident) => {
+        #[test]
+        fn $name() {
+            let cfg = $cfg;
+            let weights = $weights::zeros(&cfg, 0);
+            let validation = weights.validate(&cfg, 0);
+            let loaded = mamba_rs::$backbone::new(weights, cfg, 0);
+            let fresh = mamba_rs::$backbone::init(cfg, 0, 1);
+            assert!(
+                validation.is_err(),
+                "weight validation accepted zero-width rows"
+            );
+            assert!(loaded.is_err(), "loaded weights accepted zero-width rows");
+            assert!(fresh.is_err(), "fresh weights accepted zero-width rows");
+            for path in mamba_rs::matrix::Path::ALL {
+                let req = mamba_rs::matrix::Request {
+                    path,
+                    batch: 1,
+                    seq_len: 1,
+                    scan: cfg.scan_mode,
+                    precision: mamba_rs::WeightDtype::F32,
+                    gemm: mamba_rs::GemmMode::Deterministic,
+                };
+                assert!(matches!(
+                    mamba_rs::$family::route::admit(&cfg, 0, &req),
+                    Err(mamba_rs::matrix::Refusal::Request { .. })
+                ));
+            }
+        }
+    };
+}
+
+rejects_empty_input_rows!(
+    m1_refuses_empty_input_rows,
+    mamba1,
+    m1_cfg(),
+    MambaWeights,
+    MambaBackbone
+);
+rejects_empty_input_rows!(
+    m2_refuses_empty_input_rows,
+    mamba2,
+    m2_cfg(),
+    Mamba2Weights,
+    Mamba2Backbone
+);
+rejects_empty_input_rows!(
+    siso_refuses_empty_input_rows,
+    mamba3_siso,
+    siso_cfg(),
+    Mamba3Weights,
+    Mamba3Backbone
+);
+rejects_empty_input_rows!(
+    mimo_refuses_empty_input_rows,
+    mamba3_mimo,
+    mimo_cfg(),
+    Mamba3MimoWeights,
+    Mamba3MimoBackbone
+);
+
 /// Deterministic values in [-1, 1).
 fn values(n: usize, seed: u32) -> Vec<f32> {
     let mut x = seed.wrapping_mul(2_654_435_761).wrapping_add(1);

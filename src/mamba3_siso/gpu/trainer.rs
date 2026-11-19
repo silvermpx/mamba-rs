@@ -526,12 +526,25 @@ impl Mamba3GpuTrainer {
     /// one on or off needs `drop_graph` first.
     pub fn set_varlen(&mut self, packing: Option<&Varlen>) -> Result<(), String> {
         let captured = self.has_graph();
-        let (varlen, stream, dims) = match &mut self.inner {
-            Trainer3Inner::F32(t) => (&mut t.varlen, &t.ctx.stream, &t.dims),
-            Trainer3Inner::Mixed(t) => (&mut t.varlen, &t.ctx.stream, &t.dims),
+        let (varlen, stream, dims, tape) = match &mut self.inner {
+            Trainer3Inner::F32(t) => (
+                &mut t.varlen,
+                &t.ctx.stream,
+                &t.dims,
+                &mut t.split_forward_route,
+            ),
+            Trainer3Inner::Mixed(t) => (
+                &mut t.varlen,
+                &t.ctx.stream,
+                &t.dims,
+                &mut t.split_forward_route,
+            ),
         };
         varlen.check_graph(captured, packing)?;
-        varlen.set(stream, packing, (dims.batch, dims.seq_len))
+        if varlen.set(stream, packing, (dims.batch, dims.seq_len))? {
+            *tape = None;
+        }
+        Ok(())
     }
 
     /// Download the four carried recurrences (SSM, K, V, angle) — the
@@ -567,11 +580,15 @@ impl Mamba3GpuTrainer {
         self.load_recurrent_parts([&blob.ssm, &blob.k, &blob.v, &blob.angle])
     }
 
-    /// The (ssm, k, v, angle) recurrence from borrowed values.
-    fn load_recurrent_parts(&mut self, parts: [&[f32]; 4]) -> Result<(), String> {
-        let (stream, bufs) = match &mut self.inner {
+    fn recurrent_buffers_mut(
+        &mut self,
+    ) -> (
+        &std::sync::Arc<cudarc::driver::CudaStream>,
+        [&mut GpuBuffer; 4],
+    ) {
+        match &mut self.inner {
             Trainer3Inner::F32(t) => (
-                t.ctx.stream.clone(),
+                &t.ctx.stream,
                 [
                     &mut t.ssm_states,
                     &mut t.k_states,
@@ -580,7 +597,7 @@ impl Mamba3GpuTrainer {
                 ],
             ),
             Trainer3Inner::Mixed(t) => (
-                t.ctx.stream.clone(),
+                &t.ctx.stream,
                 [
                     &mut t.ssm_states,
                     &mut t.k_states,
@@ -588,7 +605,12 @@ impl Mamba3GpuTrainer {
                     &mut t.angle_states,
                 ],
             ),
-        };
+        }
+    }
+
+    /// The (ssm, k, v, angle) recurrence from borrowed values.
+    fn load_recurrent_parts(&mut self, parts: [&[f32]; 4]) -> Result<(), String> {
+        let (stream, bufs) = self.recurrent_buffers_mut();
         if parts.iter().zip(&bufs).any(|(p, b)| p.len() != b.len()) {
             let lens: Vec<(usize, usize)> = parts
                 .iter()
@@ -601,7 +623,7 @@ impl Mamba3GpuTrainer {
             ));
         }
         for (buf, values) in bufs.into_iter().zip(parts) {
-            buf.upload(&stream, values)?;
+            buf.upload(stream, values)?;
         }
         Ok(())
     }
@@ -830,9 +852,19 @@ impl Mamba3GpuTrainer {
     /// bit: the optimizer state, the f16 loss scale and the carried
     /// recurrence. [`TrainerState::save`] writes it to a file.
     pub fn trainer_state(&self) -> Result<TrainerState, String> {
+        let (open, packing) = match &self.inner {
+            Trainer3Inner::F32(t) => (t.grads_dirty, t.varlen.packing().cloned()),
+            Trainer3Inner::Mixed(t) => (t.grads_dirty, t.varlen.packing().cloned()),
+        };
+        if open {
+            return Err(
+                "finish the gradient accumulation window before saving a checkpoint".into(),
+            );
+        }
         let rec = self.recurrent_state()?;
         Ok(TrainerState {
             family: ModelFamily::Mamba3,
+            packing,
             optimizer: self.optimizer_state()?,
             scaler: self.scaler_state(),
             recurrent: vec![
@@ -847,18 +879,41 @@ impl Mamba3GpuTrainer {
     /// Load a state a trainer of this family gave with
     /// [`Self::trainer_state`]. The learning rate is not part of it.
     pub fn load_trainer_state(&mut self, state: &TrainerState) -> Result<(), String> {
-        state.check_family(ModelFamily::Mamba3)?;
+        if self.has_graph() {
+            return Err(
+                "drop_graph before restoring a trainer state with captured AdamW settings".into(),
+            );
+        }
+        let (batch, seq_len) = (self.batch(), self.seq_len());
+        let (_, buffers) = self.recurrent_buffers_mut();
+        let [ssm, k, v, angle] = buffers.map(|b| b.len());
+        let (moments, window, tape) = match &mut self.inner {
+            Trainer3Inner::F32(t) => (
+                t.adam.m.len(),
+                &mut t.grads_dirty,
+                &mut t.split_forward_route,
+            ),
+            Trainer3Inner::Mixed(t) => (
+                t.adam.m.len(),
+                &mut t.grads_dirty,
+                &mut t.split_forward_route,
+            ),
+        };
+        state.check_window(ModelFamily::Mamba3, batch, seq_len, moments)?;
         let parts = [
-            state.recurrent_tensor("ssm")?,
-            state.recurrent_tensor("k")?,
-            state.recurrent_tensor("v")?,
-            state.recurrent_tensor("angle")?,
+            state.recurrent_tensor("ssm", ssm)?,
+            state.recurrent_tensor("k", k)?,
+            state.recurrent_tensor("v", v)?,
+            state.recurrent_tensor("angle", angle)?,
         ];
+        *window = false;
+        *tape = None;
         self.load_optimizer_state(&state.optimizer)?;
         if let Some((scale, tracker)) = state.scaler {
             self.load_scaler_state(scale, tracker)?;
         }
-        self.load_recurrent_parts(parts)
+        self.load_recurrent_parts(parts)?;
+        self.set_varlen(state.packing.as_ref())
     }
 
     /// Download f32 master weights for checkpointing.

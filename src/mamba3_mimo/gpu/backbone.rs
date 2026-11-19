@@ -69,9 +69,19 @@ impl Mamba3MimoGpuBackbone {
         })
     }
 
+    fn check_decode(&self) -> Result<(), String> {
+        if self.engine.config().bidirectional {
+            return Err(
+                "a bidirectional model reads whole sequences and has no decode step".into(),
+            );
+        }
+        Ok(())
+    }
+
     /// One token for every sequence: `input` is `[batch, input_dim]`,
     /// `output` (`[batch, d_model]`) receives the final-norm rows.
     pub fn step(&mut self, input: &[f32], output: &mut [f32]) -> Result<(), String> {
+        self.check_decode()?;
         self.engine
             .run(input, output, &mut self.state, &mut self.step_window)
     }
@@ -79,6 +89,7 @@ impl Mamba3MimoGpuBackbone {
     /// [`Self::step`] without the download: the rows stay on the device
     /// for a consumer on the GPU.
     pub fn step_gpu_only(&mut self, input: &[f32]) -> Result<(), String> {
+        self.check_decode()?;
         self.engine
             .run_gpu_only(input, &mut self.state, &mut self.step_window)
     }
@@ -95,6 +106,7 @@ impl Mamba3MimoGpuBackbone {
     /// captured decode graph replays with no upload. The bits are the host
     /// step's.
     pub fn step_on_device(&mut self) -> Result<(), String> {
+        self.check_decode()?;
         self.engine
             .run_from(RowSource::Device, &mut self.state, &mut self.step_window)
     }

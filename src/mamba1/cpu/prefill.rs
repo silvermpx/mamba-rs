@@ -585,7 +585,6 @@ pub fn forward_mamba_backbone_prefill_mode(
                 for (g_out, &g) in gs.iter_mut().zip(&proj_row[di..2 * di]) {
                     *g_out = g * (1.0 / (1.0 + fast_exp_scalar(-g)));
                 }
-                store(dtype, gs);
             },
         );
 
@@ -724,15 +723,12 @@ pub fn forward_mamba_backbone_prefill_mode(
         }
         transpose_cm_to_rm(&mut scratch.y_rm, &scratch.y_cm, di, t_len, mode);
 
-        // F4e: gating in row-major (same two-operand product as the fused
-        // per-channel version — bit-identical, cache-friendly). A reduced
-        // precision stores the scan's output, then the gated product.
+        // Gate the scan accumulator before storing the projection input.
         zip_rows(
             mode,
             (&mut scratch.y_rm[..t_len * di], di),
             (&scratch.gate_silu[..t_len * di], di),
             |y_row, g_row| {
-                store(dtype, y_row);
                 for (y, &g) in y_row.iter_mut().zip(g_row) {
                     *y *= g;
                 }

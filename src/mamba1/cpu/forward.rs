@@ -193,7 +193,6 @@ fn forward_mamba_layer_in(
             let sig = 1.0 / (1.0 + fast_exp_scalar(-g));
             scratch.gate_silu_flat[gs_off + d] = g * sig;
         }
-        store(dtype, &mut scratch.gate_silu_flat[gs_off..gs_off + di]);
         acts.gate_post_silu_mut(t)
             .copy_from_slice(&scratch.gate_silu_flat[gs_off..gs_off + di]);
     }
@@ -335,7 +334,7 @@ fn forward_mamba_layer_in(
                 }
 
                 y_d += layer_w.d_param[d] * u_d;
-                acts.data[y_start + d] = stored(dtype, y_d);
+                acts.data[y_start + d] = y_d;
             }
         }
 

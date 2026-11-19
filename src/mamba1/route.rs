@@ -86,7 +86,7 @@ fn linears(cfg: &MambaConfig, input_dim: usize) -> [(&'static str, usize, usize)
 /// Whether and how the GPU runs `req` on a Mamba-1 model of `cfg` fed rows
 /// `input_dim` wide. `cfg` must pass [`MambaConfig::validate`].
 pub fn admit(cfg: &MambaConfig, input_dim: usize, req: &Request) -> Result<Plan, Refusal> {
-    matrix::check_request(req)?;
+    matrix::check_request(req, input_dim, cfg.bidirectional)?;
     matrix::int_args(&IntWidths::of(cfg, input_dim, (req.batch, req.seq_len)).args())?;
     if req.path == Path::Train && req.gemm == GemmMode::Deterministic {
         let rows = req.batch.saturating_mul(req.seq_len);

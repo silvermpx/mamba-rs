@@ -257,7 +257,13 @@ fn assert_split_route_change_rejected(dtype: WeightDtype) {
     let mut output = vec![0.0; batch * seq_len * cfg.d_model];
 
     trainer.forward(&input, &mut output).expect("split forward");
+    #[cfg(feature = "cublas")]
     trainer.ctx().set_gemm_mode(GemmMode::CublasFast).unwrap();
+    #[cfg(not(feature = "cublas"))]
+    {
+        let routes = trainer.ctx().route_controls();
+        routes.set_tensor_cores(!routes.tensor_cores());
+    }
     let error = trainer
         .backward_step(&d_temporal, BackwardOpts::default())
         .expect_err("route drift must reject saved activations");

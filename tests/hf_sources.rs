@@ -878,6 +878,27 @@ fn untied_heads_load_in_mamba2_siso_and_mimo() {
     }
 }
 
+#[test]
+fn mamba2_transformers_requires_a_silu_convolution_activation() {
+    let mut config = serde_json::json!({"model_type": "mamba2"});
+    let parse = |v: &serde_json::Value| parse_mamba2_config(&serde_json::to_vec(v).unwrap());
+    let default = parse(&config).unwrap();
+    for alias in ["silu", "swish"] {
+        config["hidden_act"] = alias.into();
+        assert_eq!(parse(&config).unwrap(), default);
+    }
+    for unsupported in [
+        serde_json::json!("relu"),
+        serde_json::json!("gelu"),
+        serde_json::json!(false),
+        serde_json::Value::Null,
+    ] {
+        config["hidden_act"] = unsupported;
+        let err = parse(&config).unwrap_err();
+        assert!(err.contains("hidden_act"), "{err}");
+    }
+}
+
 /// The transformers layout of a Mamba-2 checkpoint (Codestral's: its own
 /// field names, `Infinity` in the dt limit, a `norm_before_gate` field its
 /// weights do not run with, groups, an untied head, sharded safetensors)

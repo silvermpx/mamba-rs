@@ -2,6 +2,9 @@
 //! reference step, against SISO through the rank-1 equivalence, and its
 //! own invariants (determinism, reset, long-sequence stability).
 
+#[path = "common/relative_peak.rs"]
+mod peak;
+
 use mamba_rs::mamba3_mimo::cpu::{Mamba3MimoStepScratch, mamba3_mimo_step};
 use mamba_rs::mamba3_mimo::{Mamba3MimoConfig, Mamba3MimoState, Mamba3MimoWeights};
 use mamba_rs::mamba3_siso::cpu::inference::{Mamba3StepScratch, mamba3_step};
@@ -20,11 +23,7 @@ fn det(n: usize, seed: u64, scale: f32) -> Vec<f32> {
 }
 
 fn rel_max(got: &[f32], want: &[f64]) -> f64 {
-    let scale = want.iter().fold(0f64, |a, &w| a.max(w.abs())).max(1e-30);
-    got.iter()
-        .zip(want)
-        .fold(0f64, |a, (&g, &w)| a.max((f64::from(g) - w).abs()))
-        / scale
+    peak::relative_peak(got, want, 1e-30)
 }
 
 /// Weights with every parameter drawn, so no constant init hides a path.

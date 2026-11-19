@@ -914,7 +914,7 @@ impl Mamba2GpuEngine {
     ) -> Result<Self, String> {
         w.validate(&cfg, input_dim)?;
         let request = Request {
-            path: Path::Decode,
+            path: Path::for_inference_engine(cfg.bidirectional),
             batch,
             seq_len: 1,
             scan: cfg.scan_mode,

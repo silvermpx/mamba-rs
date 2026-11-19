@@ -609,7 +609,7 @@ pub fn scan_fwd_index_width(
 /// Offset width of a parallel scan forward without saves. Its offsets reach
 /// the state and A rows, the B and C rows, the activations while they are
 /// row-major (t-major rows take a 64-bit base in both builds) and, when the
-/// gate fuses into a row-major store, the in_proj rows of `gate_stride`
+/// scan also reads the gate, the in_proj rows of `gate_stride`
 /// columns the gate is read from.
 pub fn scan_fwd_nosave_index_width(
     batch: usize,
@@ -624,7 +624,7 @@ pub fn scan_fwd_nosave_index_width(
     } else {
         batch.saturating_mul(seq_len).saturating_mul(d_inner)
     };
-    let gate = if tmajor || gate_stride == 0 {
+    let gate = if gate_stride == 0 {
         0
     } else {
         batch
@@ -1228,7 +1228,9 @@ mod tests {
         // The fused gate's in_proj rows, counted only when the gate fuses.
         assert_eq!(nosave(1, 1, 1, 1, m - 2, false), I32);
         assert_eq!(nosave(1, 1, 1, 1, m - 1, false), I64);
-        assert_eq!(nosave(1, 1, 1, 1, m - 1, true), I32);
+        assert_eq!(nosave(1, 1, 1, 1, m - 1, true), I64);
+        assert_eq!(nosave(1, 262145, 4096, 16, 8192, true), I64);
+        assert_eq!(nosave(1, 262145, 4096, 16, 0, true), I32);
         // The full tape holds T + 1 steps of every state, the slim one a
         // few floats per chunk.
         assert_eq!(scan_fwd_index_width(1, m - 1, 1, 1, false), I32);

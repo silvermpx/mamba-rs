@@ -890,7 +890,7 @@ fn admit_decode(
 ) -> Result<(), String> {
     cpu_weights.validate(cfg, input_dim)?;
     let request = Request {
-        path: Path::Decode,
+        path: Path::for_inference_engine(cfg.bidirectional),
         batch,
         seq_len: 1,
         scan: cfg.scan_mode,
@@ -2192,7 +2192,7 @@ impl MambaGpuEngineMixed {
                 let c_off = (dt_rank + ds) as i32;
                 let dp = lw.d_param();
                 let mut bld = engine.ctx.stream.launch_builder(
-                    k.ssm_step_fwd_fused_typed
+                    k.ssm_step_readout
                         .get(seq_scan_index_width(
                             b,
                             1,

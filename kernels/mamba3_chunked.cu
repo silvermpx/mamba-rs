@@ -138,11 +138,11 @@ extern "C" __global__ void __launch_bounds__(M3_PRE_STATE_THREADS) NAME(       \
     }                                                                          \
     __syncthreads();                                                           \
     if (tid == 0) {                                                            \
-        float cumsum = 0.0f;                                                   \
+        float cumsum = 0.0f, remainder = 0.0f;                                                   \
         IDX cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;          \
         for (int t_local = 0; t_local < chunk_len; t_local++) {                \
             const bool fresh = vl_starts(seq_idx, b, T, chunk_start + t_local); \
-            cumsum = (fresh ? 0.0f : cumsum) + da_chunk[t_local];              \
+            cumsum = chunk_decay_prefix(cumsum, da_chunk[t_local], remainder, fresh);              \
             da_chunk[t_local] = cumsum;                                        \
             dA_cumsum[cs_base + t_local] = cumsum;                             \
         }                                                                      \
@@ -207,7 +207,7 @@ extern "C" __global__ void __launch_bounds__(M3_PRE_STATE_THREADS) NAME(       \
             }                                                                  \
         }                                                                      \
         qk_dot[th] = dot * gamma_val;                                          \
-        sm_dec[t_local] = FAST_EXP(m3_nonpos(dA_end - da_chunk[t_local]));     \
+        sm_dec[t_local] = FAST_EXP(m3_nonpos(chunk_decay_interval(da_chunk + t_local, 1, chunk_len - 1 - t_local, da_chunk[t_local], dA_end)));     \
     }                                                                          \
     if (hd % 4 == 0 && (reinterpret_cast<unsigned long long>(x) & 15) == 0) {  \
         /* Whole float4s when every row starts on 16 bytes: a quarter of */    \
@@ -473,8 +473,8 @@ extern "C" __global__ void NAME(                                               \
     /* In a packed row (seq_idx) the entering state reaches only the */        \
     /* tokens before the chunk's first start, and a token's pairs stay */      \
     /* inside its own sequence. */                                             \
-    int cont = vl_lower_bound(seq_idx, b, T, chunk_start, chunk_end,           \
-                              vl_id(seq_idx, b, T, chunk_start - 1) + 1) - chunk_start; \
+    int cont = vl_bound<true>(seq_idx, b, T, chunk_start, chunk_end,           \
+                              vl_id(seq_idx, b, T, chunk_start - 1)) - chunk_start; \
                                                                                \
     IDX cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;              \
     IDX state_head = ((b * n_chunks + chunk) * nh + h) * hd * ds;              \
@@ -545,7 +545,7 @@ extern "C" __global__ void NAME(                                               \
         while (t_local * (t_local - 1) / 2 > e) t_local--;                     \
         while ((t_local + 1) * t_local / 2 <= e) t_local++;                    \
         int s_local = e - t_local * (t_local - 1) / 2;                         \
-        float decay = FAST_EXP(m3_nonpos(sm_da[t_local] - sm_da[s_local]));    \
+        float decay = FAST_EXP(m3_nonpos(chunk_decay_interval(sm_da + s_local, 1, t_local - s_local, sm_da[s_local], sm_da[t_local])));    \
         float qk_val = 0.0f;                                                   \
         if (wide) {                                                            \
             const float* q_row = sm_q + t_local * qk_ld;                       \
@@ -765,8 +765,8 @@ extern "C" __global__ void NAME(                                               \
     int chunk_len = min(CS, T - chunk_start);                                  \
     /* In a packed row (seq_idx) only the tokens before the chunk's */         \
     /* first start read the state entering it. */                              \
-    int cont = vl_lower_bound(seq_idx, b, T, chunk_start, chunk_start + chunk_len, \
-                              vl_id(seq_idx, b, T, chunk_start - 1) + 1) - chunk_start; \
+    int cont = vl_bound<true>(seq_idx, b, T, chunk_start, chunk_start + chunk_len, \
+                              vl_id(seq_idx, b, T, chunk_start - 1)) - chunk_start; \
     extern __shared__ float smem_st[];                                         \
     float* q_sm = smem_st;                 /* [CS*ds] */                       \
     float* do_sm = q_sm + CS * ds;         /* [CS*hd] */                       \
@@ -829,8 +829,8 @@ extern "C" __global__ void NAME(                                              \
     int chunk_len = min(CS, T - chunk_start);                                 \
     /* In a packed row (seq_idx) only the tokens before the chunk's */        \
     /* first start read the state entering it. */                             \
-    int cont = vl_lower_bound(seq_idx, b, T, chunk_start, chunk_start + chunk_len, \
-                              vl_id(seq_idx, b, T, chunk_start - 1) + 1) - chunk_start; \
+    int cont = vl_bound<true>(seq_idx, b, T, chunk_start, chunk_start + chunk_len, \
+                              vl_id(seq_idx, b, T, chunk_start - 1)) - chunk_start; \
     extern __shared__ float smem_st[];                                        \
     float* q_sm = smem_st;                                                    \
     float* do_sm = q_sm + CS * ds;                                            \
@@ -1066,6 +1066,7 @@ extern "C" __global__ void NAME(                                               \
         int chunk_idx = z_first + blockIdx.z;                                  \
         int chunk_start = chunk_idx * CS;                                      \
         int chunk_len = min(CS, T - chunk_start);                              \
+        const int last_start = vl_seq_first(seq_idx, b, T, chunk_start, chunk_start + chunk_len - 1) - chunk_start; \
         for (int n = 0; n < ds; n++) {                                         \
             d_state[n] = enter_state[                                          \
                 ((b * n_chunks + chunk_idx) * nh_total + h) * hd * ds          \
@@ -1148,11 +1149,11 @@ extern "C" __global__ void NAME(                                               \
                 vdo_mat[idx] = vdo_acc;                                        \
                 /* consumer-exact expression */                                \
                 decay_mat[idx] =                                               \
-                    exp2f((da_cs_sm[bb] - da_cs_sm[aa]) * LOG2E);              \
+                    exp2f((chunk_decay_interval(da_cs_sm + aa, 1, bb - aa, da_cs_sm[aa], da_cs_sm[bb])) * LOG2E);              \
             }                                                                  \
             for (int tt = lane; tt < CS; tt += nlanes) {                       \
                 exp_fwd_sm[tt] = exp2f(da_cs_sm[tt] * LOG2E);                  \
-                exp_rev_sm[tt] = exp2f((cs_sum_pre - da_cs_sm[tt]) * LOG2E);   \
+                exp_rev_sm[tt] = (tt < chunk_len && tt >= last_start ? exp2f(chunk_decay_interval(da_cs_sm + tt, 1, chunk_len - 1 - tt, da_cs_sm[tt], cs_sum_pre) * LOG2E) : 0.0f);   \
             }                                                                  \
             __syncthreads();                                                   \
         }                                                                      \
@@ -1167,7 +1168,7 @@ extern "C" __global__ void NAME(                                               \
             const VlSpan sp = vl_span(seq_idx, b, T, chunk_start, chunk_len, t); \
             float exp_rev_t = use_pair_mats                                    \
                 ? exp_rev_sm[t]                                                \
-                : exp2f((da_cs_chunk_sum - dA_t) * LOG2E);                     \
+                : (t < chunk_len && t >= last_start ? exp2f(chunk_decay_interval(da_cs_sm + t, 1, chunk_len - 1 - t, da_cs_sm[t], da_cs_chunk_sum) * LOG2E) : 0.0f);                     \
                                                                                \
             /* --- dV[t,h,p] --- */                                            \
             /* Intra: sum_{s: s has t as source, i.e., t<s in causal} */       \
@@ -1184,7 +1185,7 @@ extern "C" __global__ void NAME(                                               \
                 }                                                              \
                 float decay = use_pair_mats                                    \
                     ? decay_mat[M3_TRI(t, s, CS)]                              \
-                    : exp2f((da_cs_sm[s] - dA_t) * LOG2E);                     \
+                    : exp2f((chunk_decay_interval(da_cs_sm + t, 1, s - t, dA_t, da_cs_sm[s])) * LOG2E);                     \
                 dv_intra += kq * decay * do_sm[s * hdp + p];                   \
             }                                                                  \
             /* Inter: K[t] @ d_state^T[p] * exp_rev */                         \
@@ -1257,7 +1258,7 @@ extern "C" __global__ void NAME(                                               \
                     }                                                          \
                     float decay = use_pair_mats                                \
                         ? decay_mat[M3_TRI(t, s, CS)]                          \
-                        : exp2f((da_cs_sm[s] - dA_t) * LOG2E);                 \
+                        : exp2f((chunk_decay_interval(da_cs_sm + t, 1, s - t, dA_t, da_cs_sm[s])) * LOG2E);                 \
                     dk_intra += vdo * decay * q_sm[s * dsp + n];               \
                 }                                                              \
                 /* Inter-chunk dK contribution added in second pass below (after d_state → shared memory) */ \
@@ -1282,7 +1283,7 @@ extern "C" __global__ void NAME(                                               \
                     }                                                          \
                     float decay = use_pair_mats                                \
                         ? decay_mat[M3_TRI(s, t, CS)]                          \
-                        : exp2f((dA_t - da_cs_sm[s]) * LOG2E);                 \
+                        : exp2f((chunk_decay_interval(da_cs_sm + s, 1, t - s, da_cs_sm[s], dA_t)) * LOG2E);                 \
                     dq_intra += vdo * decay * k_sm[s * dsp + n];               \
                 }                                                              \
                 /* Inter: dO[t] @ ssm_states * exp */                          \
@@ -1313,7 +1314,7 @@ extern "C" __global__ void NAME(                                               \
                 float dk_inter = 0.0f;                                         \
                 float exp_rev_t = use_pair_mats                                \
                     ? exp_rev_sm[t]                                            \
-                    : exp2f((da_cs_chunk_sum - da_cs_sm[t]) * LOG2E);          \
+                    : (t < chunk_len && t >= last_start ? exp2f(chunk_decay_interval(da_cs_sm + t, 1, chunk_len - 1 - t, da_cs_sm[t], da_cs_chunk_sum) * LOG2E) : 0.0f);          \
                 for (int pp = 0; pp < hd; pp++)                                \
                     dk_inter += v_sm[t * hdp + pp] * ssm_sm[pp * ds + n];      \
                 if (vl_id(seq_idx, b, T, chunk_start + t)                      \
@@ -1356,7 +1357,7 @@ extern "C" __global__ void NAME(                                               \
                 }                                                              \
                 float decay = use_pair_mats                                    \
                     ? decay_mat[M3_TRI(i, t, CS)]                              \
-                    : exp2f((da_cs_sm[t] - da_cs_sm[i]) * LOG2E);              \
+                    : exp2f((chunk_decay_interval(da_cs_sm + i, 1, t - i, da_cs_sm[i], da_cs_sm[t])) * LOG2E);              \
                 float kq;                                                      \
                 if (use_pair_mats) {                                           \
                     kq = kq_mat[M3_TRI(i, t, CS)];                             \
@@ -1379,7 +1380,7 @@ extern "C" __global__ void NAME(                                               \
                 }                                                              \
                 float decay = use_pair_mats                                    \
                     ? decay_mat[M3_TRI(t, j, CS)]                              \
-                    : exp2f((da_cs_sm[j] - da_cs_sm[t]) * LOG2E);              \
+                    : exp2f((chunk_decay_interval(da_cs_sm + t, 1, j - t, da_cs_sm[t], da_cs_sm[j])) * LOG2E);              \
                 float kq;                                                      \
                 if (use_pair_mats) {                                           \
                     kq = kq_mat[M3_TRI(t, j, CS)];                             \
@@ -1412,7 +1413,7 @@ extern "C" __global__ void NAME(                                               \
             }                                                                  \
             dm_vec_sm[t] = !sp.to_end ? 0.0f : dsk_v                           \
                 * (use_pair_mats ? exp_rev_sm[t]                               \
-                                 : exp2f((da_cs_chunk_sum - da_cs_sm[t]) * LOG2E)); \
+                                 : (t < chunk_len && t >= last_start ? exp2f(chunk_decay_interval(da_cs_sm + t, 1, chunk_len - 1 - t, da_cs_sm[t], da_cs_chunk_sum) * LOG2E) : 0.0f)); \
         }                                                                      \
         __syncthreads();                                                       \
         if (p == 0 && ty == 0) {                                               \
@@ -1430,9 +1431,17 @@ extern "C" __global__ void NAME(                                               \
             /* the state pass's scalar belongs to a chunk with no start. */    \
             const bool passes = vl_passes(seq_idx, b, T, chunk_start, chunk_len); \
             for (int a = 0; a < chunk_len;) {                                  \
-                const int e = vl_span(seq_idx, b, T, chunk_start, chunk_len, a).end; \
+                const VlSpan span = vl_span(seq_idx, b, T, chunk_start, chunk_len, a); \
+                const int e = chunk_decay_span_end(da_cs_sm, a, span.end); \
+                const bool cut = vl_starts(seq_idx, b, T, chunk_start + a) || chunk_decay_cuts(da_cs_sm, a, span.first); \
                 float total_rev = 0.0f;                                        \
-                for (int t = a; t < e; t++) total_rev += dm_rev_sm[t];         \
+                float peak = 0.0f, least = 0x1.fffffep127f; \
+                for (int t = a; t < e; ++t) { \
+                    total_rev += dm_rev_sm[t]; \
+                    const float mag = fabsf(dm_rev_sm[t]); \
+                    peak = fmaxf(peak, mag); \
+                    if (mag > 0.0f) least = fminf(least, mag); \
+                } \
                 if (passes) total_rev += dM_scalar;                            \
                 float cumsum = 0.0f;                                           \
                 for (int t = a; t < e; t++) {                                  \
@@ -1442,7 +1451,29 @@ extern "C" __global__ void NAME(                                               \
                     /* is evaluated first, then added once. */                 \
                     float out = dm_rev_sm[t] + (total_rev + cumsum - dm_vec_sm[t]); \
                     int gt = chunk_start + t;                                  \
-                    dADT[(b * T + gt) * nh_total + h] = out;                   \
+                    float value = out; \
+                    if (cut && t == a && isfinite(out)) value = 0.0f; \
+                    else if (least <= peak * 0x1p-23f && fabsf(out) <= peak * 0x1p-18f && isfinite(peak)) { \
+                        auto pair = [&](int i, int j) { \
+                            float vdo = 0.0f, kq = 0.0f; \
+                            for (int c = 0; c < hd; ++c) vdo += v_sm[i * hdp + c] * do_sm[j * hdp + c]; \
+                            for (int n = 0; n < ds; ++n) kq += k_sm[i * dsp + n] * q_sm[j * dsp + n]; \
+                            const float d = chunk_decay_interval(da_cs_sm + i, 1, j - i, da_cs_sm[i], da_cs_sm[j]); \
+                            return (double)vdo * exp2f(d * LOG2E) * kq; \
+                        }; \
+                        auto entering = [&](int j) { \
+                            if (!span.from_before) return 0.0; \
+                            float v = 0.0f; \
+                            for (int c = 0; c < hd; ++c) { \
+                                float qh = 0.0f; \
+                                for (int n = 0; n < ds; ++n) qh += q_sm[j * dsp + n] * ssm2_sm[c * ds + n]; \
+                                v += qh * do_sm[j * hdp + c]; \
+                            } \
+                            return (double)v * exp2f(da_cs_sm[j] * LOG2E); \
+                        }; \
+                        value = chunk_direct_adjoint(t, a, e, dm_vec_sm, passes ? dM_scalar : 0.0f, pair, entering); \
+                    } \
+                    dADT[(b * T + gt) * nh_total + h] = value; \
                 }                                                              \
                 a = e;                                                         \
             }                                                                  \
@@ -1878,6 +1909,9 @@ extern "C" __global__ void NAME(                                               \
                                                                                \
     float dt_val = DT[i];                                                      \
     float a_v = a_val[i];                                                      \
+    /* An individual transition with zero float alpha has zero derivative. */  \
+    /* Rounding in the endpoint adjoint must not be amplified by its raw A. */ \
+    if (a_v * dt_val <= -104.0f && isfinite(d_adt)) d_adt = 0.0f;              \
     float d_a_val = d_adt * dt_val;                                            \
     float d_dt_adt = d_adt * a_v;                                              \
                                                                                \
@@ -1971,11 +2005,11 @@ extern "C" __global__ void __launch_bounds__(M3_PRE_STATE_THREADS) NAME(      \
     }                                                                         \
     __syncthreads();                                                          \
     if (tid == 0) {                                                           \
-        float cumsum = 0.0f;                                                  \
+        float cumsum = 0.0f, remainder = 0.0f;                                                  \
         IDX cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;         \
         for (int t_local = 0; t_local < chunk_len; t_local++) {               \
             const bool fresh = vl_starts(seq_idx, b, T, chunk_start + t_local); \
-            cumsum = (fresh ? 0.0f : cumsum) + da_chunk[t_local];             \
+            cumsum = chunk_decay_prefix(cumsum, da_chunk[t_local], remainder, fresh);             \
             da_chunk[t_local] = cumsum;                                       \
             dA_cumsum[cs_base + t_local] = cumsum;                            \
         }                                                                     \
@@ -2028,7 +2062,7 @@ extern "C" __global__ void __launch_bounds__(M3_PRE_STATE_THREADS) NAME(      \
             }                                                                 \
         }                                                                     \
         qk_dot[th] = dot * gamma_val;                                         \
-        sm_dec[t_local] = FAST_EXP(m3_nonpos(dA_end - da_chunk[t_local]));    \
+        sm_dec[t_local] = FAST_EXP(m3_nonpos(chunk_decay_interval(da_chunk + t_local, 1, chunk_len - 1 - t_local, da_chunk[t_local], dA_end)));    \
     }                                                                         \
     if (hd % 4 == 0 && (reinterpret_cast<unsigned long long>(x) & 7) == 0) {  \
         /* Four elements a load when every row starts on 8 bytes, each */     \
@@ -2225,10 +2259,10 @@ extern "C" __global__ __launch_bounds__(256, 3) void NAME(                    \
     /* The chunk's decay cumsum, the fused kernel's adds from zero in row */  \
     /* order, from zero again where a packed row starts a sequence. */        \
     if (tid == 0) {                                                           \
-        float cumsum = 0.0f;                                                  \
+        float cumsum = 0.0f, remainder = 0.0f;                                                  \
         for (int t_local = 0; t_local < chunk_len; t_local++) {               \
             bool fresh = vl_starts(seq_idx, b, T, chunk_start + t_local);     \
-            cumsum = __fadd_rn(fresh ? 0.0f : cumsum, sm_da[t_local]);        \
+            cumsum = chunk_decay_prefix(cumsum, sm_da[t_local], remainder, fresh);        \
             sm_da[t_local] = cumsum;                                          \
             if (lead) dA_cumsum[cs_base + t_local] = cumsum;                  \
         }                                                                     \
@@ -2236,7 +2270,7 @@ extern "C" __global__ __launch_bounds__(256, 3) void NAME(                    \
     __syncthreads();                                                          \
     float dA_end = sm_da[chunk_len - 1];                                      \
     for (int t_local = tid; t_local < chunk_len; t_local += nt) {             \
-        sm_dec[t_local] = FAST_EXP(m3_nonpos(dA_end - sm_da[t_local]));       \
+        sm_dec[t_local] = FAST_EXP(m3_nonpos(chunk_decay_interval(sm_da + t_local, 1, chunk_len - 1 - t_local, sm_da[t_local], dA_end)));       \
     }                                                                         \
                                                                               \
     bool vec = (ds & 3) == 0 && M3_QUAD_ALIGNED(K, T_ACT) && M3_QUAD_ALIGNED(Q, T_ACT); \
@@ -2382,8 +2416,8 @@ extern "C" __global__ void NAME(                                              \
     /* In a packed row (seq_idx) the entering state reaches only the */       \
     /* tokens before the chunk's first start, and a token's pairs stay */     \
     /* inside its own sequence. */                                            \
-    int cont = vl_lower_bound(seq_idx, b, T, chunk_start, chunk_end,          \
-                              vl_id(seq_idx, b, T, chunk_start - 1) + 1) - chunk_start; \
+    int cont = vl_bound<true>(seq_idx, b, T, chunk_start, chunk_end,          \
+                              vl_id(seq_idx, b, T, chunk_start - 1)) - chunk_start; \
     IDX cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;             \
     IDX state_head = ((b * n_chunks + chunk) * nh + h) * hd * ds;             \
     extern __shared__ float m3cs_sm[];                                        \
@@ -2430,7 +2464,7 @@ extern "C" __global__ void NAME(                                              \
         while (t_local * (t_local - 1) / 2 > e) t_local--;                    \
         while ((t_local + 1) * t_local / 2 <= e) t_local++;                   \
         int s_local = e - t_local * (t_local - 1) / 2;                        \
-        float decay = FAST_EXP(m3_nonpos(sm_da[t_local] - sm_da[s_local]));   \
+        float decay = FAST_EXP(m3_nonpos(chunk_decay_interval(sm_da + s_local, 1, t_local - s_local, sm_da[s_local], sm_da[t_local])));   \
         float qk_val = 0.0f;                                                  \
         if (wide) {                                                           \
             const float* q_row = sm_q + t_local * qk_ld;                      \
@@ -2643,8 +2677,8 @@ extern "C" __global__ __launch_bounds__(256, 3) void NAME(                    \
     /* In a packed row (seq_idx) the entering state reaches only the */       \
     /* tokens before the chunk's first start, and a token's pairs stay */     \
     /* inside its own sequence. */                                            \
-    int cont = vl_lower_bound(seq_idx, b, T, chunk_start, chunk_end,          \
-                              vl_id(seq_idx, b, T, chunk_start - 1) + 1) - chunk_start; \
+    int cont = vl_bound<true>(seq_idx, b, T, chunk_start, chunk_end,          \
+                              vl_id(seq_idx, b, T, chunk_start - 1)) - chunk_start; \
     IDX cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;             \
     IDX state_head = ((b * n_chunks + chunk) * nh + h) * hd * ds;             \
                                                                               \
@@ -2803,7 +2837,7 @@ extern "C" __global__ __launch_bounds__(256, 3) void NAME(                    \
             for (int j = 0; j < 4; j++) {                                     \
                 int s = 4 * si + j;                                           \
                 if (s < t && t < chunk_len) {                                 \
-                    float decay = FAST_EXP(m3_nonpos(sm_da[t] - sm_da[s]));   \
+                    float decay = FAST_EXP(m3_nonpos(chunk_decay_interval(sm_da + s, 1, t - s, sm_da[s], sm_da[t])));   \
                     sm_tri[t * (t - 1) / 2 + s] =                             \
                         sm_id[t] == sm_id[s] ? __fmul_rn(decay, acc_pair[i][j]) : 0.0f; \
                 }                                                             \
@@ -2972,10 +3006,10 @@ DEFINE_M3_CHUNK_SCAN_FWD_SLICED(m3_chunk_scan_fwd_sliced_f16_i64, long long, __h
 #define M3_DQKV_WEIGHT_PAIRS_legacy \
     vdo_mat[idx] = vdo_acc; \
     decay_mat[idx] = \
-    exp2f((da_cs_sm[bb] - da_cs_sm[aa]) * LOG2E);
+    exp2f((chunk_decay_interval(da_cs_sm + aa, 1, bb - aa, da_cs_sm[aa], da_cs_sm[bb])) * LOG2E);
 
 #define M3_DQKV_WEIGHT_PAIRS_transport \
-    const float decay = exp2f((da_cs_sm[bb] - da_cs_sm[aa]) * LOG2E); \
+    const float decay = exp2f((chunk_decay_interval(da_cs_sm + aa, 1, bb - aa, da_cs_sm[aa], da_cs_sm[bb])) * LOG2E); \
     vdo_mat[idx] = __fmul_rn(vdo_acc, decay); \
     weighted_kq_mat[idx] = __fmul_rn(kq_acc, decay);
 
@@ -2987,7 +3021,7 @@ DEFINE_M3_CHUNK_SCAN_FWD_SLICED(m3_chunk_scan_fwd_sliced_f16_i64, long long, __h
             kq += k_sm[t * dsp + n] * q_sm[s * dsp + n]; } \
         float decay = use_pair_mats \
         ? decay_mat[M3_TRI(t, s, CS)] \
-        : exp2f((da_cs_sm[s] - dA_t) * LOG2E); \
+        : exp2f((chunk_decay_interval(da_cs_sm + t, 1, s - t, dA_t, da_cs_sm[s])) * LOG2E); \
         dv_intra += kq * decay * do_sm[s * hdp + p]; \
     } \
     float dv_inter = 0.0f; \
@@ -3003,7 +3037,7 @@ DEFINE_M3_CHUNK_SCAN_FWD_SLICED(m3_chunk_scan_fwd_sliced_f16_i64, long long, __h
             float kq = 0.0f; \
             for (int n = 0; n < ds; n++) \
             kq += k_sm[t * dsp + n] * q_sm[s * dsp + n]; \
-            float decay = exp2f((da_cs_sm[s] - dA_t) * LOG2E); \
+            float decay = exp2f((chunk_decay_interval(da_cs_sm + t, 1, s - t, dA_t, da_cs_sm[s])) * LOG2E); \
             dv_intra += kq * decay * do_sm[s * hdp + p]; \
         } \
     } \
@@ -3019,7 +3053,7 @@ DEFINE_M3_CHUNK_SCAN_FWD_SLICED(m3_chunk_scan_fwd_sliced_f16_i64, long long, __h
             vdo += v_sm[t * hdp + pp] * do_sm[s * hdp + pp]; } \
         float decay = use_pair_mats \
         ? decay_mat[M3_TRI(t, s, CS)] \
-        : exp2f((da_cs_sm[s] - dA_t) * LOG2E); \
+        : exp2f((chunk_decay_interval(da_cs_sm + t, 1, s - t, dA_t, da_cs_sm[s])) * LOG2E); \
         dk_intra += vdo * decay * q_sm[s * dsp + n]; \
     } \
     dK_mid[((b * T + gt) * nh_total + h) * ds + n] = dk_intra; \
@@ -3031,7 +3065,7 @@ DEFINE_M3_CHUNK_SCAN_FWD_SLICED(m3_chunk_scan_fwd_sliced_f16_i64, long long, __h
             vdo += v_sm[s * hdp + pp] * do_sm[t * hdp + pp]; } \
         float decay = use_pair_mats \
         ? decay_mat[M3_TRI(s, t, CS)] \
-        : exp2f((dA_t - da_cs_sm[s]) * LOG2E); \
+        : exp2f((chunk_decay_interval(da_cs_sm + s, 1, t - s, da_cs_sm[s], dA_t)) * LOG2E); \
         dq_intra += vdo * decay * k_sm[s * dsp + n]; \
     } \
     float dq_inter = 0.0f; \
@@ -3047,7 +3081,7 @@ DEFINE_M3_CHUNK_SCAN_FWD_SLICED(m3_chunk_scan_fwd_sliced_f16_i64, long long, __h
             float vdo = 0.0f; \
             for (int pp = 0; pp < hd; pp++) \
             vdo += v_sm[t * hdp + pp] * do_sm[s * hdp + pp]; \
-            float decay = exp2f((da_cs_sm[s] - dA_t) * LOG2E); \
+            float decay = exp2f((chunk_decay_interval(da_cs_sm + t, 1, s - t, dA_t, da_cs_sm[s])) * LOG2E); \
             dk_intra += vdo * decay * q_sm[s * dsp + n]; \
         } \
     } \
@@ -3061,7 +3095,7 @@ DEFINE_M3_CHUNK_SCAN_FWD_SLICED(m3_chunk_scan_fwd_sliced_f16_i64, long long, __h
             float vdo = 0.0f; \
             for (int pp = 0; pp < hd; pp++) \
             vdo += v_sm[s * hdp + pp] * do_sm[t * hdp + pp]; \
-            float decay = exp2f((dA_t - da_cs_sm[s]) * LOG2E); \
+            float decay = exp2f((chunk_decay_interval(da_cs_sm + s, 1, t - s, da_cs_sm[s], dA_t)) * LOG2E); \
             dq_intra += vdo * decay * k_sm[s * dsp + n]; \
         } \
     } \
@@ -3093,7 +3127,7 @@ DEFINE_M3_CHUNK_SCAN_FWD_SLICED(m3_chunk_scan_fwd_sliced_f16_i64, long long, __h
             vdo += v_sm[i * hdp + pp] * do_sm[t * hdp + pp]; } \
         float decay = use_pair_mats \
         ? decay_mat[M3_TRI(i, t, CS)] \
-        : exp2f((da_cs_sm[t] - da_cs_sm[i]) * LOG2E); \
+        : exp2f((chunk_decay_interval(da_cs_sm + i, 1, t - i, da_cs_sm[i], da_cs_sm[t])) * LOG2E); \
         float kq; \
         if (use_pair_mats) { kq = kq_mat[M3_TRI(i, t, CS)]; } \
         else { kq = 0.0f; for (int n = 0; n < ds; n++) \
@@ -3107,7 +3141,7 @@ DEFINE_M3_CHUNK_SCAN_FWD_SLICED(m3_chunk_scan_fwd_sliced_f16_i64, long long, __h
             vdo += v_sm[t * hdp + pp] * do_sm[j * hdp + pp]; } \
         float decay = use_pair_mats \
         ? decay_mat[M3_TRI(t, j, CS)] \
-        : exp2f((da_cs_sm[j] - da_cs_sm[t]) * LOG2E); \
+        : exp2f((chunk_decay_interval(da_cs_sm + t, 1, j - t, da_cs_sm[t], da_cs_sm[j])) * LOG2E); \
         float kq; \
         if (use_pair_mats) { kq = kq_mat[M3_TRI(t, j, CS)]; } \
         else { kq = 0.0f; for (int n = 0; n < ds; n++) \
@@ -3125,7 +3159,7 @@ DEFINE_M3_CHUNK_SCAN_FWD_SLICED(m3_chunk_scan_fwd_sliced_f16_i64, long long, __h
             float vdo = 0.0f; \
             for (int pp = 0; pp < hd; pp++) \
             vdo += v_sm[i * hdp + pp] * do_sm[t * hdp + pp]; \
-            float decay = exp2f((da_cs_sm[t] - da_cs_sm[i]) * LOG2E); \
+            float decay = exp2f((chunk_decay_interval(da_cs_sm + i, 1, t - i, da_cs_sm[i], da_cs_sm[t])) * LOG2E); \
             float kq = 0.0f; \
             for (int n = 0; n < ds; n++) \
             kq += k_sm[i * dsp + n] * q_sm[t * dsp + n]; \
@@ -3141,7 +3175,7 @@ DEFINE_M3_CHUNK_SCAN_FWD_SLICED(m3_chunk_scan_fwd_sliced_f16_i64, long long, __h
             float vdo = 0.0f; \
             for (int pp = 0; pp < hd; pp++) \
             vdo += v_sm[t * hdp + pp] * do_sm[j * hdp + pp]; \
-            float decay = exp2f((da_cs_sm[j] - da_cs_sm[t]) * LOG2E); \
+            float decay = exp2f((chunk_decay_interval(da_cs_sm + t, 1, j - t, da_cs_sm[t], da_cs_sm[j])) * LOG2E); \
             float kq = 0.0f; \
             for (int n = 0; n < ds; n++) \
             kq += k_sm[t * dsp + n] * q_sm[j * dsp + n]; \
@@ -3219,6 +3253,7 @@ int use_pair_mats, \
         int chunk_idx = z_first + blockIdx.z; \
         int chunk_start = chunk_idx * CS; \
         int chunk_len = min(CS, T - chunk_start); \
+        const int last_start = vl_seq_first(seq_idx, b, T, chunk_start, chunk_start + chunk_len - 1) - chunk_start; \
         M3_DQKV_LOAD_LOCAL_STATE_##MODE \
         for (int t = ty; t < CS; t += TS) { \
             if (t < chunk_len) { \
@@ -3285,7 +3320,7 @@ int use_pair_mats, \
             for (int tt = lane; tt < CS; tt += nlanes) { \
                 exp_fwd_sm[tt] = exp2f(da_cs_sm[tt] * LOG2E); \
                 exp_rev_sm[tt] = \
-                exp2f((cs_sum_pre - da_cs_sm[tt]) * LOG2E); \
+                (tt < chunk_len && tt >= last_start ? exp2f(chunk_decay_interval(da_cs_sm + tt, 1, chunk_len - 1 - tt, da_cs_sm[tt], cs_sum_pre) * LOG2E) : 0.0f); \
             } \
             __syncthreads(); \
         } \
@@ -3297,7 +3332,7 @@ int use_pair_mats, \
             const VlSpan sp = vl_span(seq_idx, b, T, chunk_start, chunk_len, t); \
             float exp_rev_t = use_pair_mats \
             ? exp_rev_sm[t] \
-            : exp2f((da_cs_chunk_sum - dA_t) * LOG2E); \
+            : (t < chunk_len && t >= last_start ? exp2f(chunk_decay_interval(da_cs_sm + t, 1, chunk_len - 1 - t, da_cs_sm[t], da_cs_chunk_sum) * LOG2E) : 0.0f); \
             float dv_intra = 0.0f; \
             M3_DQKV_DV_TERMS_##MODE \
             if (!sp.to_end) dv_inter = 0.0f; dv_inter *= exp_rev_t; \
@@ -3338,7 +3373,7 @@ int use_pair_mats, \
                 float dk_inter = 0.0f; \
                 float exp_rev_t = use_pair_mats \
                 ? exp_rev_sm[t] \
-                : exp2f((da_cs_chunk_sum - da_cs_sm[t]) * LOG2E); \
+                : (t < chunk_len && t >= last_start ? exp2f(chunk_decay_interval(da_cs_sm + t, 1, chunk_len - 1 - t, da_cs_sm[t], da_cs_chunk_sum) * LOG2E) : 0.0f); \
                 for (int pp = 0; pp < hd; pp++) \
                 dk_inter += v_sm[t * hdp + pp] * ssm_sm[pp * ds + n]; \
                 if (vl_id(seq_idx, b, T, chunk_start + t) \
@@ -3376,7 +3411,7 @@ int use_pair_mats, \
             } \
             dm_vec_sm[t] = !sp.to_end ? 0.0f : dsk_v \
             * (use_pair_mats ? exp_rev_sm[t] \
-            : exp2f((da_cs_chunk_sum - da_cs_sm[t]) * LOG2E)); \
+            : (t < chunk_len && t >= last_start ? exp2f(chunk_decay_interval(da_cs_sm + t, 1, chunk_len - 1 - t, da_cs_sm[t], da_cs_chunk_sum) * LOG2E) : 0.0f)); \
         } \
         __syncthreads(); \
         if (p == 0 && ty == 0) { \
@@ -3390,9 +3425,17 @@ int use_pair_mats, \
             /* chunk on its own (see the f32 kernel). */ \
             const bool passes = vl_passes(seq_idx, b, T, chunk_start, chunk_len); \
             for (int a = 0; a < chunk_len;) { \
-                const int e = vl_span(seq_idx, b, T, chunk_start, chunk_len, a).end; \
+                const VlSpan span = vl_span(seq_idx, b, T, chunk_start, chunk_len, a); \
+                const int e = chunk_decay_span_end(da_cs_sm, a, span.end); \
+                const bool cut = vl_starts(seq_idx, b, T, chunk_start + a) || chunk_decay_cuts(da_cs_sm, a, span.first); \
                 float total_rev = 0.0f; \
-                for (int t = a; t < e; t++) total_rev += dm_rev_sm[t]; \
+                float peak = 0.0f, least = 0x1.fffffep127f; \
+                for (int t = a; t < e; ++t) { \
+                    total_rev += dm_rev_sm[t]; \
+                    const float mag = fabsf(dm_rev_sm[t]); \
+                    peak = fmaxf(peak, mag); \
+                    if (mag > 0.0f) least = fminf(least, mag); \
+                } \
                 if (passes) total_rev += dM_scalar; \
                 float cumsum = 0.0f; \
                 for (int t = a; t < e; t++) { \
@@ -3400,7 +3443,29 @@ int use_pair_mats, \
                     float out = \
                     dm_rev_sm[t] + (total_rev + cumsum - dm_vec_sm[t]); \
                     int gt = chunk_start + t; \
-                    dADT[(b * T + gt) * nh_total + h] = out; \
+                    float value = out; \
+                    if (cut && t == a && isfinite(out)) value = 0.0f; \
+                    else if (least <= peak * 0x1p-23f && fabsf(out) <= peak * 0x1p-18f && isfinite(peak)) { \
+                        auto pair = [&](int i, int j) { \
+                            float vdo = 0.0f, kq = 0.0f; \
+                            for (int c = 0; c < hd; ++c) vdo += v_sm[i * hdp + c] * do_sm[j * hdp + c]; \
+                            for (int n = 0; n < ds; ++n) kq += k_sm[i * dsp + n] * q_sm[j * dsp + n]; \
+                            const float d = chunk_decay_interval(da_cs_sm + i, 1, j - i, da_cs_sm[i], da_cs_sm[j]); \
+                            return (double)vdo * exp2f(d * LOG2E) * kq; \
+                        }; \
+                        auto entering = [&](int j) { \
+                            if (!span.from_before) return 0.0; \
+                            float v = 0.0f; \
+                            for (int c = 0; c < hd; ++c) { \
+                                float qh = 0.0f; \
+                                for (int n = 0; n < ds; ++n) qh += q_sm[j * dsp + n] * ssm2_sm[c * ds + n]; \
+                                v += qh * do_sm[j * hdp + c]; \
+                            } \
+                            return (double)v * exp2f(da_cs_sm[j] * LOG2E); \
+                        }; \
+                        value = chunk_direct_adjoint(t, a, e, dm_vec_sm, passes ? dM_scalar : 0.0f, pair, entering); \
+                    } \
+                    dADT[(b * T + gt) * nh_total + h] = value; \
                 } \
                 a = e; \
             } \

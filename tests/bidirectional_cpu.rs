@@ -266,6 +266,82 @@ fn mimo_cfg(n_layers: usize, bidirectional: bool) -> Mamba3MimoConfig {
     }
 }
 
+macro_rules! bidirectional_decode_contract {
+    ($name:ident, $family:ident, $cfg:expr, $backbone:ident) => {
+        #[test]
+        fn $name() {
+            use mamba_rs::matrix::{Path, Refusal, Request};
+
+            let cfg = $cfg;
+            let model = mamba_rs::$backbone::init(cfg, D_MODEL, 11).unwrap();
+            let input = [0.5; D_MODEL];
+            let mut output = [f32::NAN; D_MODEL];
+            model.forward_sequence(
+                &input,
+                &mut output,
+                &mut model.alloc_state(),
+                &mut model.alloc_scratch(),
+                1,
+            );
+            assert!(output.iter().all(|x| x.is_finite()));
+            assert!(
+                std::panic::catch_unwind(|| {
+                    model.forward_step(
+                        &input,
+                        &mut [0.0; D_MODEL],
+                        &mut model.alloc_state(),
+                        &mut model.alloc_scratch(),
+                    );
+                })
+                .is_err()
+            );
+
+            let ask = |path| {
+                mamba_rs::$family::route::admit(
+                    &cfg,
+                    D_MODEL,
+                    &Request {
+                        path,
+                        batch: 1,
+                        seq_len: 1,
+                        scan: cfg.scan_mode,
+                        precision: mamba_rs::WeightDtype::F32,
+                        gemm: mamba_rs::GemmMode::Deterministic,
+                    },
+                )
+            };
+            ask(Path::Prefill).unwrap();
+            ask(Path::Train).unwrap();
+            assert!(matches!(ask(Path::Decode), Err(Refusal::Request { .. })));
+        }
+    };
+}
+
+bidirectional_decode_contract!(
+    m1_bidirectional_decode_contract,
+    mamba1,
+    m1_cfg(2, true),
+    MambaBackbone
+);
+bidirectional_decode_contract!(
+    m2_bidirectional_decode_contract,
+    mamba2,
+    m2_cfg(2, true),
+    Mamba2Backbone
+);
+bidirectional_decode_contract!(
+    siso_bidirectional_decode_contract,
+    mamba3_siso,
+    siso_cfg(2, true),
+    Mamba3Backbone
+);
+bidirectional_decode_contract!(
+    mimo_bidirectional_decode_contract,
+    mamba3_mimo,
+    mimo_cfg(2, true),
+    Mamba3MimoBackbone
+);
+
 #[test]
 fn a_mamba3_mimo_pair_is_its_layers_composed() {
     let s = TrainSessionCfg::new(D_MODEL, BATCH, SEQ_LEN);

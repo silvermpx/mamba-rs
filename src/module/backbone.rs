@@ -48,6 +48,7 @@ impl MambaBackbone {
     /// section 3.5). Errs on a configuration `validate` refuses.
     pub fn init(cfg: MambaConfig, input_dim: usize, seed: u64) -> Result<Self, String> {
         cfg.validate()?;
+        crate::config::input_projection_lens(input_dim, cfg.d_model, false)?;
         Self::new(MambaWeights::init(&cfg, input_dim, seed), cfg, input_dim)
     }
 
@@ -68,128 +69,29 @@ impl MambaBackbone {
     /// stores them. [`MambaBackbone::weights`] then gives the rounded
     /// weights, the ones the backbone computes with.
     pub fn new_with(
-        weights: MambaWeights,
+        mut weights: MambaWeights,
         cfg: MambaConfig,
         input_dim: usize,
         opts: CpuOptions,
-    ) -> Result<Self, String> {
-        let mut backbone = if weights.input_proj_w.is_empty() {
-            if input_dim != cfg.d_model {
-                return Err(format!(
-                    "weights without an input projection read rows d_model ({}) wide, \
-                     not {input_dim}",
-                    cfg.d_model
-                ));
-            }
-            Self::without_projection(cfg, weights)?
-        } else {
-            Self::with_projection(cfg, weights, input_dim)?
-        };
-        backbone.weights.round_bulk(opts.dtype);
-        backbone.dtype = opts.dtype;
-        Ok(backbone)
-    }
-
-    /// The precision the backbone computes in.
-    pub fn dtype(&self) -> WeightDtype {
-        self.dtype
-    }
-
-    fn with_projection(
-        cfg: MambaConfig,
-        mut weights: MambaWeights,
-        input_dim: usize,
     ) -> Result<Self, String> {
         weights.validate(&cfg, input_dim)?;
         for lw in &mut weights.layers {
             lw.compute_a_neg();
         }
+        weights.round_bulk(opts.dtype);
         Ok(Self {
+            identity_proj: weights.input_proj_w.is_empty(),
             weights,
             cfg,
             input_dim,
-            identity_proj: false,
             packed: None,
-            dtype: WeightDtype::F32,
+            dtype: opts.dtype,
         })
     }
 
-    /// Weights without an input projection. The checks of `validate()`
-    /// except the projection's, which it requires, and the `a_neg`
-    /// refresh the SSM reads.
-    fn without_projection(cfg: MambaConfig, mut weights: MambaWeights) -> Result<Self, String> {
-        cfg.validate()?;
-        if weights.layers.len() != cfg.n_layers {
-            return Err(format!(
-                "expected {} layers, got {}",
-                cfg.n_layers,
-                weights.layers.len()
-            ));
-        }
-        let d = cfg.d_model;
-        let di = cfg.d_inner();
-        let ds = cfg.d_state;
-        let dc = cfg.d_conv;
-        let dr = cfg.dt_rank();
-        let xd = cfg.xdbl_dim();
-        let nb = cfg.block_norm.bias_len(d);
-        for (i, lw) in weights.layers.iter().enumerate() {
-            let check = |name: &str, actual: usize, expected: usize| -> Result<(), String> {
-                if actual != expected {
-                    return Err(format!(
-                        "layer[{i}].{name}: expected {expected}, got {actual}"
-                    ));
-                }
-                Ok(())
-            };
-            check("norm_weight", lw.norm_weight.len(), d)?;
-            check("norm_bias", lw.norm_bias.len(), nb)?;
-            check("in_proj_w", lw.in_proj_w.len(), d * 2 * di)?;
-            check("in_proj_b", lw.in_proj_b.len(), cfg.in_proj_bias_len())?;
-            check("conv1d_weight", lw.conv1d_weight.len(), di * dc)?;
-            check("conv1d_bias", lw.conv1d_bias.len(), cfg.conv_bias_len())?;
-            check("x_proj_w", lw.x_proj_w.len(), di * xd)?;
-            check("dt_proj_w", lw.dt_proj_w.len(), dr * di)?;
-            check("dt_proj_b", lw.dt_proj_b.len(), di)?;
-            check("a_log", lw.a_log.len(), di * ds)?;
-            check("d_param", lw.d_param.len(), di)?;
-            check("out_proj_w", lw.out_proj_w.len(), di * d)?;
-            check("out_proj_b", lw.out_proj_b.len(), cfg.out_proj_bias_len())?;
-        }
-        let hidden = cfg.mlp_hidden();
-        let mlp_layers = if hidden > 0 { cfg.n_layers } else { 0 };
-        if weights.mlp.len() != mlp_layers {
-            return Err(format!(
-                "mlp: expected {mlp_layers} layers, got {}",
-                weights.mlp.len()
-            ));
-        }
-        for (i, m) in weights.mlp.iter().enumerate() {
-            m.validate(d, hidden, cfg.block_norm, &format!("mlp[{i}]"))?;
-        }
-        if weights.norm_f_weight.len() != d {
-            return Err(format!(
-                "norm_f_weight: expected {d}, got {}",
-                weights.norm_f_weight.len()
-            ));
-        }
-        if weights.norm_f_bias.len() != nb {
-            return Err(format!(
-                "norm_f_bias: expected {nb}, got {}",
-                weights.norm_f_bias.len()
-            ));
-        }
-        for lw in &mut weights.layers {
-            lw.compute_a_neg();
-        }
-        Ok(Self {
-            weights,
-            cfg,
-            input_dim: d,
-            identity_proj: true,
-            packed: None,
-            dtype: WeightDtype::F32,
-        })
+    /// The precision the backbone computes in.
+    pub fn dtype(&self) -> WeightDtype {
+        self.dtype
     }
 
     /// The weights, consuming the backbone.

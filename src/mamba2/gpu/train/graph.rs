@@ -290,7 +290,6 @@ impl Mamba2GpuTrainer {
         if skipped {
             self.adamw.step -= 1;
         }
-        self.forwarded = true;
         Ok(StepMetrics {
             step: self.adamw.step,
             graph_replayed: true,

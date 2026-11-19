@@ -298,7 +298,7 @@ fn linears(cfg: &Mamba3Config, input_dim: usize) -> [(&'static str, usize, usize
 /// `input_dim` wide. `cfg` must pass [`Mamba3Config::validate`]; the
 /// request's scan mode stands in for the config's.
 pub fn admit(cfg: &Mamba3Config, input_dim: usize, req: &Request) -> Result<Plan, Refusal> {
-    matrix::check_request(req)?;
+    matrix::check_request(req, input_dim, cfg.bidirectional)?;
     let widths = IntWidths::of(cfg, input_dim, (req.batch, req.seq_len));
     let cfg = Mamba3Config {
         scan_mode: req.scan,

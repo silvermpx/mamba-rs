@@ -106,6 +106,62 @@ fn bits(v: &[f32]) -> Vec<u32> {
 }
 
 #[test]
+fn an_identity_input_middle_segment_preserves_the_residual_stream() {
+    for block_norm in [mamba_rs::BlockNorm::Rms, mamba_rs::BlockNorm::Layer] {
+        let cfg = MambaConfig {
+            final_norm: false,
+            block_norm,
+            ..cfg()
+        };
+        let dm = cfg.d_model;
+        let mut w = MambaWeights::zeros(&cfg, dm);
+        w.input_proj_w.clear();
+        w.input_proj_b.clear();
+        w.validate(&cfg, dm).unwrap();
+        let model = MambaBackbone::new(w, cfg, dm).unwrap();
+        let input = values(dm, 21);
+        let mut output = vec![f32::NAN; dm];
+        model.forward_step(
+            &input,
+            &mut output,
+            &mut model.alloc_state(),
+            &mut model.alloc_scratch(),
+        );
+        assert_eq!(output, input, "{block_norm:?}");
+    }
+}
+
+#[test]
+fn an_identity_input_refuses_a_stray_projection_bias() {
+    let cfg = cfg();
+    let dm = cfg.d_model;
+    let mut w = MambaWeights::zeros(&cfg, dm);
+    w.input_proj_w.clear();
+    assert!(w.validate(&cfg, dm).is_err());
+    assert!(MambaBackbone::new(w, cfg, dm).is_err());
+}
+
+#[test]
+fn a_backbone_rebuilds_the_transition_cache_from_the_primary_weights() {
+    let cfg = cfg();
+    let dm = cfg.d_model;
+    let (projected, identity) = pair(&cfg);
+    for mut w in [projected, identity] {
+        let first = &mut w.layers[0];
+        first.a_log.fill(0.0);
+        first.a_neg.clear();
+        let second = &mut w.layers[1];
+        second.a_log.fill(0.0);
+        second.a_neg.push(99.0);
+        let model = MambaBackbone::new(w, cfg, dm).unwrap();
+        for layer in &model.weights().layers {
+            assert_eq!(layer.a_neg.len(), cfg.d_inner() * cfg.d_state);
+            assert!(layer.a_neg.iter().all(|&x| x == -1.0));
+        }
+    }
+}
+
+#[test]
 fn m1_identity_input_trains_on_the_cpu_like_an_explicit_identity() {
     let cfg = cfg();
     let (explicit, identity) = pair(&cfg);

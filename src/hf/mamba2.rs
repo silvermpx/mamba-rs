@@ -151,6 +151,13 @@ pub fn parse_mamba2_config(json: &[u8]) -> Result<HfMamba2Config, String> {
 /// gates before the norm as mamba_ssm does by default; Codestral's config
 /// says `true` of weights that run with the gate first).
 fn parse_transformers_config(root: &Value) -> Result<HfMamba2Config, String> {
+    if let Some(activation) = root.get("hidden_act")
+        && !matches!(activation.as_str(), Some("silu" | "swish"))
+    {
+        return Err(format!(
+            "config.json: unsupported hidden_act {activation}; the convolution requires silu or swish"
+        ));
+    }
     let d_model = usize_or(root, "hidden_size", 4096)?;
     let expand = usize_or(root, "expand", 2)?;
     let (heads, headdim) = (

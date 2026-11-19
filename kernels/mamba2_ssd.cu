@@ -168,10 +168,9 @@ extern "C" __global__ void NAME(                                               \
     __syncthreads();                                                           \
     if (live && t == 0) {                                                      \
         const float an = a_neg[h];                                             \
-        float acc = 0.0f;                                                      \
+        float acc = 0.0f, remainder = 0.0f;                                                      \
         for (int s = 0; s < lc; s++) {                                         \
-            if (fresh[s]) acc = 0.0f;                                          \
-            acc = __fadd_rn(acc, __fmul_rn(dts[hl][s], an));                   \
+            acc = chunk_decay_prefix(acc, __fmul_rn(dts[hl][s], an), remainder, fresh[s]);                   \
             acss[hl][s] = acc;                                                 \
         }                                                                      \
     }                                                                          \
@@ -336,7 +335,7 @@ __device__ __forceinline__ void m2_chunk_state_body(
     const int kept = vl_seq_first(seq_idx, b, seq, t0, t0 + lc - 1) - t0;
     for (int t = tid; t < lc; t += blockDim.x)
         ws[t] = t >= kept
-            ? __fmul_rn(m2_exp(fminf(__fsub_rn(acs_last, acs[sc + t]), 0.0f)), dt[sc + t])
+            ? __fmul_rn(m2_exp(fminf(chunk_decay_interval(acs + sc + t, 1, lc - 1 - t, acs[sc + t], acs_last), 0.0f)), dt[sc + t])
             : 0.0f;
     __syncthreads();
     m2_stage4(lc * NT, threadIdx.x, blockDim.x,
@@ -542,7 +541,7 @@ __device__ __forceinline__ void m2_chunk_scan_tiles_body(
                       const float acs_t = acs[sc + t];
                       w = __fmul_rn(
                           __fmul_rn(cb[tri + (long long)t * (t + 1) / 2 + s],
-                                    m2_exp(fminf(__fsub_rn(acs_t, acs[sc + s]), 0.0f))),
+                                    m2_exp(fminf(chunk_decay_interval(acs + sc + s, 1, t - s, acs[sc + s], acs_t), 0.0f))),
                           dt[sc + s]);
                   }
                   return w;
@@ -555,8 +554,8 @@ __device__ __forceinline__ void m2_chunk_scan_tiles_body(
     const int rows = max(0, min(4, tn - r0));
     // The tokens before the chunk's first start continue the entering
     // state's sequence; a token sums over its own sequence's tokens.
-    const int cont = vl_lower_bound(seq_idx, b, seq, t0, t0 + lc,
-                                    vl_id(seq_idx, b, seq, t0 - 1) + 1) - t0;
+    const int cont = vl_bound<true>(seq_idx, b, seq, t0, t0 + lc,
+                                    vl_id(seq_idx, b, seq, t0 - 1)) - t0;
     int lo[4];
 #pragma unroll
     for (int i = 0; i < 4; i++)

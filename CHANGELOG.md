@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Mamba-1 keeps the scan readout in f32 through the output gate. A finite
+  gated f16 value now survives an ungated value outside the f16 range. The
+  CPU parallel prefill also honors the caller's entering recurrent state.
+- Mamba-2 and both Mamba-3 trainers bind saved activations to their sequence
+  boundaries, restore packed boundaries from checkpoints, and reject stale
+  optimizer steps. Invalid checkpoints preserve the current training window.
+  Existing dense checkpoint files still load. Rust code constructing a dense
+  `TrainerState` literal supplies `packing: None`.
+- The chunked scans preserve local decay after the incoming state underflows.
+  The SISO backward also preserves small gradients when a later pair is large.
+  Bidirectional MIMO accepts complete one-token prompts and rejects streaming
+  decode, which lacks future context.
+
 ## 0.8.4 (2026-11-12)
 
 ### Performance

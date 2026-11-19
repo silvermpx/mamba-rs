@@ -28,21 +28,26 @@ __device__ __forceinline__ bool vl_starts(
     return seq_idx != nullptr && vl_id(seq_idx, b, seq, t) != vl_id(seq_idx, b, seq, t - 1);
 }
 
-// The first position in [lo, hi) of row b whose id is at least `id`, hi
-// when there is none: the ids of a row never decrease, so a binary search
-// finds where a sequence begins in a span. Without a packing every id is 0
-// and the answer is lo for id 0, hi for any later id.
-__device__ __forceinline__ int vl_lower_bound(
+// Lower and upper bounds of a sequence label. Compare the label itself so
+// the complete nonnegative i32 range is valid, including INT_MAX.
+template<bool After>
+__device__ __forceinline__ int vl_bound(
     const int* __restrict__ seq_idx, long long b, int seq, int lo, int hi, int id
 ) {
-    if (seq_idx == nullptr) return id <= 0 ? lo : hi;
+    if (seq_idx == nullptr) return (After ? 0 > id : 0 >= id) ? lo : hi;
     const int* row = seq_idx + b * seq;
     while (lo < hi) {
-        const int mid = (lo + hi) >> 1;
-        if (row[mid] < id) lo = mid + 1;
+        const int mid = lo + ((hi - lo) >> 1);
+        if (After ? row[mid] <= id : row[mid] < id) lo = mid + 1;
         else hi = mid;
     }
     return lo;
+}
+
+__device__ __forceinline__ int vl_lower_bound(
+    const int* __restrict__ seq_idx, long long b, int seq, int lo, int hi, int id
+) {
+    return vl_bound<false>(seq_idx, b, seq, lo, hi, id);
 }
 
 // The first position of the sequence that holds row b's position t, within
@@ -50,7 +55,7 @@ __device__ __forceinline__ int vl_lower_bound(
 __device__ __forceinline__ int vl_seq_first(
     const int* __restrict__ seq_idx, long long b, int seq, int lo, int t
 ) {
-    return vl_lower_bound(seq_idx, b, seq, lo, t + 1, vl_id(seq_idx, b, seq, t));
+    return vl_bound<false>(seq_idx, b, seq, lo, t + 1, vl_id(seq_idx, b, seq, t));
 }
 
 // Where the sequence of a span's position t lies in the span: the span is
@@ -69,8 +74,8 @@ __device__ __forceinline__ VlSpan vl_span(
     if (seq_idx == nullptr) return VlSpan{0, len, true, true};
     const int id = seq_idx[b * seq + start + t];
     VlSpan s;
-    s.first = vl_lower_bound(seq_idx, b, seq, start, start + t + 1, id) - start;
-    s.end = vl_lower_bound(seq_idx, b, seq, start + t, start + len, id + 1) - start;
+    s.first = vl_bound<false>(seq_idx, b, seq, start, start + t + 1, id) - start;
+    s.end = vl_bound<true>(seq_idx, b, seq, start + t, start + len, id) - start;
     s.from_before = id == vl_id(seq_idx, b, seq, start - 1);
     s.to_end = s.end == len;
     return s;
@@ -81,8 +86,8 @@ __device__ __forceinline__ VlSpan vl_span(
 __device__ __forceinline__ int vl_cont_end(
     const int* __restrict__ seq_idx, long long b, int seq, int start, int len
 ) {
-    return vl_lower_bound(seq_idx, b, seq, start, start + len,
-                          vl_id(seq_idx, b, seq, start - 1) + 1) - start;
+    return vl_bound<true>(seq_idx, b, seq, start, start + len,
+                          vl_id(seq_idx, b, seq, start - 1)) - start;
 }
 
 // Whether a span holds no start: the sequence before it runs through it.
