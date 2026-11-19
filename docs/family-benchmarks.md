@@ -49,6 +49,80 @@ initial corrected backward agreed bit for bit on all six output tensors
 for the ordinary and stress inputs. The measurements cover this card and
 these shapes. The end-to-end trainer for an application has its own costs.
 
+## Mamba-3 SISO backward on an RTX 6000 Ada, November 19, 2026
+
+The baseline was the corrected backward at `4f5a27bf`. The new tiled
+kernel broadcasts the channel sum through the lanes that own columns of
+the current tile. For a tagged decay it writes each pair once and reuses
+the final column for exits. A chunk with one uninterrupted interior uses
+the same ordered gradient sum even if its first transition kills the
+incoming state. Packed boundaries, internal hard transitions and severe
+cancellation retain their separate spans or higher-precision calculation
+when needed. The tile width and the values in the current chunk determine
+how much work the kernel does.
+
+The isolated readings used CUDA 12.8, driver 615.71.10, eight heads,
+batch 32, 128 tokens and chunks of 64. The reported time is the median
+of eleven pairs of CUDA-event timings, alternating the order. Each pair
+used 52 launches for ordinary data or 20 for the hard first transition
+described above. The percentage is the median of the paired changes.
+
+| Activation and shape | Input | Previous | New | Change in time |
+|---|---|---:|---:|---:|
+| f32, 32 channels × 24 states | Ordinary | 129.1 µs | 117.6 µs | −8.9% |
+| f32, 32 × 32 | Ordinary | 131.2 µs | 120.3 µs | −8.3% |
+| f32, 32 × 32 | Hard first transition | 150.6 µs | 120.4 µs | −20.1% |
+| bf16, 32 × 32 | Ordinary / hard | 129.7 / 152.0 µs | 118.9 / 121.7 µs | −8.4% / −20.0% |
+| f16, 32 × 32 | Ordinary / hard | 129.7 / 151.4 µs | 118.8 / 121.1 µs | −8.4% / −20.1% |
+| f32, 64 × 64 | Ordinary / hard | 176.2 / 196.0 µs | 166.3 / 165.0 µs | −5.9% / −15.8% |
+
+For the complete TF32 step, both builds used the deterministic GEMMs and
+the same two-layer model of width 128, expansion 4, head width and state
+size 32, 16 heads and eight groups. They initialized the weights with
+seed 523 and cycled through the same four batches. After 16 warmup
+updates, four trainers took turns on the idle card for 13 rounds of
+16 updates. Each block was synchronized, and its elapsed wall time
+includes staging, forward,
+backward and AdamW. Initial compilation and graph capture are outside
+the timing.
+
+| Complete step, batch 32 × 128 tokens | Median | Paired change from previous host step | Middle half |
+|---|---:|---:|---:|
+| Previous kernel, host rows, eager | 2.832 ms | — | — |
+| New kernel, host rows, eager | 2.811 ms | −0.73% | −1.14% to −0.52% |
+| New kernel, host rows, CUDA Graph | 2.740 ms | −3.35% | −3.76% to −2.90% |
+| New kernel, device rows, CUDA Graph | 2.468 ms | −13.03% | −13.33% to −12.77% |
+
+The device-row measurement includes two device-to-device copies from
+preloaded batches per update. It applies when inputs and output gradients
+are already on the GPU. All four trainers ended update 224 with identical
+float bits in the output rows, gradients, master weights, AdamW moments
+and carried state. These timings cover the library's forecaster-independent
+training step.
+
+In a separate Nsight Systems capture of 24 warm eager steps, the
+backward kernel ran twice per update and took 19.7% of GPU kernel time.
+The column-sum kernel used for gradient accumulation took 26.2%.
+
+The six outputs of the backward also matched the baseline byte for byte
+on 300 combinations of shape, precision, packing and decay pattern, with
+two input tapes per combination. These include head widths from 1 to 256,
+partial tiles, sequences of 1 to 390 tokens and packed resets. The
+following test compares the tagged gradients to the separate warp kernel
+on packed and unpacked partial chunks.
+
+```sh
+cargo test --release --features cuda --test m3_dqkv_tiled_parity
+```
+
+The frozen forward fixture checks all six intermediate tensors on a
+resolvable prefix, including a −160 transition and a synthetic positive
+last step for the clamp. Its reference predates the tagged tape. A
+separate impulse test uses the recurrence to check the tagged case. A
+unit input followed by two local log decays of `s` contributes
+`exp(2s)` to the chunk exit. Both fused and sliced passes run that check
+in f32, bf16 and f16.
+
 ## 0.8.4 against 0.8.3, RTX 6000 Ada
 
 Measured on November 11, 2026 on an RTX 6000 Ada Generation (142 SMs, 300 W

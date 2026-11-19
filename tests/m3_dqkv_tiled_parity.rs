@@ -20,7 +20,7 @@ use cudarc::driver::sys::CUdeviceptr;
 use cudarc::driver::sys::CUfunction_attribute_enum as CUfunction_attribute;
 use cudarc::driver::{CudaFunction, LaunchConfig, PushKernelArg};
 use frozen_kernels::frozen_module;
-use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer};
+use mamba_rs::gpu::buffers::{DtypedBuf, GpuBuffer, GpuByteBuffer};
 use mamba_rs::gpu::context::GpuCtx;
 use mamba_rs::gpu::device::GpuDevice;
 use mamba_rs::gpu::dtype::WeightDtype;
@@ -134,6 +134,7 @@ struct Inputs {
     qk: GpuBuffer,
     states: GpuBuffer,
     d_param: GpuBuffer,
+    packing: Option<GpuByteBuffer>,
 }
 
 impl Inputs {
@@ -165,6 +166,7 @@ impl Inputs {
             qk: upload(ctx, &det(B * s.t * NH, seed ^ 0x55, 1.0)),
             states: upload(ctx, &det(B * nc * NH * s.hd * s.ds, seed ^ 0x66, 1.0)),
             d_param: upload(ctx, &[0.5, -0.25]),
+            packing: None,
         }
     }
 }
@@ -370,8 +372,8 @@ fn dqkv_warp(
         b.arg(&pairs_i);
         b.arg(&y_first);
         b.arg(&z_first);
-        // No packing: the rows hold one sequence each.
-        b.arg(&0u64);
+        let ids = inp.packing.as_ref().map_or(0, GpuByteBuffer::cached_ptr);
+        b.arg(&ids);
         unsafe { b.launch(cfg) }.unwrap();
     }
     out
@@ -456,7 +458,8 @@ fn dqkv_stage(
         }
         b.arg(&y_first);
         b.arg(&z_first);
-        b.arg(&0u64);
+        let ids = inp.packing.as_ref().map_or(0, GpuByteBuffer::cached_ptr);
+        b.arg(&ids);
         unsafe { b.launch(cfg) }.unwrap();
     }
     out
@@ -521,6 +524,7 @@ fn a_partial_tile_keeps_decay_gradients_on_their_own_token_and_channel() {
             qk: upload(&ctx, &vec![0.0; components]),
             states: upload(&ctx, &states),
             d_param: upload(&ctx, &[0.0; NH]),
+            packing: None,
         };
         let terminal = GpuBuffer::zeros(&ctx.stream, states.len()).unwrap();
         download(
@@ -579,6 +583,7 @@ fn a_large_later_pair_leaves_earlier_decay_gradients_intact() {
             da_cs_sum: upload(&ctx, &ends),
             qk: upload(&ctx, &vec![0.0; steps]),
             d_param: upload(&ctx, &[0.0; NH]),
+            packing: None,
             states: GpuBuffer::zeros(&ctx.stream, B * NH * s.hd * s.ds).unwrap(),
         };
         let terminal = GpuBuffer::zeros(&ctx.stream, B * NH * s.hd * s.ds).unwrap();
@@ -591,6 +596,81 @@ fn a_large_later_pair_leaves_earlier_decay_gradients_intact() {
         expected[3 * NH] = 67108864.0;
         expected[4 * NH] = 1.0;
         assert_eq!(got, expected, "hard transition {hard_transition}");
+    }
+}
+
+/// Make the prefix tape as the forward saves it, including restarts at packed boundaries.
+fn tagged_inputs(ctx: &GpuCtx, shape: Shape, dtype: WeightDtype, packed: bool) -> Inputs {
+    let mut inputs = Inputs::new(ctx, shape, dtype);
+    let nc = shape.nc();
+    let rows = B * nc * NH;
+    let midpoint = shape.t.div_ceil(2);
+    let ids: Vec<i32> = (0..B * shape.t)
+        .map(|i| if i % shape.t < midpoint { 0 } else { i32::MAX })
+        .collect();
+    if packed {
+        let bytes = bytemuck::cast_slice(&ids);
+        let mut buffer = GpuByteBuffer::zeros(&ctx.stream, bytes.len()).unwrap();
+        buffer.upload_bytes(&ctx.stream, bytes).unwrap();
+        inputs.packing = Some(buffer);
+    }
+    let tag_scale = 2.0f32.powi(118);
+    let mut tape = vec![0.0; rows * CS];
+    let mut ends = Vec::with_capacity(rows);
+    for (row, chunk) in tape.as_chunks_mut::<CS>().0.iter_mut().enumerate() {
+        let offset = (row / NH % nc) * CS;
+        let len = CS.min(shape.t - offset);
+        let split = if packed {
+            midpoint.saturating_sub(offset).min(len)
+        } else {
+            len
+        };
+        for (start, end) in [(0, split), (split, len)] {
+            // Include a hard first transition, an interior one and a packed
+            // suffix with ordinary decays after an earlier tagged sequence.
+            let cut = match (row % 2, start) {
+                (0, _) => 0,
+                (_, 0) => (end - start) / 2,
+                _ => end - start,
+            };
+            for (i, word) in chunk[start..end].iter_mut().enumerate() {
+                *word = if i < cut {
+                    -0.125 * (i + 1) as f32
+                } else if i == cut {
+                    -128.0 * tag_scale
+                } else if i % 3 == 0 {
+                    -1024.0 // a zero log step in the tagged part of the tape
+                } else {
+                    -0.125 * tag_scale
+                };
+            }
+        }
+        ends.push(chunk[len - 1]);
+    }
+    inputs.da_cs = upload(ctx, &tape);
+    inputs.da_cs_sum = upload(ctx, &ends);
+    inputs
+}
+
+#[test]
+fn tagged_decays_keep_the_warp_gradients_across_partial_chunks() {
+    let (ctx, kernels) = setup();
+    for (hd, ds, t) in [(4, 17, 1), (16, 7, 35), (32, 24, CS + 3)] {
+        let shape = Shape { hd, ds, t };
+        let enter = upload(&ctx, &det(B * shape.nc() * NH * hd * ds, 197, 0.5));
+        for dtype in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
+            for packed in [false, true] {
+                let inputs = tagged_inputs(&ctx, shape, dtype, packed);
+                let want =
+                    dqkv_warp(&ctx, &kernels, dtype, (shape, false), &inputs, &enter).read(&ctx);
+                let got = dqkv_tiled(&ctx, &kernels, dtype, shape, &inputs, &enter).read(&ctx);
+                for ((name, want), (_, got)) in want.iter().zip(&got) {
+                    let label = format!("{shape:?} {dtype:?} packed {packed} {name}");
+                    assert!(want.iter().all(|x| x.is_finite()), "{label}");
+                    assert_bits(&label, want, got);
+                }
+            }
+        }
     }
 }
 

@@ -1447,16 +1447,15 @@ __device__ __forceinline__ void m3r_zero(float (&acc)[4][4]) {
 }
 
 // A step's chain over the columns of a block, carried in `cv` (a value for
-// each of the thread's four steps), handed across the sixteen threads that
-// hold the step: thread tx adds its columns' terms x[i][j] * y[i][j], j
-// ascending, in turn, and every thread reads the chain back from the one
-// whose turn it was. Columns past `width` and steps past `len` add nothing.
+// each of the thread's four steps). Each owner adds up to four columns in
+// order and broadcasts the new sum to the whole half-warp. The last owner
+// of a partial tile already leaves the same sum in every lane.
 __device__ __forceinline__ void m3r_row_chain(
     float (&cv)[4], const float (&x)[4][4], const float (&y)[4][4], int ty, int tx, int len,
     int width
 ) {
     const int base = threadIdx.x & 16;
-    for (int step = 0; step < 16; step++) {
+    for (int step = 0; step < (width + 3) / 4; step++) {
         if (tx == step) {
 #pragma unroll
             for (int i = 0; i < 4; i++) {
@@ -1513,6 +1512,11 @@ extern "C" __global__ __launch_bounds__(256, 2) void NAME(                     \
     const float D_val = D_param[h];                                            \
     const float cs_sum = DA_CS_SUM[cidx];                                      \
     const int last_start = vl_seq_first(seq_idx, b, T, chunk_start, chunk_start + len - 1) - chunk_start;                                      \
+    /* The last column supplies the exit decays when the caller gives the */     \
+    /* same tagged endpoint for the tape and its total. */                       \
+    const bool tagged_exit = cs_sum <= -1024.0f &&                               \
+        cs_sum == DA_CS[cidx * CS + len - 1];                                    \
+    const bool repair_decay = !(cs_sum > -1024.0f) || seq_idx != nullptr;        \
     const int tri_n = CS * (CS - 1) / 2;                                       \
     const int ty = tid >> 4;                                                   \
     const int tx = tid & 15;                                                   \
@@ -1546,7 +1550,9 @@ extern "C" __global__ __launch_bounds__(256, 2) void NAME(                     \
         da_sm[t] = da;                                                         \
         qk_sm[t] = qk;                                                         \
         ef_sm[t] = exp2f(da * LOG2E);                                          \
-        er_sm[t] = (t < len && t >= last_start ? exp2f(chunk_decay_interval(DA_CS + cidx * CS + t, 1, len - 1 - t, da, cs_sum) * LOG2E) : 0.0f);                               \
+        er_sm[t] = !tagged_exit && t < len && t >= last_start                    \
+            ? exp2f(chunk_decay_interval(DA_CS + cidx * CS + t, 1,               \
+                    len - 1 - t, da, cs_sum) * LOG2E) : 0.0f;                    \
     }                                                                          \
     /* The sequence spans of the thread's four steps in a packed row. */       \
     VlSpan span[4];                                                            \
@@ -1603,16 +1609,15 @@ extern "C" __global__ __launch_bounds__(256, 2) void NAME(                     \
                         const int idx = m3t_tri(pa, pb, CS);                   \
                         kq_tri[idx] = kq[i][j];                                \
                         vdo_tri[idx] = vdo[i][j];                              \
-                        dec_tri[idx] = exp2f((da_sm[pb] - da_sm[pa]) * LOG2E); \
+                        if (!repair_decay || !(da_sm[pb] <= -1024.0f))           \
+                            dec_tri[idx] = exp2f((da_sm[pb] - da_sm[pa]) * LOG2E); \
                     }                                                          \
                 }                                                              \
             }                                                                  \
         }                                                                      \
     }                                                                          \
-    if (!(cs_sum > -1024.0f) || seq_idx != nullptr) { \
-        __syncthreads(); \
-        if (tid < len && da_sm[tid] <= -1024.0f) m3r_tagged_row(dec_tri, da_sm, tid, CS); \
-    } \
+    if (repair_decay && tid < len && da_sm[tid] <= -1024.0f)                     \
+        m3r_tagged_row(dec_tri, da_sm, tid, CS);                                 \
     /* 2. dQK_dot. A warp takes a step, and lane l holds channel l of */       \
     /* each 32-channel segment. A head under a warp starts its tree at its */  \
     /* power of two, as the warp kernel's width-hd tree does. Lanes past */    \
@@ -1643,6 +1648,9 @@ extern "C" __global__ __launch_bounds__(256, 2) void NAME(                     \
     }                                                                          \
     __syncthreads();                                                           \
                                                                                \
+    if (tagged_exit && tid >= last_start && tid < len) {                         \
+        er_sm[tid] = tid + 1 == len ? 1.0f : dec_tri[m3t_tri(tid, len - 1, CS)]; \
+    }                                                                            \
     /* 3. Per block of 64 channels. */                                        \
     for (int p0 = 0; p0 < hd; p0 += 64) {                                      \
         const int pw = min(64, hd - p0);                                       \
@@ -1881,6 +1889,12 @@ extern "C" __global__ __launch_bounds__(256, 2) void NAME(                     \
     }                                                                          \
     /* A chunk-wide bound certifies every dense endpoint before the serial fold. */ \
     if (tid < 64) { \
+        /* A hard transition at the first token still leaves one span. */        \
+        if (seq_idx == nullptr && !(cs_sum > -104.0f)) {                         \
+            const bool cut = tid > 0 && tid < len && chunk_decay_cuts(da_sm, tid, 0);\
+            const unsigned split = __ballot_sync(0xffffffffu, cut);              \
+            if ((tid & 31) == 0) ta[4 + (tid >> 5)] = split != 0;                \
+        }                                                                        \
         float peak = endpoint_mag; \
         float least = endpoint_mag > 0.0f ? endpoint_mag : 0x1.fffffep127f; \
         for (int off = 16; off; off >>= 1) { \
@@ -1896,7 +1910,8 @@ extern "C" __global__ __launch_bounds__(256, 2) void NAME(                     \
         /* A packed row combines each of its sequences in the chunk on */      \
         /* its own, as m3_dqkv does. */                                        \
         const bool passes = vl_passes(seq_idx, b, T, chunk_start, len);        \
-        const bool ordinary = seq_idx == nullptr && cs_sum > -104.0f && \
+        const bool ordinary = seq_idx == nullptr &&                              \
+            (cs_sum > -104.0f || (ta[4] == 0 && ta[5] == 0)) &&                  \
             fminf(ta[2], ta[3]) > fmaxf(ta[0], ta[1]) * 0x1p-23f; \
         if (ordinary) { \
             float total_rev = 0.0f; \
@@ -1905,7 +1920,9 @@ extern "C" __global__ __launch_bounds__(256, 2) void NAME(                     \
             float cumsum = 0.0f; \
             for (int t = 0; t < len; ++t) { \
                 cumsum += dmvec_sm[t] - dmrev_sm[t]; \
-                dADT[(row0 + t) * nh_total + h] = dmrev_sm[t] + (total_rev + cumsum - dmvec_sm[t]); \
+                const float out = dmrev_sm[t] + (total_rev + cumsum - dmvec_sm[t]);\
+                const bool cut = t == 0 && !(cs_sum > -104.0f) && chunk_decay_cuts(da_sm, 0, 0);\
+                dADT[(row0 + t) * nh_total + h] = cut && isfinite(out) ? 0.0f : out; \
             } \
         } else for (int a = 0; a < len;) {                                            \
             const VlSpan span = vl_span(seq_idx, b, T, chunk_start, len, a); \
