@@ -260,7 +260,9 @@ fn the_pre_state_arms_write_the_frozen_trio_bits() {
                     for h in 0..nh {
                         let chunk_len = cs.min(t - chunk * cs);
                         for tl in 0..chunk_len {
-                            let mut a = -(0.01 + 0.003 * ((tl + 3 * h + b + 5 * chunk) % 7) as f32);
+                            // The frozen trio stores ordinary prefixes. A quarter-log
+                            // step stays resolvable on either side of the drop.
+                            let mut a = -(0.25 + 0.003 * ((tl + 3 * h + b + 5 * chunk) % 7) as f32);
                             // Earlier steps underflow after the midpoint drop;
                             // later steps still have ordinary decay.
                             if chunk_len >= 4 && tl == chunk_len / 2 {
@@ -269,7 +271,7 @@ fn the_pre_state_arms_write_the_frozen_trio_bits() {
                             // A rising last step makes the endpoint difference
                             // positive, exercising the cap at zero.
                             if chunk_len >= 3 && tl == chunk_len - 1 {
-                                a = 0.125;
+                                a = 0.25;
                             }
                             adt_vals[(b * t + chunk * cs + tl) * nh + h] = a;
                         }
@@ -870,13 +872,30 @@ fn the_cooperative_scan_keeps_its_48_kb_shapes() {
 fn an_earlier_large_decay_preserves_the_later_impulse() {
     let ctx = GpuCtx::new(&GpuDevice::new(0).unwrap()).unwrap();
     let kernels = make_m3k(&ctx);
+    for dtype in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
+        for (hard, local) in [
+            (-2.0_f32.powi(100), -std::f32::consts::LN_2),
+            (-160.0, -0.015625),
+        ] {
+            check_later_impulse(&ctx, &kernels, dtype, hard, local);
+        }
+    }
+}
+
+fn check_later_impulse(
+    ctx: &GpuCtx,
+    kernels: &Mamba3Kernels,
+    dtype: WeightDtype,
+    hard: f32,
+    local: f32,
+) {
     let (rows, chunk, hd, ds) = (65usize, 64usize, 16usize, 16usize);
     let dims = [1, rows, 1, hd, ds, chunk].map(|x| x as i32);
-    let mut logs = vec![-std::f32::consts::LN_2; rows];
-    logs[0] = -2.0_f32.powi(100);
+    let mut logs = vec![local; rows];
+    logs[0] = hard;
     logs[32] = logs[0];
-    let adt = upload_f32(&ctx, &logs);
-    let ones = upload_f32(&ctx, &vec![1.0; rows]);
+    let adt = upload_f32(ctx, &logs);
+    let ones = upload_f32(ctx, &vec![1.0; rows]);
     let mut k = vec![0.0; rows * ds];
     let mut q = k.clone();
     let mut x = vec![0.0; rows * hd];
@@ -886,15 +905,15 @@ fn an_earlier_large_decay_preserves_the_later_impulse() {
     q[62 * ds] = 1.0;
     q[64 * ds] = 1.0;
     let (k, q, x) = (
-        upload_f32(&ctx, &k),
-        upload_f32(&ctx, &q),
-        upload_f32(&ctx, &x),
+        upload_typed(ctx, &k, dtype),
+        upload_typed(ctx, &q, dtype),
+        upload_typed(ctx, &x, dtype),
     );
-    let ks = GpuBuffer::zeros(&ctx.stream, rows * ds).unwrap();
+    let ks = DtypedBuf::zeros(&ctx.stream, rows * ds, dtype).unwrap();
     let qk = GpuBuffer::zeros(&ctx.stream, rows).unwrap();
     let tape = GpuBuffer::zeros(&ctx.stream, 2 * chunk).unwrap();
-    let state = GpuBuffer::zeros(&ctx.stream, 2 * hd * ds).unwrap();
-    let skip = upload_f32(&ctx, &[0.0]);
+    let mut state = GpuBuffer::zeros(&ctx.stream, 2 * hd * ds).unwrap();
+    let skip = upload_f32(ctx, &[0.0]);
     let launch = |kernel: &CudaFunction, cfg, ptrs: &[u64]| {
         for (first, cfg) in y_runs(cfg) {
             let mut call = ctx.stream.launch_builder(kernel);
@@ -924,14 +943,30 @@ fn an_earlier_large_decay_preserves_the_later_impulse() {
         adt.cached_ptr(),
         tape.cached_ptr(),
     ];
-    launch(
-        &kernels.m3_chunk_pre_state_sliced_typed.i32.f32,
-        chunk_pre_state_sliced_cfg(1, 2, 1, hd),
-        &pres,
-    );
-    let exit = download_f32(&ctx, &state, 2 * hd * ds);
-    assert!((exit[0] - 0.25).abs() < 1e-6, "chunk exit {}", exit[0]);
-    let entering = upload_f32(&ctx, &vec![1.0; hd * ds]);
+    for (kernel, cfg) in [
+        (
+            kernels.m3_chunk_pre_state_fused_typed.i32.get(dtype),
+            chunk_fused_cfg(1, 2, 1, hd, ds, chunk, kernels.smem_optin).unwrap(),
+        ),
+        (
+            kernels.m3_chunk_pre_state_sliced_typed.i32.get(dtype),
+            chunk_pre_state_sliced_cfg(1, 2, 1, hd),
+        ),
+    ] {
+        state
+            .upload(&ctx.stream, &vec![f32::NAN; 2 * hd * ds])
+            .unwrap();
+        launch(kernel, cfg, &pres);
+        let exit = download_f32(ctx, &state, 2 * hd * ds);
+        let expected = (2.0 * local).exp();
+        assert!(
+            (exit[0] - expected).abs() < 1e-6,
+            "{dtype:?} {hard} exit {}",
+            exit[0]
+        );
+        assert!(exit[1..].iter().all(|v| *v == 0.0));
+    }
+    let entering = upload_f32(ctx, &vec![1.0; hd * ds]);
     let prev_k = GpuBuffer::zeros(&ctx.stream, ds).unwrap();
     let prev_v = GpuBuffer::zeros(&ctx.stream, hd).unwrap();
     let ptrs = [
@@ -951,7 +986,7 @@ fn an_earlier_large_decay_preserves_the_later_impulse() {
     for (first, cfg) in y_runs(state_pass_fused_cfg(1, 1, hd, ds)) {
         let mut call = ctx
             .stream
-            .launch_builder(&kernels.m3_state_pass_fused_typed.i32.f32);
+            .launch_builder(kernels.m3_state_pass_fused_typed.i32.get(dtype));
         for ptr in &ptrs {
             call.arg(ptr);
         }
@@ -971,7 +1006,7 @@ fn an_earlier_large_decay_preserves_the_later_impulse() {
         call.arg(&0u64);
         unsafe { call.launch(cfg) }.unwrap();
     }
-    let y = GpuBuffer::zeros(&ctx.stream, rows * hd).unwrap();
+    let y = DtypedBuf::zeros(&ctx.stream, rows * hd, dtype).unwrap();
     let ptrs = [
         y.cached_ptr(),
         x.cached_ptr(),
@@ -983,20 +1018,21 @@ fn an_earlier_large_decay_preserves_the_later_impulse() {
         skip.cached_ptr(),
     ];
     launch(
-        &kernels.m3_chunk_scan_fwd_sliced_typed.i32.f32,
+        kernels.m3_chunk_scan_fwd_sliced_typed.i32.get(dtype),
         chunk_scan_sliced_cfg(1, 2, 1, hd),
         &ptrs,
     );
-    let y = download_f32(&ctx, &y, rows * hd);
+    let y = download_typed(ctx, &y);
+    // The impulse on token 61 experiences one local decay at 62 and three
+    // at 64. Only the output activation is rounded to the storage type.
+    let expected = [local.exp(), (3.0 * local).exp()];
+    let expected = download_typed(ctx, &upload_typed(ctx, &expected, dtype));
     assert_eq!(y[0], 0.0);
-    assert!(
-        (y[62 * hd] - 0.5).abs() < 1e-6,
-        "within chunk {}",
-        y[62 * hd]
-    );
-    assert!(
-        (y[64 * hd] - 0.125).abs() < 1e-6,
-        "next chunk {}",
-        y[64 * hd]
-    );
+    for (token, want) in [62, 64].into_iter().zip(expected) {
+        assert!(
+            (y[token * hd] - want).abs() < 1e-6,
+            "{dtype:?} {hard} token {token}: {} vs {want}",
+            y[token * hd]
+        );
+    }
 }
